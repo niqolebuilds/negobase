@@ -104,9 +104,8 @@ async function ngList() {
     box);
 
   tools.append(viewSwitcher);
-  if (isAdmin()) {
-    tools.append(act("Add principal", () => principalForm()), act("Import principals", importPrincipals, "secondary"));
-  }
+  // Adding and importing principals lives in Admin → Principals; starting a negotiation stays here.
+  if (isAdmin()) tools.append(el("a", { class: "act ghost", href: "#admin/principals", text: "Manage principals in Admin →" }));
   box.append(el("p", { class: "muted pad", text: "Loading…" }));
   let d;
   try { d = ng.list = await api("/api/nego/principals"); } catch (e) { clear(box).append(el("p", { class: "error pad", text: e.message })); return; }
@@ -148,8 +147,8 @@ async function ngList() {
   if (!ps.length) {
     clear(box).append(el("div", { class: "empty-state" },
       el("h3", { text: "No principals yet" }),
-      el("p", { class: "muted", text: isAdmin() ? "Add principals one by one, import a list, or load the fictional sample to try the workflow." : "An admin adds principals and opens negotiations." }),
-      isAdmin() ? el("div", { class: "actions" }, act("Load sample principals", loadSample), act("Import principals", importPrincipals, "secondary")) : null));
+      el("p", { class: "muted", text: isAdmin() ? "Add or import principals in Admin → Principals, or load the fictional sample to try the workflow." : "An admin adds principals in Admin. You open the negotiations here." }),
+      isAdmin() ? el("div", { class: "actions" }, act("Load sample principals", loadSample), el("a", { class: "act secondary", href: "#admin/principals", text: "Go to Admin → Principals" })) : null));
     return;
   }
 
@@ -194,7 +193,7 @@ async function ngList() {
     table(t, colsDef.map((c) => ({
       ...c,
       label: `${c.label} ${pSortCol === c.id ? (pSortDir === "asc" ? "▲" : "▼") : ""}`,
-    })), rows, (p) => { if (p.cycle) location.hash = `#nego/${p.cycle.id}`; else if (isAdmin()) startCycleForm(p); else principalInfo(p); });
+    })), rows, (p) => { if (p.cycle) location.hash = `#nego/${p.cycle.id}`; else if (canWork()) startCycleForm(p); else principalInfo(p); });
 
     const ths = t.querySelectorAll("th");
     colsDef.forEach((c, idx) => {
@@ -261,7 +260,7 @@ function renderNegoBoard(container, ps, d) {
         );
         card.addEventListener("click", () => {
           if (p.cycle) location.hash = `#nego/${p.cycle.id}`;
-          else if (isAdmin()) startCycleForm(p);
+          else if (canWork()) startCycleForm(p);
           else principalInfo(p);
         });
         cardList.append(card);
@@ -285,7 +284,7 @@ function mouCell(p) {
 
 function cycleCell(p) {
   const c = p.cycle;
-  if (!c) return isAdmin() ? el("button", { type: "button", class: "act small-btn", text: "Start negotiation", onclick: (e) => { e.stopPropagation(); startCycleForm(p); } }) : el("span", { class: "muted", text: "Not started" });
+  if (!c) return canWork() ? el("button", { type: "button", class: "act small-btn", text: "Start negotiation", onclick: (e) => { e.stopPropagation(); startCycleForm(p); } }) : el("span", { class: "muted", text: "Not started" });
   const keys = ng.list.steps.map((s) => s.key);
   const at = keys.indexOf(c.current_step);
   return el("div", { class: "cyc" },
@@ -300,7 +299,7 @@ function cycleCell(p) {
 
 function principalInfo(p) {
   openPanel(el("p", { class: "eyebrow", text: "Principal" }), el("h2", { id: "drawer-title", text: p.name }),
-    el("p", { class: "muted", text: "No negotiation yet. An admin starts one from this list." }));
+    el("p", { class: "muted", text: "No negotiation yet. The Siloam negotiation team starts one from this list." }));
 }
 
 function openPanel(...kids) {
@@ -317,47 +316,73 @@ function field(label, input, hint) {
   return el("label", {}, label, input, hint ? el("span", { class: "hint", text: hint }) : null);
 }
 
+// After a principal changes, refresh whichever page the form was opened from.
+function afterPrincipalChange() {
+  if (location.hash.startsWith("#admin")) { if (typeof adminEnter === "function") adminEnter(adminState.sub); return; }
+  if (ng.cid) ngCycle(ng.cid, ng.tab); else ngList();
+}
+
 function principalForm(p = null) {
   const v = p || {};
   const inp = (name, attrs = {}) => el("input", { name, value: v[name] || null, ...attrs });
-  
+
   const binding = el("select", { name: "binding" },
-    [["Nett", "Nett Price bound"], ["Disc", "Discount (% off HNA)"], ["Nett to Disc", "Nett to Disc (Binding: HNA Form / Disc)"]].map(([b, l]) =>
-      el("option", { value: b, text: l })
-    )
-  );
+    [["Nett", "Nett price (HNA after discount)"], ["Disc", "Discount (% off HNA)"], ["Nett to Disc", "Nett to Disc (formulary HNA × (1 − disc))"]].map(([b, l]) => el("option", { value: b, text: l })));
   binding.value = v.binding || "Nett";
 
-  const catSelect = el("select", { name: "category" },
-    ["Drugs", "CnC", "Drugs & CnC", "Reagents", "Medical Equipment", "Other"].map(c => el("option", { value: c, text: c }))
-  );
-  catSelect.value = v.category || "Drugs";
+  // Category: Drugs, CnC, or both.
+  const has = (c) => String(v.category || "").includes(c);
+  const catBoxes = ["Drugs", "CnC"].map((c) => {
+    const box = el("input", { type: "checkbox", name: "cat", value: c });
+    box.checked = p ? has(c) : c === "Drugs";
+    return box;
+  });
+  const catField = el("fieldset", { class: "cat-field" }, el("legend", { text: "Category" }),
+    el("div", { class: "check-row" }, catBoxes.map((b) => el("label", { class: "check" }, b, b.value))),
+    el("span", { class: "hint", text: "Pick Drugs, CnC, or both." }));
 
-  const negoType = el("select", { name: "nego_type" },
-    ["Renewal", "New Vendor", "Addendum", "Force Majeure"].map(t => el("option", { value: t, text: t }))
-  );
+  const negoType = el("select", { name: "nego_type" }, ["Renewal", "New Vendor", "Addendum", "Force Majeure"].map((t) => el("option", { value: t, text: t })));
   negoType.value = v.nego_type || "Renewal";
+
+  const mouStart = inp("mou_start", { type: "date" });
+  const mouEnd = inp("mou_end", { type: "date" });
+  const mouRow = el("div", { class: "row2" }, field("Current MOU start", mouStart), field("Current MOU end", mouEnd, "Drives the 6-month alert"));
+  const syncType = () => {
+    const nv = negoType.value === "New Vendor";
+    mouRow.hidden = nv; // a new vendor has no current MOU
+    mouEnd.required = !nv;
+  };
+  negoType.addEventListener("change", syncType);
+
+  const items = el("textarea", { name: "item_codes", rows: "2", placeholder: "MED000100; MED000101 (optional)" });
+  items.value = (v.item_codes || []).join("; ");
 
   const msg = el("p", { class: "error", role: "alert", hidden: "" });
   const form = el("form", { class: "progress-form" },
     field("Principal name", inp("name", { required: "" })),
-    field("Distributor (optional)", inp("distributor", { placeholder: "Leave blank if direct to principal" })),
-    el("div", { class: "row2" }, field("Category", catSelect), field("Negotiation Type", negoType)),
-    field("Binding", binding, "Nett to Disc binds final price/pc to formulary HNA and agreed discount"),
-    el("div", { class: "row2" }, field("Current MOU start", inp("mou_start", { type: "date" })), field("Current MOU end", inp("mou_end", { type: "date" }), "Drives the 6-month alert")),
+    field("Distributor (optional)", inp("distributor", { placeholder: "Optional. It can change and there can be several" })),
+    el("div", { class: "row2" }, catField, field("Negotiation type", negoType)),
+    field("Binding", binding, "Nett to Disc: final price/pc = formulary HNA ÷ conversion × (1 − final disc) × 1,11 (PO HNA when the formulary has none)"),
+    mouRow,
+    field("Items (ERP codes, optional)", items, "Tags these items to the principal. Separate with ; or commas."),
     field("Contact person (PIC)", inp("contact_name")),
     el("div", { class: "row2" }, field("Contact email", inp("contact_email", { type: "email" })), field("WhatsApp", inp("contact_phone", { placeholder: "+62 …" }))),
-    field("Notes / Keterangan (optional)", inp("notes", { placeholder: "Specific conditions, distributor terms, etc." })),
+    field("Notes (optional)", inp("notes", { placeholder: "Specific conditions, distributor terms, etc." })),
     msg,
     el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: p ? "Save" : "Add principal" })));
+  syncType();
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    body.category = catBoxes.filter((b) => b.checked).map((b) => b.value);
+    delete body.cat;
+    if (!body.category.length) { msg.textContent = "Pick Drugs, CnC, or both."; msg.hidden = false; return; }
+    if (body.nego_type === "New Vendor") { body.mou_start = ""; body.mou_end = ""; }
     try {
       const saved = p ? await send(`/api/admin/nego/principals/${p.id}`, "PATCH", body) : await send("/api/admin/nego/principals", "POST", body);
       closeDrawer();
       toast(p ? "Saved" : `${saved.name} added`);
-      if (ng.cid) ngCycle(ng.cid, ng.tab); else ngList();
+      afterPrincipalChange();
     } catch (ex) { msg.textContent = ex.message; msg.hidden = false; }
   });
   openPanel(el("p", { class: "eyebrow", text: p ? "Edit principal" : "New principal" }), el("h2", { id: "drawer-title", text: p ? p.name : "Add a principal" }), form);
@@ -367,25 +392,26 @@ function importPrincipals() {
   const file = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "file" });
   const out = el("div", { role: "status" });
   const form = el("form", { class: "upload-form" },
-    el("div", { style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;" },
-      el("span", { class: "small muted", text: "Upload CSV or Excel with principal details." }),
-      el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "Download CSV Template ⤓" })
-    ),
-    el("p", { class: "muted small", text: "Principal name is required. Distributor, category (Drugs/CnC), nego type, binding (Nett/Disc/Nett to Disc), MOU dates, and contact details are automatically mapped." }),
-    dropZone(file, "Choose the principals list"),
+    el("p", { class: "small" }, "Use the template. Same fields as Add principal: principal, distributor (optional), category, negotiation type, binding, items, current MOU period and contact."),
+    el("div", { class: "actions" },
+      el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.xlsx", text: "Download Excel template ⤓" }),
+      el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "Download CSV template ⤓" })),
+    el("p", { class: "muted small", text: "Principals with the same name are updated. Rows with a problem are skipped and listed below; the rest are saved." }),
+    dropZone(file, "Choose the filled template"),
     el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Import" })), out);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!file.files.length) { clear(out).append(el("p", { class: "error", text: "Choose a file first." })); return; }
     const fd = new FormData(); fd.append("file", file.files[0]);
+    clear(out).append(el("p", { class: "muted", text: "Importing…" }));
     try {
       const r = await upload("/api/admin/nego/principals/import", fd);
-      clear(out).append(el("p", { class: "good-text", text: `${r.added} added, ${r.updated} updated.` }),
+      clear(out).append(el("p", { class: r.errors.length ? "warn-text" : "good-text", text: `${r.added} added, ${r.updated} updated${r.errors.length ? `, ${r.errors.length} skipped` : ""}.` }),
         r.errors.length ? el("ul", { class: "errors" }, r.errors.map((x) => el("li", { text: x }))) : null);
-      ngList();
+      afterPrincipalChange();
     } catch (ex) { clear(out).append(el("p", { class: "error", text: ex.message })); }
   });
-  openPanel(el("p", { class: "eyebrow", text: "Principals" }), el("h2", { id: "drawer-title", text: "Import a list" }), form);
+  openPanel(el("p", { class: "eyebrow", text: "Principals" }), el("h2", { id: "drawer-title", text: "Import principals" }), form);
 }
 
 async function loadSample() {
@@ -404,20 +430,24 @@ function addYears(iso, n) { const d = utc(iso); d.setUTCFullYear(d.getUTCFullYea
 function nextDay(iso) { const d = utc(iso); d.setUTCDate(d.getUTCDate() + 1); return isoOf(d); }
 
 function startCycleForm(p) {
-  const start0 = p.mou_end ? nextDay(p.mou_end) : new Date().toISOString().slice(0, 10);
-  const start = el("input", { type: "date", name: "contract_start", value: start0, required: "" });
-  const end = el("input", { type: "date", name: "contract_end", value: addYears(start0, 3), required: "" });
-  start.addEventListener("change", () => { if (start.value) end.value = addYears(start.value, 3); });
-  const binding = el("select", { name: "binding" }, ["Nett", "Disc"].map((b) => el("option", { value: b, text: b === "Nett" ? "Nett price (HNA after discount)" : "Discount (% off HNA)" })));
+  // A renewal starts the day after the current MOU ends. With no MOU end (a new vendor) nothing is
+  // filled in: the negotiator enters both dates.
+  const hasMou = !!p.mou_end && p.nego_type !== "New Vendor";
+  const start0 = hasMou ? nextDay(p.mou_end) : "";
+  const start = el("input", { type: "date", name: "contract_start", value: start0 || null, required: "" });
+  const end = el("input", { type: "date", name: "contract_end", value: start0 ? addYears(start0, 3) : null, required: "" });
+  start.addEventListener("change", () => { if (start.value && hasMou) end.value = addYears(start.value, 3); });
+  const binding = el("select", { name: "binding" }, [["Nett", "Nett price (HNA after discount)"], ["Disc", "Discount (% off HNA)"], ["Nett to Disc", "Nett to Disc (formulary HNA × (1 − disc))"]].map(([b, l]) => el("option", { value: b, text: l })));
   binding.value = p.binding || "Nett";
   const fee = el("input", { name: "delivery_fee", value: "Free for all Siloam Hospitals units" });
   const msg = el("p", { class: "error", role: "alert", hidden: "" });
   const form = el("form", { class: "progress-form" },
-    el("div", { class: "row2" }, field("New contract starts", start), field("New contract ends", end)),
+    el("div", { class: "row2" }, field("New contract starts", start, hasMou ? null : "Required: enter the date"), field("New contract ends", end, hasMou ? "Three years from the start; change if needed" : "Required: enter the date")),
     field("Binding", binding), field("Delivery fee", fee), msg,
-    el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Open negotiation" }), act("Edit principal", () => principalForm(p), "ghost")));
+    el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Open negotiation" }), isAdmin() ? act("Edit principal", () => principalForm(p), "ghost") : null));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (!start.value || !end.value) { msg.textContent = "Enter the new contract start and end dates."; msg.hidden = false; return; }
     try {
       const c = await send("/api/admin/nego/cycles", "POST", { principal_id: p.id, ...Object.fromEntries(new FormData(form).entries()) });
       closeDrawer();
@@ -425,8 +455,8 @@ function startCycleForm(p) {
       location.hash = `#nego/${c.id}/files`;
     } catch (ex) { msg.textContent = ex.message; msg.hidden = false; }
   });
-  openPanel(el("p", { class: "eyebrow", text: "Start negotiation" }), el("h2", { id: "drawer-title", text: p.name }),
-    el("p", { class: "muted", text: p.mou_end ? `Current MOU ends ${fmtDate(p.mou_end)}.` : "No MOU end date on file." }), form);
+  openPanel(el("p", { class: "eyebrow", text: `Start negotiation · ${p.nego_type || "Renewal"}` }), el("h2", { id: "drawer-title", text: p.name }),
+    el("p", { class: "muted", text: hasMou ? `Current MOU ends ${fmtDate(p.mou_end)}.` : p.nego_type === "New Vendor" ? "New vendor: there is no current MOU." : "No MOU end date on file." }), form);
 }
 
 // ---------- one cycle ----------
@@ -459,7 +489,7 @@ function renderCycle() {
       el("div", {},
         el("p", { class: "eyebrow", text: c.principal.distributor ? `Distributor: ${c.principal.distributor}` : "Principal" }),
         el("h1", { text: c.principal.name }),
-        el("p", { class: "muted", text: `Contract ${fmtDate(c.contract_start)} – ${fmtDate(c.contract_end)} · Binding ${c.binding === "Disc" ? "discount" : "nett price"} · PPN ${pct(ng.ov.ppn, 0)}` })),
+        el("p", { class: "muted", text: `Contract ${fmtDate(c.contract_start)} – ${fmtDate(c.contract_end)} · Binding ${({ Disc: "discount", "Nett to Disc": "nett to disc" })[c.binding] || "nett price"} · PPN ${pct(ng.ov.ppn, 0)}` })),
       el("div", { class: "ng-tools" },
         el("a", { class: "act secondary", href: `/api/nego/cycles/${c.id}/export.xlsx`, text: "Download Template_Nego" }),
         canWork() && c.status === "open" ? act("Principal link", () => linkPanel(c), "secondary") : null,
@@ -501,7 +531,7 @@ function renderHeaderParts() {
     tile("Items", num(k.items), `${num(k.active)} active · ${num(k.discontinued)} discontinued`),
     tile("RFQ received", `${num(k.rfq_filled)} / ${num(k.active)}`, k.rfq_filled ? `${pct(k.rfq_filled / Math.max(k.active, 1), 0)} of active items` : "waiting for the principal"),
     tile("Open findings", num(a.open), a.open_high ? `${num(a.open_high)} high · ${num(a.kept)} kept · ${num(a.fixed)} fixed` : `${num(a.kept)} kept · ${num(a.fixed)} fixed`),
-    tile("Cost impact a year", latest == null ? "—" : `${latest > 0 ? "+" : ""}${money(latest)}`, latest == null ? "once prices come in" : `latest step vs MOU · spend ${money(k.baseline_spend)}`),
+    tile("Cost impact a year", latest == null ? "—" : `${latest > 0 ? "+" : ""}${money(latest)}`, latest == null ? "once prices come in" : `latest step vs actual PO (annualized) · PO spend ${money(k.baseline_spend)}`),
     tile("Margin impact (Formularium)", mForm == null ? "—" : `${mForm >= 0 ? "+" : ""}${money(mForm)}`, mPo == null ? "vs Formularium" : `vs Form · vs PO: ${mPo >= 0 ? "+" : ""}${money(mPo)} a year`)
   );
   const tiles = $("ng-kpis").children;
@@ -1559,21 +1589,27 @@ function renderFiles(body) {
   const ex = card("Template_Nego", "The workbook the principal knows: same layout, colours, drop-downs and formulas, filled with this negotiation. Rows grow past 150 when needed.",
     el("div", { class: "actions" }, el("a", { class: "act", href: `/api/nego/cycles/${c.id}/export.xlsx`, text: "Download Template_Nego" })));
   body.append(ex);
-  if (!isAdmin()) return;
+  if (!canWork()) return;
 
-  const files = { po: el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "po" }),
-    formulary: el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "formulary" }),
-    mou: el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "mou" }) };
+  // PO lines, formulary, SKU master and tagging come from the period's data hub (Admin, uploaded once per
+  // period). Only the principal's current MOU / last Template_Nego is uploaded here.
+  const per = ng.ov.period;
+  const hub = per ? el("div", { class: `preview ${per.po_rows || per.formulary ? "ok" : "bad"}` },
+    el("b", { text: `Data for ${per.name}` }),
+    el("div", { class: "facts" }, [["PO lines", per.po_rows], ["Formulary", per.formulary], ["SKU master", per.sku_master], ["SKU tagging", per.sku_tagging]].map(([l, v]) => el("div", {}, el("span", { text: l }), el("b", { text: num(v) })))),
+    el("p", { class: "small muted", text: per.po_rows || per.formulary ? "Loaded once in Admin → Negotiation Periods; every principal in this period reads from it." : "Nothing uploaded for this period yet." }),
+    isAdmin() ? el("a", { class: "act ghost small-btn", href: "#admin/periods", text: "Open the period data hub →" }) : null) : null;
+  const files = { mou: el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "mou" }) };
   const prepOut = el("div", { role: "status" });
   const prep = el("form", { class: "upload-form wide" },
-    el("div", { class: "drop3" }, dropZone(files.po, "PO export (12 months)"), dropZone(files.formulary, "Formulary"), dropZone(files.mou, "Current MOU / last Template_Nego")),
-    el("p", { class: "small muted", text: "CSV or Excel, any header names the systems use (Item Number, Kode Barang, ERP Code…). Rows for other principals are skipped. Building again replaces the item list and its findings." }),
+    hub,
+    el("div", { class: "drop3" }, dropZone(files.mou, ng.ov.has_mou_file ? "Current MOU / last Template_Nego (on file, drop a new one to replace)" : "Current MOU / last Template_Nego")),
+    el("p", { class: "small muted", text: "CSV or Excel. Columns: ERP Code, Brand, Catalog No. (REF), MOU_Qty/PO Unit, MOU_HNA/PO Unit (excl. PPN), MOU_Disc%. Building again replaces the item list and its findings." }),
     el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Build item list" })), prepOut);
   prep.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData();
     Object.entries(files).forEach(([k, f]) => { if (f.files.length) fd.append(k, f.files[0]); });
-    if (![...fd.keys()].length) { clear(prepOut).append(el("p", { class: "error", text: "Choose at least one file." })); return; }
     if (ng.ov.kpis.items && !confirm("Replace the current item list and its findings?")) return;
     clear(prepOut).append(el("p", { class: "muted", text: "Building…" }));
     try {

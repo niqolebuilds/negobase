@@ -15,31 +15,29 @@ const T = {
     portal: "Portal Principal", loading: "Memuat…",
     invalid_t: "Tautan tidak berlaku", invalid_p: "Tautan ini sudah kedaluwarsa atau dicabut. Minta tautan baru ke tim pengadaan.",
     step_of: (n) => `Langkah ${n} dari 6`, your_task: "Tugas Anda",
-    steps: { identification: "Konfirmasi data item", rfq: "Isi harga penawaran (RFQ)", feedback1: "Tanggapi counter offer", submission: "Kirim dokumen perusahaan" },
+    steps: { rfq: "Isi data item & harga penawaran (RFQ)", feedback1: "Tanggapi counter offer", submission: "Kirim dokumen perusahaan" },
     last_step: "Langkah terakhir", doc_required: "Wajib", doc_optional: "Opsional", doc_upload: "Unggah", doc_uploaded: "Terunggah", doc_delete: "Hapus",
     doc_note: "Dokumen disimpan terenkripsi dan hanya bisa dibuka tim pengadaan. PDF, JPG, PNG, DOCX, XLSX atau ZIP, maksimal 15 MB per file.",
     howto: {
-      identification: ["Periksa brand dan nomor katalog (REF) setiap SKU.", "Pilih Aktif jika masih dijual, atau Tidak dijual lagi.", "Semua tersimpan otomatis. Klik Kirim jika sudah selesai."],
-      rfq: ["Harga MOU saat ini ditampilkan sebagai acuan. Jika harga tidak berubah, klik Sama dengan MOU.", "Isi HNA per kemasan (sebelum PPN), isi per kemasan, dan diskon dalam % (contoh: 0.15 untuk 15%).", "Jika harga per pcs naik, mohon isi alasannya. Semua tersimpan otomatis."],
+      rfq: ["Untuk setiap SKU: pilih status (Aktif atau Tidak dijual lagi), isi brand dan nomor katalog (REF).", "Isi HNA per kemasan (sebelum PPN), isi per kemasan, dan diskon dalam persen (contoh: 15%).", "Jika ada peringatan, periksa kembali isian Anda. Jika harga naik, mohon isi alasannya. Semua tersimpan otomatis."],
       feedback1: ["Tim pengadaan mengirim counter offer berupa diskon per SKU.", "Klik Terima, atau isi diskon Anda sendiri dan alasannya.", "Klik Kirim jika sudah selesai."],
       submission: ["Harga sudah disepakati. Langkah terakhir: unggah dokumen perusahaan.", "Dokumen bertanda Wajib harus diunggah sebelum mengirim.", "Klik Kirim jika sudah lengkap."],
     },
     help: "Bantuan", help_t: "Butuh bantuan?", help_p: "Hubungi tim pengadaan. Kami akan membantu Anda mengisi.", help_wa: "Chat WhatsApp", help_mail: "Kirim email", help_none: "Balas pesan atau email kami, tim kami akan membantu.",
     excel_or: "Lebih suka Excel? Unduh file, isi, lalu unggah kembali.", view_table: "Tabel", view_list: "Kartu", view_one: "Satu per satu",
-    h_item: "Barang", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Keterangan", h_mou: "MOU", h_hna: "HNA / kemasan", h_qty: "Isi (pcs)", h_disc: "Diskon %", h_unit: "Harga/pcs", h_chg: "Perubahan", h_rfq: "Harga Anda", h_co: "Counter Offer", h_own: "Diskon Anda",
+    h_item: "Barang", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Keterangan", h_hna: "HNA / kemasan", h_qty: "Isi (pcs)", h_disc: "Diskon (mis. 15%)", h_unit: "Harga/pcs", h_rfq: "Harga Anda", h_co: "Counter Offer", h_own: "Diskon Anda",
     tip_paste: "Tips: salin sel dari Excel lalu tempel di kolom pertama yang mau diisi.",
     contract: "Kontrak", due: "Batas waktu", progress: (d, a) => `${d} dari ${a} SKU selesai`,
     download: "Unduh Excel", upload: "Unggah Excel", send: "Kirim Tanggapan",
     f: { todo: "Belum diisi", check: "Perlu dicek", up: "Harga naik", all: "Semua", done: "Selesai" },
     search: "Cari nama, kode, brand, REF",
-    fill_rfq: "Isi semua yang kosong sama dengan MOU", fill_fb1: "Terima semua counter offer", next_todo: "Ke SKU berikutnya yang belum diisi",
-    fill_confirm_rfq: (n) => `Isi semua SKU yang belum diisi dengan harga MOU saat ini? Anda tetap bisa mengubahnya.`,
+    fill_fb1: "Terima semua counter offer", next_todo: "Ke SKU berikutnya yang belum diisi",
     fill_confirm_fb1: () => "Terima counter offer untuk semua SKU yang belum ditanggapi?",
     filled: (n) => `${n} SKU terisi`, none: "Tidak ada SKU di sini.", more: "Tampilkan lebih banyak", prev: "← Sebelumnya", next: "Berikutnya →",
     state: { missing: "Belum diisi", check: "Perlu dicek", done: "Selesai" },
-    mou_now: "MOU saat ini", same_mou: "Sama dengan MOU", status: "Status", active: "Aktif", disc_btn: "Tidak dijual lagi",
+    status: "Status", active: "Aktif", disc_btn: "Tidak dijual lagi",
     qty: (pack) => `Isi per ${pack} (pcs)`, hna: (pack) => `HNA per ${pack}, sebelum PPN`, disc: "Diskon",
-    per_pcs: "Harga per pcs termasuk PPN", vs_mou: "dari MOU", same: "sama dengan MOU",
+    per_pcs: "Harga per pcs termasuk PPN",
     brand: "Brand / pabrikan", ref: "Nomor katalog (REF)", remarks: "Keterangan (opsional)",
     rfq_price: "Harga RFQ Anda", co: "Counter Offer", accept: "Terima counter offer", own: "Atau isi diskon Anda",
     reason: "Alasan", reason_pick: "Pilih alasan…", reason_detail: "Keterangan singkat (opsional)", yes: "Ya, sudah benar", confirmed: "Sudah dikonfirmasi",
@@ -53,36 +51,36 @@ const T = {
     up_check: "Periksa file", up_res: (a, r) => `${a} baris siap disimpan, ${r} baris perlu diperbaiki.`, up_save: (n) => `Simpan ${n} baris`,
     up_done: (n) => `${n} baris tersimpan`, row: "Baris", not_found: (n) => `${n} baris tidak dikenali (kode ERP tidak ada di daftar).`,
     sent_ok: "Terkirim. Terima kasih!", err: "Terjadi kesalahan",
+    locked_t: "Sudah terkirim dan dikunci", locked_p: (at) => `Isian ini dikirim${at ? ` pada ${at}` : ""} dan sekarang dikunci supaya angkanya tidak berubah saat counter offer disiapkan. Hubungi tim pengadaan jika ada yang perlu diubah.`,
+    not_open: "Langkah ini belum dibuka. Tim pengadaan akan menghubungi Anda.",
   },
   en: {
     portal: "Principal Portal", loading: "Loading…",
     invalid_t: "Link not valid", invalid_p: "This link has expired or was revoked. Ask the procurement team for a new one.",
     step_of: (n) => `Step ${n} of 6`, your_task: "Your task",
-    steps: { identification: "Confirm item details", rfq: "Quote your prices (RFQ)", feedback1: "Respond to counter offer", submission: "Send company documents" },
+    steps: { rfq: "Item details & price quote (RFQ)", feedback1: "Respond to counter offer", submission: "Send company documents" },
     last_step: "Last step", doc_required: "Required", doc_optional: "Optional", doc_upload: "Upload", doc_uploaded: "Uploaded", doc_delete: "Delete",
     doc_note: "Documents are stored encrypted and only the procurement team can open them. PDF, JPG, PNG, DOCX, XLSX or ZIP, up to 15 MB each.",
     howto: {
-      identification: ["Check the brand and catalogue number (REF) of every SKU.", "Choose Active if you still sell it, or Discontinued.", "Everything saves automatically. Click Send when you're done."],
-      rfq: ["The current MOU price is shown for reference. If the price doesn't change, click Same as MOU.", "Enter the HNA per pack (before PPN), the pieces per pack and the discount in % (e.g. 0.15 for 15%).", "If the price per piece goes up, please give the reason. Everything saves automatically."],
+      rfq: ["For every SKU: choose the status (Active or Discontinued), then fill in the brand and catalogue number (REF).", "Enter the HNA per pack (before PPN), the pieces per pack and the discount as a percentage (e.g. 15%).", "If a warning shows, please re-check your entry. If the price goes up, please give the reason. Everything saves automatically."],
       feedback1: ["Procurement sent a counter-offer discount for each SKU.", "Click Accept, or enter your own discount and the reason.", "Click Send when you're done."],
       submission: ["Prices are agreed. Last step: upload your company documents.", "Documents marked Required must be uploaded before sending.", "Click Send when everything is there."],
     },
     help: "Help", help_t: "Need help?", help_p: "Contact the procurement team. We'll help you fill it in.", help_wa: "Chat on WhatsApp", help_mail: "Send an email", help_none: "Reply to our message or email and our team will help.",
     excel_or: "Prefer Excel? Download the file, fill it in, then upload it again.", view_table: "Table", view_list: "Cards", view_one: "One by one",
-    h_item: "Item", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Remarks", h_mou: "MOU", h_hna: "HNA / pack", h_qty: "Pieces", h_disc: "Discount %", h_unit: "Price/pc", h_chg: "Change", h_rfq: "Your price", h_co: "Counter Offer", h_own: "Your discount",
+    h_item: "Item", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Remarks", h_hna: "HNA / pack", h_qty: "Pieces", h_disc: "Discount (e.g. 15%)", h_unit: "Price/pc", h_rfq: "Your price", h_co: "Counter Offer", h_own: "Your discount",
     tip_paste: "Tip: copy cells from Excel and paste them into the first column you want to fill.",
     contract: "Contract", due: "Due", progress: (d, a) => `${d} of ${a} SKUs done`,
     download: "Download Excel", upload: "Upload Excel", send: "Send Response",
     f: { todo: "To fill", check: "To check", up: "Price up", all: "All", done: "Done" },
     search: "Search name, code, brand, REF",
-    fill_rfq: "Fill every blank SKU with the MOU price", fill_fb1: "Accept every counter offer", next_todo: "Next SKU to fill",
-    fill_confirm_rfq: () => "Fill every blank SKU with the current MOU price? You can still change them.",
+    fill_fb1: "Accept every counter offer", next_todo: "Next SKU to fill",
     fill_confirm_fb1: () => "Accept counter offer for every SKU you haven't answered?",
     filled: (n) => `${n} SKUs filled`, none: "No SKUs here.", more: "Show more", prev: "← Previous", next: "Next →",
     state: { missing: "To fill", check: "To check", done: "Done" },
-    mou_now: "Current MOU", same_mou: "Same as MOU", status: "Status", active: "Active", disc_btn: "Discontinued",
+    status: "Status", active: "Active", disc_btn: "Discontinued",
     qty: (pack) => `Pieces per ${pack}`, hna: (pack) => `HNA per ${pack}, before PPN`, disc: "Discount",
-    per_pcs: "Price per piece incl. PPN", vs_mou: "vs MOU", same: "same as MOU",
+    per_pcs: "Price per piece incl. PPN",
     brand: "Brand / manufacturer", ref: "Catalogue no. (REF)", remarks: "Remarks (optional)",
     rfq_price: "Your RFQ price", co: "Counter Offer", accept: "Accept counter offer", own: "Or enter your discount",
     reason: "Reason", reason_pick: "Choose a reason…", reason_detail: "Short detail (optional)", yes: "Yes, that's right", confirmed: "Confirmed",
@@ -96,6 +94,8 @@ const T = {
     up_check: "Check file", up_res: (a, r) => `${a} rows ready to save, ${r} rows need fixing.`, up_save: (n) => `Save ${n} rows`,
     up_done: (n) => `${n} rows saved`, row: "Row", not_found: (n) => `${n} rows not recognised (ERP code not in the list).`,
     sent_ok: "Sent. Thank you!", err: "Something went wrong",
+    locked_t: "Sent and locked", locked_p: (at) => `This form was sent${at ? ` on ${at}` : ""} and is now locked so the numbers stay put while the counter offer is prepared. Contact the procurement team if something must change.`,
+    not_open: "This step is not open yet. The procurement team will contact you.",
   },
 };
 const t = (k, ...a) => { const v = k.split(".").reduce((o, p) => (o == null ? o : o[p]), T[P.lang]); return typeof v === "function" ? v(...a) : v ?? k; };
@@ -145,7 +145,9 @@ async function call(path, { method = "GET", body, form } = {}) {
   if (r.status === 401) { showInvalid(); throw new Error(j.error || "401"); }
   if (!r.ok) {
     const e = String(j.error || r.statusText);
-    throw new Error(e.includes(" / ") ? e.split(" / ")[P.lang === "id" ? 0 : 1] : e);
+    const err = new Error(e.includes(" / ") ? e.split(" / ")[P.lang === "id" ? 0 : 1] : e);
+    err.status = r.status;
+    throw err;
   }
   return j;
 }
@@ -158,8 +160,16 @@ function hnaShow(v) {
   const [a, b] = typeof v === "number" ? String(v).split(".") : String(v).split(",");
   return nf(0).format(+a) + (b !== undefined ? "," + b : "");
 }
-function discValue(s) { return String(s || "").replace("%", "").trim().replace(/\./g, ","); }
-const discShow = (f) => (f == null ? "" : String(+(f * 100).toFixed(4)).replace(".", ","));
+// Discount is a percentage cell: "15%" or "0,15" are valid, a bare "15" is refused by the server.
+// It is sent exactly as typed so the server can tell the two apart.
+function discValue(s) { return String(s || "").trim(); }
+const discShow = (f) => (f == null ? "" : `${String(+(f * 100).toFixed(4)).replace(".", ",")}%`);
+const discFraction = (s) => {
+  const v = String(s || "").trim();
+  if (!v) return 0;
+  const n = +v.replace("%", "").replace(/\./g, "").replace(",", ".");
+  return Number.isNaN(n) ? 0 : v.includes("%") ? n / 100 : n;
+};
 
 // ---------- boot ----------
 function showInvalid() {
@@ -170,10 +180,49 @@ async function boot() {
   document.querySelectorAll(".lang button").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
   $("helpbtn").addEventListener("click", openHelp);
   setLang(P.lang, false);
+  aiInit();
   if (new URLSearchParams(location.search).get("invalid")) { showInvalid(); return; }
   try { P.me = await call("/api/p/me"); } catch (_) { return; }
   $("who").textContent = P.me.principal.name;
+  if (P.me.locked) P.filter = "all";
   render();
+}
+
+// ---------- AI helper ----------
+const AI = { history: [], busy: false };
+const AIT = {
+  id: { title: "Asisten pengisian RFQ", ph: "Tanya cara mengisi…", send: "Kirim", hi: "Halo! Saya bisa membantu mengisi RFQ: format diskon, HNA, isi per kemasan, status item. Anda tetap menekan Kirim sendiri.", err: "Maaf, belum bisa menjawab saat ini." },
+  en: { title: "RFQ filling assistant", ph: "Ask how to fill in…", send: "Send", hi: "Hi! I can help you fill in the RFQ: discount format, HNA, pieces per pack, item status. You always press Send yourself.", err: "Sorry, I can't answer right now." },
+};
+function aiAdd(who, text) {
+  const log = $("ai-log");
+  log.append(el("div", { class: `aimsg ${who}`, text }));
+  log.scrollTop = log.scrollHeight;
+}
+function aiLang() {
+  const x = AIT[P.lang];
+  $("ai-title").textContent = x.title; $("ai-input").placeholder = x.ph; $("ai-send").textContent = x.send;
+  if (!$("ai-log").children.length) aiAdd("bot", x.hi);
+}
+function aiInit() {
+  $("aibtn").addEventListener("click", () => {
+    const open = $("aipanel").hidden;
+    $("aipanel").hidden = !open; $("aibtn").setAttribute("aria-expanded", String(open));
+    if (open) { aiLang(); $("ai-input").focus(); }
+  });
+  $("ai-close").addEventListener("click", () => { $("aipanel").hidden = true; $("aibtn").setAttribute("aria-expanded", "false"); });
+  $("ai-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = $("ai-input").value.trim();
+    if (!text || AI.busy) return;
+    $("ai-input").value = ""; aiAdd("me", text); AI.busy = true;
+    try {
+      const r = await call("/api/p/chat", { method: "POST", body: { message: text, lang: P.lang, history: AI.history } });
+      aiAdd("bot", r.reply);
+      AI.history.push({ role: "user", text }, { role: "model", text: r.reply });
+    } catch (_) { aiAdd("bot", AIT[P.lang].err); }
+    AI.busy = false;
+  });
 }
 
 function setLang(l, redraw = true) {
@@ -184,6 +233,7 @@ function setLang(l, redraw = true) {
   $("t-portal").textContent = t("portal");
   $("helpbtn").textContent = t("help");
   document.title = t("portal");
+  if ($("ai-title")) aiLang();
   if (redraw && P.me) render();
 }
 
@@ -200,19 +250,23 @@ function render() {
   }
   const howto = el("ol", { class: "howto" }, t(`howto.${me.step}`).map((s) => el("li", { text: s })));
   const prog = el("div", { class: "prog" }, el("div", { class: "bar" }, el("i", { id: "prog-fill" })), el("span", { id: "prog-text" }));
-  const sendbar = el("div", { class: "sendbar" }, prog,
+  const sendbar = me.locked ? null : el("div", { class: "sendbar" }, prog,
     el("button", { type: "button", class: "pbtn primary big", text: t("send"), onclick: openSummary }));
+  const lockBanner = me.locked ? el("section", { class: "pcard lockcard", role: "status" },
+    el("h2", { text: `🔒 ${t(me.lock_reason === "sent" ? "locked_t" : "not_open")}` }),
+    me.lock_reason === "sent" ? el("p", { text: t("locked_p", me.submitted ? fmtDate(me.submitted.at) : "") }) : null) : null;
   put(app,
     el("section", { class: "pcard stepcard" },
       el("p", { class: "eyebrow", text: t("your_task") }),
       el("h1", { text: t(`steps.${me.step}`) }),
       el("p", { class: "muted", text: `${t("contract")} ${fmtDate(me.contract.start)} – ${fmtDate(me.contract.end)}${me.due ? ` · ${t("due")} ${fmtDate(me.due)}` : ""}` }),
-      howto,
-      me.step === "submission" ? null : el("div", { class: "excelrow" },
-        el("span", { class: "muted", text: t("excel_or") }),
+      me.locked ? null : howto,
+      me.step === "submission" || me.locked ? null : el("div", { class: "excelrow" },
+        el("span", { class: "muted", text: me.excel_upload ? t("excel_or") : "" }),
         el("a", { class: "pbtn", href: "/api/p/template.xlsx", text: t("download") }),
-        el("button", { type: "button", class: "pbtn", text: t("upload"), onclick: openUpload }))));
-  if (me.step === "submission") { prog.hidden = true; put(app, el("section", { class: "pcard", id: "docs" }), sendbar); loadDocs(); return; }
+        me.excel_upload ? el("button", { type: "button", class: "pbtn", text: t("upload"), onclick: openUpload }) : null)),
+    lockBanner);
+  if (me.step === "submission") { if (prog) prog.hidden = true; put(app, el("section", { class: "pcard", id: "docs" }), sendbar); loadDocs(); return; }
   put(app, toolbar(), el("div", { id: "list", class: `skus view-${P.view}` }), el("div", { id: "more" }), sendbar);
   load(true);
 }
@@ -227,23 +281,25 @@ function toolbar() {
   const views = el("div", { class: "seg", role: "group" },
     VIEWS().map((v) => el("button", { type: "button", "aria-pressed": String(P.view === v), text: t(`view_${v}`),
       onclick: () => { P.view = v; try { localStorage.setItem("nego-p-view", v); } catch (_) { /* ignore */ } P.one = 0; renderList(); document.querySelectorAll(".seg button").forEach((b, i) => b.setAttribute("aria-pressed", String(VIEWS()[i] === v))); } })));
-  const bulk = P.me.step === "identification" ? null :
-    el("button", { type: "button", class: "pbtn ghost", text: t(P.me.step === "rfq" ? "fill_rfq" : "fill_fb1"), onclick: bulkFill });
+  const bulk = P.me.step !== "feedback1" || P.me.locked ? null :
+    el("button", { type: "button", class: "pbtn ghost", text: t("fill_fb1"), onclick: bulkFill });
   return el("section", { class: "toolbar" }, chips,
     el("div", { class: "tools" }, search, views, bulk,
-      el("button", { type: "button", class: "pbtn ghost", text: t("next_todo"), onclick: nextTodo })));
+      P.me.locked ? null : el("button", { type: "button", class: "pbtn ghost", text: t("next_todo"), onclick: nextTodo })));
 }
 
 function renderChips() {
   const box = $("chips");
   if (!box) return;
-  put(clear(box), ...["todo", "check", "up", "all", "done"].filter((k) => k !== "up" || P.me.step === "rfq").map((k) =>
+  put(clear(box), ...["todo", "check", "up", "all", "done"].filter((k) => (k !== "up" || P.me.step === "rfq") && (!P.me.locked || k === "all")).map((k) =>
     el("button", { type: "button", role: "tab", class: `chip ${P.filter === k ? "on" : ""} c-${k}`, "aria-selected": String(P.filter === k),
       onclick: () => { P.filter = k; load(true); } }, t(`f.${k}`), el("b", { text: num(P.counts[k] ?? 0) }))));
   const c = P.counts;
   const done = c.done ?? 0, all = c.all ?? 0;
-  $("prog-fill").style.width = `${all ? (done / all) * 100 : 0}%`;
-  $("prog-text").textContent = t("progress", num(done), num(all));
+  if ($("prog-fill")) {
+    $("prog-fill").style.width = `${all ? (done / all) * 100 : 0}%`;
+    $("prog-text").textContent = t("progress", num(done), num(all));
+  }
 }
 
 async function load(reset) {
@@ -313,17 +369,16 @@ function nextTodo() {
 }
 
 async function bulkFill() {
-  if (!confirm(t(P.me.step === "rfq" ? "fill_confirm_rfq" : "fill_confirm_fb1"))) return;
+  if (!confirm(t("fill_confirm_fb1"))) return;
   try { const r = await call("/api/p/fill", { method: "POST", body: {} }); toast(t("filled", r.filled)); load(true); } catch (e) { toast(e.message); }
 }
 
 // ---------- table view (looks and moves like an Excel sheet) ----------
 const TCOLS = {
-  identification: ["item", "status", "brand", "ref", "remarks"],
-  rfq: ["item", "status", "mou", "hna", "qty", "disc", "unit", "chg"],
+  rfq: ["item", "status", "brand", "ref", "hna", "qty", "disc", "unit"],
   feedback1: ["item", "rfq", "co", "accept", "own", "unit"],
 };
-const HEAD = { item: "h_item", status: "h_status", brand: "h_brand", ref: "h_ref", remarks: "h_remarks", mou: "h_mou", hna: "h_hna", qty: "h_qty", disc: "h_disc", unit: "h_unit", chg: "h_chg", rfq: "h_rfq", co: "h_co", accept: "", own: "h_own" };
+const HEAD = { item: "h_item", status: "h_status", brand: "h_brand", ref: "h_ref", remarks: "h_remarks", hna: "h_hna", qty: "h_qty", disc: "h_disc", unit: "h_unit", rfq: "h_rfq", co: "h_co", accept: "", own: "h_own" };
 
 function theader() {
   return el("div", { class: `thead tc-${P.me.step}`, role: "row" },
@@ -336,12 +391,14 @@ function statusSelect(a, it) {
     el("option", { value: "Discontinue", text: t("disc_btn"), selected: it.item_status === "Discontinue" }));
   if (!it.item_status) sel.insertBefore(el("option", { value: "", text: "—", selected: true }), sel.firstChild);
   sel.addEventListener("change", () => { if (sel.value) save(a, it, { item_status: sel.value }); });
+  sel.disabled = !!P.me.locked;
   return sel;
 }
 
 function tinput(a, it, col, field, attrs, toServer, show) {
   const i = el("input", { "data-col": col, value: show(it[field]) || null, ...attrs });
   i.addEventListener("change", () => save(a, it, { [field]: toServer(i.value) || null }));
+  if (P.me.locked) i.disabled = true;
   return i;
 }
 
@@ -356,35 +413,26 @@ function trow(it) {
     el("span", { class: `state s-${it.state}`, text: t(`state.${it.state}`) }),
     el("span", { class: "savestate", "aria-live": "polite" }));
   cell.status = statusSelect(a, it);
-  if (step === "identification") {
+  if (step === "rfq") {
     const plain = (field, col) => tinput(a, it, col, field, { "aria-label": t(HEAD[col]) }, (v) => v.trim(), (v) => v || "");
-    cell.brand = plain("brand", "brand"); cell.ref = plain("catalog_no", "ref"); cell.remarks = plain("remarks", "remarks");
-  } else if (step === "rfq") {
-    cell.mou = el("div", { class: "tc-mou" },
-      el("span", { text: it.mou_unit_price != null ? rp(it.mou_unit_price) : "—" }),
-      it.mou_hna != null && !off ? el("button", { type: "button", class: "pbtn small", title: t("same_mou"), text: "=",
-        onclick: () => save(a, it, { rfq_qty: it.mou_qty ?? 1, rfq_hna: String(it.mou_hna).replace(".", ","), rfq_disc: String(+((it.mou_disc || 0) * 100).toFixed(4)).replace(".", ","), ...(it.item_status ? {} : { item_status: "Active" }) }, true) }) : null);
+    cell.brand = plain("brand", "brand"); cell.ref = plain("catalog_no", "ref");
     const hna = tinput(a, it, "hna", "rfq_hna", { inputmode: "decimal", "aria-label": t("h_hna") }, hnaValue, hnaShow);
     const qty = tinput(a, it, "qty", "rfq_qty", { inputmode: "numeric", "aria-label": t("h_qty") }, digits, (v) => (v != null ? String(v) : ""));
     const disc = tinput(a, it, "disc", "rfq_disc", { inputmode: "decimal", "aria-label": t("h_disc") }, discValue, discShow);
-    for (const i of [hna, qty, disc]) i.disabled = off;
-    const unit = el("b", { class: "tc-unit" }), chg = el("span", { class: "chg" });
+    for (const i of [hna, qty, disc, cell.brand, cell.ref]) i.disabled = off || !!P.me.locked;
+    const unit = el("b", { class: "tc-unit" });
     const live = () => {
       const n = (x) => +String(x).replace(",", ".");
-      const pr = unitPrice(n(hnaValue(hna.value)) || null, +digits(qty.value) || null, (n(discValue(disc.value)) || 0) / 100);
-      unit.textContent = off ? "—" : pr == null ? "—" : rp(pr);
-      if (pr != null && it.mou_unit_price && !off) {
-        const ch = pr / it.mou_unit_price - 1;
-        chg.className = `chg ${ch > 0.0005 ? "up" : ch < -0.0005 ? "down" : ""}`;
-        chg.textContent = Math.abs(ch) < 0.0005 ? t("same") : `${ch > 0 ? "+" : ""}${pctTxt(ch)}`;
-      } else { chg.className = "chg"; chg.textContent = ""; }
+      const pr = unitPrice(n(hnaValue(hna.value)) || null, +digits(qty.value) || null, discFraction(disc.value));
+      const bad = discFraction(disc.value) < 0 || discFraction(disc.value) >= 1;
+      unit.textContent = off || bad ? "—" : pr == null ? "—" : rp(pr);
     };
     hna.addEventListener("input", () => { const v = hnaValue(hna.value); hna.value = v ? hnaShow(v) : ""; live(); });
     qty.addEventListener("input", () => { qty.value = digits(qty.value); live(); });
-    disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,]/g, ""); live(); });
+    disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,%]/g, ""); live(); });
     cell.hna = el("div", { class: "affix" }, el("span", { text: "Rp" }), hna);
-    cell.qty = qty; cell.disc = el("div", { class: "affix" }, disc, el("span", { text: "%" }));
-    cell.unit = unit; cell.chg = chg;
+    cell.qty = qty; cell.disc = disc; disc.placeholder = "15%";
+    cell.unit = unit;
     live();
   } else {
     const has = it.co_disc != null;
@@ -392,11 +440,11 @@ function trow(it) {
     cell.co = has ? el("span", {}, `${pctTxt(it.co_disc)} → `, el("b", { text: rp(it.co_unit_price) })) : el("span", { class: "muted", text: "—" });
     const accepted = has && it.fb1_disc != null && Math.abs(it.fb1_disc - it.co_disc) < 1e-9;
     cell.accept = has ? el("button", { type: "button", class: `pbtn small ${accepted ? "on" : "primary"}`, text: accepted ? `✓ ${t("accept")}` : t("accept"),
-      onclick: () => save(a, it, { fb1_disc: String(+(it.co_disc * 100).toFixed(4)).replace(".", ",") }, true) }) : el("span");
-    const own = tinput(a, it, "own", "fb1_disc", { inputmode: "decimal", "aria-label": t("h_own") }, discValue, (v) => (v == null ? "" : discShow(v)));
-    own.disabled = !has;
+      onclick: () => save(a, it, { fb1_disc: discShow(it.co_disc) }, true), disabled: !!P.me.locked }) : el("span");
+    const own = tinput(a, it, "own", "fb1_disc", { inputmode: "decimal", "aria-label": t("h_own") }, discValue, discShow);
+    own.disabled = !has || !!P.me.locked;
     own.addEventListener("input", () => { own.value = own.value.replace(/[^\d.,]/g, ""); });
-    cell.own = el("div", { class: "affix" }, own, el("span", { text: "%" }));
+    cell.own = own; own.placeholder = "15%";
     cell.unit = el("b", { class: "tc-unit", text: has ? rp(it.fb1_unit_price) : "—" });
   }
   put(a, el("div", { class: `tcells tc-${step}` }, TCOLS[step].map((c) => el("div", { class: `td td-${c}`, role: "cell" }, cell[c]))), el("div", { class: "issues" }));
@@ -459,12 +507,12 @@ function card(it) {
   const a = el("article", { class: `sku st-${it.state}`, "data-id": it.id });
   const head = el("header", { class: "sku-head" },
     el("div", {}, el("h2", { text: it.item_name || "—" }),
-      el("p", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no, it.po_unit_text].filter(Boolean).join(" · ") })),
+      el("p", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no].filter(Boolean).join(" · ") })),
     el("span", { class: `state s-${it.state}`, text: t(`state.${it.state}`) }));
   put(a, head);
   const body = el("div", { class: "sku-body" });
   put(a, body);
-  ({ identification: identBody, rfq: rfqBody, feedback1: fbBody })[P.me.step](body, it, a);
+  ({ rfq: rfqBody, feedback1: fbBody })[P.me.step](body, it, a);
   put(a, el("div", { class: "issues" }), el("div", { class: "savestate", "aria-live": "polite" }));
   paintIssues(a, it);
   a.addEventListener("keydown", (e) => {
@@ -481,59 +529,48 @@ function card(it) {
 
 function statusButtons(a, it) {
   const mk = (val, label) => el("button", { type: "button", class: `sbtn ${it.item_status === val ? "on" : ""}`, "aria-pressed": String(it.item_status === val), text: label,
-    onclick: () => save(a, it, { item_status: val }) });
+    disabled: !!P.me.locked, onclick: () => save(a, it, { item_status: val }) });
   return el("div", { class: "field status" }, el("span", { class: "lbl", text: t("status") }),
     el("div", { class: "seg big" }, mk("Active", t("active")), mk("Discontinue", t("disc_btn"))));
 }
 
-function identBody(body, it, a) {
+function rfqBody(body, it, a) {
+  const pack = P.lang === "id" ? "kemasan" : "pack";
   const input = (field, label, attrs = {}) => {
-    const i = el("input", { value: it[field] || null, ...attrs });
+    const i = el("input", { value: it[field] || null, disabled: !!P.me.locked || it.item_status === "Discontinue", ...attrs });
     i.addEventListener("change", () => { if ((i.value.trim() || null) !== (it[field] || null)) save(a, it, { [field]: i.value.trim() }); });
     return el("label", { class: "field" }, el("span", { class: "lbl", text: label }), i);
   };
-  put(body, statusButtons(a, it), el("div", { class: "grid3" }, input("brand", t("brand")), input("catalog_no", t("ref")), input("remarks", t("remarks"))));
-}
-
-function rfqBody(body, it, a) {
-  const pack = it.pack_name && it.pack_name !== "PCS" ? it.pack_name : (P.lang === "id" ? "kemasan" : "pack");
-  const ref = el("div", { class: "ref" },
-    el("span", { class: "lbl", text: t("mou_now") }),
-    it.mou_hna != null ? el("span", {}, `${it.mou_qty ? `${pack} ${num(it.mou_qty)} pcs · ` : ""}HNA ${rp(it.mou_hna)} · ${t("disc")} ${pctTxt(it.mou_disc || 0)} → `, el("b", { text: `${rp(it.mou_unit_price)}/pcs` })) : el("span", { class: "muted", text: "—" }),
-    it.mou_hna != null && it.item_status !== "Discontinue" ? el("button", { type: "button", class: "pbtn small", text: t("same_mou"),
-      onclick: () => { save(a, it, { rfq_qty: it.mou_qty ?? 1, rfq_hna: String(it.mou_hna).replace(".", ","), rfq_disc: String(+((it.mou_disc || 0) * 100).toFixed(4)).replace(".", ","), ...(it.item_status ? {} : { item_status: "Active" }) }, true); } }) : null);
-  put(body, ref, statusButtons(a, it));
+  put(body, statusButtons(a, it));
   if (it.item_status === "Discontinue") return;
-  const qty = el("input", { inputmode: "numeric", value: it.rfq_qty != null ? String(it.rfq_qty) : null, "aria-label": t("qty", pack) });
-  const hna = el("input", { inputmode: "decimal", value: hnaShow(it.rfq_hna) || null, "aria-label": t("hna", pack) });
-  const disc = el("input", { inputmode: "decimal", value: it.rfq_disc != null ? discShow(it.rfq_disc) : null, "aria-label": t("disc") });
+  put(body, el("div", { class: "grid3" }, input("brand", t("brand")), input("catalog_no", t("ref")), input("remarks", t("remarks"))));
+  const lock = !!P.me.locked;
+  const qty = el("input", { inputmode: "numeric", value: it.rfq_qty != null ? String(it.rfq_qty) : null, "aria-label": t("qty", pack), disabled: lock });
+  const hna = el("input", { inputmode: "decimal", value: hnaShow(it.rfq_hna) || null, "aria-label": t("hna", pack), disabled: lock });
+  const disc = el("input", { inputmode: "decimal", value: it.rfq_disc != null ? discShow(it.rfq_disc) : null, "aria-label": t("disc"), placeholder: "15%", disabled: lock });
   const result = el("div", { class: "result" });
   const live = () => {
     const n = (x) => +String(x).replace(",", ".");
-    const p = unitPrice(n(hnaValue(hna.value)) || null, +digits(qty.value) || null, (n(discValue(disc.value)) || 0) / 100);
+    const p = unitPrice(n(hnaValue(hna.value)) || null, +digits(qty.value) || null, discFraction(disc.value));
     put(clear(result), el("span", { class: "lbl", text: t("per_pcs") }), el("b", { text: p == null ? "—" : rp(p) }));
-    if (p != null && it.mou_unit_price) {
-      const ch = p / it.mou_unit_price - 1;
-      put(result, el("span", { class: `chg ${ch > 0.0005 ? "up" : ch < -0.0005 ? "down" : ""}`, text: Math.abs(ch) < 0.0005 ? t("same") : `${ch > 0 ? "+" : ""}${pctTxt(ch)} ${t("vs_mou")}` }));
-    }
   };
   qty.addEventListener("input", () => { qty.value = digits(qty.value); live(); });
   hna.addEventListener("input", () => { const v = hnaValue(hna.value); hna.value = v ? hnaShow(v) : ""; live(); });
-  disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,]/g, ""); live(); });
+  disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,%]/g, ""); live(); });
   qty.addEventListener("change", () => save(a, it, { rfq_qty: digits(qty.value) || null }));
   hna.addEventListener("change", () => save(a, it, { rfq_hna: hnaValue(hna.value) || null }));
   disc.addEventListener("change", () => save(a, it, { rfq_disc: discValue(disc.value) || null }));
   put(body, el("div", { class: "grid3" },
     el("label", { class: "field" }, el("span", { class: "lbl", text: t("hna", pack) }), el("div", { class: "affix" }, el("span", { text: "Rp" }), hna)),
     el("label", { class: "field" }, el("span", { class: "lbl", text: t("qty", pack) }), el("div", { class: "affix" }, qty, el("span", { text: "pcs" }))),
-    el("label", { class: "field" }, el("span", { class: "lbl", text: t("disc") }), el("div", { class: "affix" }, disc, el("span", { text: "%" })))),
+    el("label", { class: "field" }, el("span", { class: "lbl", text: t("disc") }), disc)),
   result);
   live();
 }
 
 function fbBody(body, it, a) {
   if (it.co_disc == null) { put(body, el("p", { class: "muted", text: "—" })); return; }
-  const disc = el("input", { inputmode: "decimal", value: it.fb1_disc != null ? discShow(it.fb1_disc) : null, "aria-label": t("own") });
+  const disc = el("input", { inputmode: "decimal", value: it.fb1_disc != null ? discShow(it.fb1_disc) : null, "aria-label": t("own"), disabled: !!P.me.locked });
   disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,]/g, ""); });
   disc.addEventListener("change", () => save(a, it, { fb1_disc: discValue(disc.value) || null }));
   const accepted = it.fb1_disc != null && Math.abs(it.fb1_disc - it.co_disc) < 1e-9;
@@ -541,13 +578,14 @@ function fbBody(body, it, a) {
     el("div", { class: "ref" }, el("span", { class: "lbl", text: t("rfq_price") }), el("span", {}, `HNA ${rp(it.rfq_hna)} · ${t("disc")} ${pctTxt(it.rfq_disc || 0)} → `, el("b", { text: `${rp(it.rfq_unit_price)}/pcs` }))),
     el("div", { class: "ref co" }, el("span", { class: "lbl", text: t("co") }), el("span", {}, `${t("disc")} ${pctTxt(it.co_disc)} → `, el("b", { text: `${rp(it.co_unit_price)}/pcs` })),
       el("button", { type: "button", class: `pbtn small ${accepted ? "on" : "primary"}`, text: accepted ? `✓ ${t("accept")}` : t("accept"),
-        onclick: () => save(a, it, { fb1_disc: String(+(it.co_disc * 100).toFixed(4)).replace(".", ",") }, true) })),
-    el("label", { class: "field narrow" }, el("span", { class: "lbl", text: t("own") }), el("div", { class: "affix" }, disc, el("span", { text: "%" }))),
+        disabled: !!P.me.locked, onclick: () => save(a, it, { fb1_disc: discShow(it.co_disc) }, true) })),
+    el("label", { class: "field narrow" }, el("span", { class: "lbl", text: t("own") }), disc),
     el("div", { class: "result" }, el("span", { class: "lbl", text: t("per_pcs") }), el("b", { text: rp(it.fb1_unit_price) })));
 }
 
 function paintIssues(a, it) {
   const box = clear(a.querySelector(".issues"));
+  if (P.me.locked) return; // sent: read-only, nothing left to fix
   const open = new Set(it.outstanding);
   const confirmed = new Set((it.principal_confirmed || "").split(",").filter(Boolean));
   for (const i of it.issues) {
@@ -556,7 +594,7 @@ function paintIssues(a, it) {
     if (i.level === "reason") put(row, reasonPicker(a, it));
     if (i.level === "confirm") {
       put(row, confirmed.has(i.code) ? el("span", { class: "ok", text: `✓ ${t("confirmed")}` }) :
-        el("button", { type: "button", class: "pbtn small", text: t("yes"), onclick: () => save(a, it, {}, true, i.code) }));
+        el("button", { type: "button", class: "pbtn small", text: t("yes"), disabled: !!P.me.locked, onclick: () => save(a, it, {}, true, i.code) }));
     }
     put(box, row);
   }
@@ -565,9 +603,9 @@ function paintIssues(a, it) {
 function reasonPicker(a, it) {
   const [pick0, ...rest] = (it.price_reason || "").split(" — ");
   const known = P.me.reasons.find((r) => r.id === pick0 || r.en === pick0);
-  const sel = el("select", { "aria-label": t("reason") }, el("option", { value: "", text: t("reason_pick") }),
+  const sel = el("select", { "aria-label": t("reason"), disabled: !!P.me.locked }, el("option", { value: "", text: t("reason_pick") }),
     P.me.reasons.map((r) => el("option", { value: r.id, text: r[P.lang], selected: known && known.id === r.id })));
-  const detail = el("input", { placeholder: t("reason_detail"), value: known ? rest.join(" — ") || null : it.price_reason || null, maxlength: 200 });
+  const detail = el("input", { placeholder: t("reason_detail"), value: known ? rest.join(" — ") || null : it.price_reason || null, maxlength: 200, disabled: !!P.me.locked });
   const push = () => {
     const v = [sel.value, detail.value.trim()].filter(Boolean).join(" — ");
     if (v !== (it.price_reason || "")) save(a, it, { price_reason: v || null });
@@ -603,6 +641,8 @@ async function save(a, it, changes, rerender = false, confirmCode = null) {
     const st2 = a.querySelector(".savestate"); st2.className = "savestate ok"; st2.textContent = t("saved");
     refreshCounts();
   } catch (e) {
+    // A refused value (validation, locked) is not queued for retry; only network failures are.
+    if (e.status >= 400 && e.status < 500) { const q = pending(); delete q[it.id]; setPending(q); }
     const st2 = a.isConnected ? a.querySelector(".savestate") : st;
     st2.className = "savestate bad"; put(clear(st2), `${t("unsaved")}: ${e.message} `,
       el("button", { type: "button", class: "pbtn small", text: t("retry"), onclick: () => save(a, it, {}, rerender, confirmCode) }));
@@ -668,7 +708,7 @@ async function openSummary() {
       el("p", { class: "okline", text: `✓ ${t("sum_ok")}` }),
     s.increase_count ? el("details", {}, el("summary", { text: `${t("sum_up")} (${num(s.increase_count)})` }),
       el("ul", { class: "left" }, s.increases.map((x) => el("li", {}, el("div", {}, el("b", { text: x.item_name }),
-        el("div", { class: "small", text: `${rp(x.mou_unit_price)} → ${rp(x.rfq_unit_price)} · ${x.reason || "—"}` })))))) : null,
+        el("div", { class: "small", text: x.reason || "—" })))))) : null,
     el("label", { class: "agree" }, agree, t("sum_agree")),
     el("div", { class: "pactions" }, sendBtn, el("button", { type: "button", class: "pbtn", text: t("cancel"), onclick: () => $("dlg").close() })));
   if (!s.can_send) agree.disabled = true;

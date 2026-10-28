@@ -45,6 +45,8 @@ function currentRoute() {
 
 async function route() {
   const { page, rest } = currentRoute();
+  // A side panel never survives a change of page.
+  if ($("drawer") && !$("drawer").hidden && typeof closeDrawer === "function") closeDrawer();
   if (NEEDS_AUTH.has(page) && !shell.user) {
     shell.intended = location.hash;
     location.hash = "#signin";
