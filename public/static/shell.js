@@ -74,7 +74,11 @@ async function route() {
   hideTip();
   updateAiRoleContext(page);
 
-  if (page === "signin") setTimeout(() => $("signin-email").focus(), 30);
+  if (page === "signin") {
+    const err = $("signin-error");
+    if (err) err.hidden = true;
+    setTimeout(() => $("signin-email").focus(), 30);
+  }
   if (page === "nego") ngEnter(rest);
   if (page === "admin") adminEnter(rest[0] || "periods");
   if (page === "principal") principalEnter(rest[0] || "");
@@ -114,6 +118,10 @@ async function signIn(e) {
 }
 
 async function afterSignIn(d) {
+  if (d.token) {
+    localStorage.setItem("nego_token", d.token);
+    sessionStorage.setItem("nego_token", d.token);
+  }
   shell.user = d.user;
   await loadCatalog();
   renderHeader();
@@ -156,6 +164,8 @@ async function setPassword(e) {
 }
 
 async function signOut() {
+  localStorage.removeItem("nego_token");
+  sessionStorage.removeItem("nego_token");
   try { await send("/api/auth/signout", "POST", {}); } catch (_) { /* already signed out */ }
   shell.user = null;
   renderHeader();
@@ -309,7 +319,8 @@ async function principalEnter(cidParam) {
     const openCycles = (d.principals || []).filter(p => p.cycle && p.cycle.status === "open").map(p => ({
       cycle_id: p.cycle.id,
       name: `${p.name} (${p.category || "Principal"})`,
-      step: p.cycle.step_label
+      step: p.cycle.step_label,
+      token: p.cycle.active_token || ""
     }));
 
     if (!openCycles.length) {
@@ -331,8 +342,11 @@ async function principalEnter(cidParam) {
 
     select.value = String(activeCid);
     const updateSrc = (cid) => {
-      iframe.src = `/p?cycle_id=${cid}`;
-      openLink.href = `/p?cycle_id=${cid}`;
+      const cyc = openCycles.find(c => c.cycle_id === cid);
+      const tkn = cyc?.token || "";
+      const query = tkn ? `cycle_id=${cid}&token=${encodeURIComponent(tkn)}` : `cycle_id=${cid}`;
+      iframe.src = `/p?${query}`;
+      openLink.href = `/p?${query}`;
     };
     updateSrc(activeCid);
 
@@ -362,6 +376,18 @@ async function shellInit() {
   $("signin-form").addEventListener("submit", signIn);
   $("setpw-form").addEventListener("submit", setPassword);
   $("signout").addEventListener("click", signOut);
+  document.querySelectorAll(".demo-login-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const email = btn.dataset.email;
+      if (email) {
+        $("signin-email").value = email;
+        $("signin-password").value = "";
+        $("signin-error").hidden = true;
+        const fakeEvt = { preventDefault: () => {} };
+        signIn(fakeEvt);
+      }
+    });
+  });
   window.addEventListener("nego:signed-out", () => {
     if (!shell.user) return;
     shell.user = null;

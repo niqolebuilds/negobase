@@ -135,8 +135,16 @@ async function call(path, { method = "GET", body, form } = {}) {
   if (cycleId && !path.includes("cycle_id=") && !path.includes("cid=")) {
     path += (path.includes("?") ? "&" : "?") + "cycle_id=" + encodeURIComponent(cycleId);
   }
+  if (token && !path.includes("token=") && !path.includes("t=")) {
+    path += (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+  }
   const opts = { method, headers: { "X-Requested-With": "nego" }, credentials: "same-origin" };
   if (token) opts.headers["X-Principal-Token"] = token;
+  const staffToken = localStorage.getItem("nego_token") || sessionStorage.getItem("nego_token");
+  if (staffToken) {
+    opts.headers["Authorization"] = `Bearer ${staffToken}`;
+    opts.headers["X-Nego-Token"] = staffToken;
+  }
   if (form) opts.body = form;
   else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
   const r = await fetch(path, opts);
@@ -182,7 +190,17 @@ async function boot() {
   setLang(P.lang, false);
   aiInit();
   if (new URLSearchParams(location.search).get("invalid")) { showInvalid(); return; }
-  try { P.me = await call("/api/p/me"); } catch (_) { return; }
+  try {
+    P.me = await call("/api/p/me");
+  } catch (err) {
+    console.error("Principal portal me error:", err);
+    put(clear($("app")), el("section", { class: "pcard center" },
+      el("h2", { text: P.lang === "id" ? "Gagal memuat portal principal" : "Failed to load principal portal" }),
+      el("p", { class: "muted", text: err.message || "Tautan atau sesi tidak valid" }),
+      el("button", { class: "pbtn primary", onclick: () => location.reload(), text: P.lang === "id" ? "Coba lagi" : "Retry" })
+    ));
+    return;
+  }
   $("who").textContent = P.me.principal.name;
   if (P.me.locked) P.filter = "all";
   render();
