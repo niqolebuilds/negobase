@@ -2149,7 +2149,8 @@ const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize:
 const withFiles = (mw: any) => (req: Request, res: Response, next: any) =>
   mw(req, res, (err: any) => (err ? res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "File is larger than 30 MB" : String(err.message || err) }) : next()));
 
-app.use("/static", express.static(STATIC_DIR));
+// no-cache: browsers re-check every file, so a deploy never leaves a page running old scripts
+app.use("/static", express.static(STATIC_DIR, { etag: true, setHeaders: (res) => res.setHeader("Cache-Control", "no-cache") }));
 
 app.get("/", (_req: Request, res: Response) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));

@@ -2162,7 +2162,7 @@ app.use("/api", (req, res, next) => {
 });
 var fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 4 } });
 var withFiles = (mw) => (req, res, next) => mw(req, res, (err) => err ? res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "File is larger than 30 MB" : String(err.message || err) }) : next());
-app.use("/static", express.static(STATIC_DIR));
+app.use("/static", express.static(STATIC_DIR, { etag: true, setHeaders: (res) => res.setHeader("Cache-Control", "no-cache") }));
 app.get("/", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));
 });
