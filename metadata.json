@@ -1,0 +1,8 @@
+{
+  "name": "Negotiation Intelligence",
+  "description": "Healthcare procurement price intelligence, benchmark analysis, and MOU renewal negotiation platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
