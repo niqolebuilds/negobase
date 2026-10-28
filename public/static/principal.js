@@ -205,6 +205,8 @@ function aiLang() {
   if (!$("ai-log").children.length) aiAdd("bot", x.hi);
 }
 function aiInit() {
+  // Staff previewing the portal already have the app-wide AI button.
+  if (window.self !== window.top) { $("aibtn").hidden = true; return; }
   $("aibtn").addEventListener("click", () => {
     const open = $("aipanel").hidden;
     $("aipanel").hidden = !open; $("aibtn").setAttribute("aria-expanded", String(open));

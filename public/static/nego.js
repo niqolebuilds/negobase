@@ -247,7 +247,8 @@ function renderNegoBoard(container, ps, d) {
     } else {
       inCol.forEach(p => {
         const card = el("li", { class: `bcard ${p.mou_alert ? "urgent" : ""}`, tabindex: 0 });
-        card.append(
+        // Element.append prints null as the word "null", so empty slots are dropped.
+        card.append(...[
           el("div", { class: "b-top" },
             el("span", { class: `days ${p.mou_days_left != null && p.mou_days_left <= 90 ? "soon" : ""}` },
               p.mou_end ? `${fmtDate(p.mou_end)} (${p.mou_days_left != null ? (p.mou_days_left < 0 ? `ended ${-p.mou_days_left}d ago` : `${p.mou_days_left}d left`) : ""})` : "MOU not set"
@@ -257,7 +258,7 @@ function renderNegoBoard(container, ps, d) {
           el("span", { class: "meta", text: [p.category, p.distributor ? `via ${p.distributor}` : ""].filter(Boolean).join(" · ") }),
           p.cycle ? el("span", { class: "next", text: `Step: ${p.cycle.step_label}` }) : null,
           p.cycle && p.cycle.open_anomalies ? el("span", { class: "pill medium", style: "margin-top: 6px; width: fit-content;", text: `${p.cycle.open_anomalies} open findings` }) : null
-        );
+        ].filter(Boolean));
         card.addEventListener("click", () => {
           if (p.cycle) location.hash = `#nego/${p.cycle.id}`;
           else if (canWork()) startCycleForm(p);
@@ -514,9 +515,13 @@ function renderHeaderParts() {
       el("span", { class: "n", text: i < at ? "✓" : String(i) }),
       el("span", { class: "t" }, el("b", { text: s.label }), el("small", { class: `who ${s.who}`, text: WHO[s.who] })))));
   const nextKey = keys[at + 1];
+  const noItems = !k.items;
   const move = canWork() && c.status === "open" ? el("div", { class: "step-actions" },
     el("p", { class: "small", text: STEP_DESC[c.current_step] }),
-    nextKey ? act(`Move to ${steps[at + 1].label}`, () => moveStep(nextKey)) : null,
+    nextKey ? (noItems
+      ? el("span", { class: "step-blocked" }, el("button", { type: "button", class: "act", disabled: "", text: `Move to ${steps[at + 1].label}` }),
+          el("span", { class: "small warn-text", text: "Build the item list first (Files & prepare). The principal can't start without items." }))
+      : act(`Move to ${steps[at + 1].label}`, () => moveStep(nextKey))) : null,
     at > 0 ? act("Back a step", () => moveStep(keys[at - 1]), "ghost") : null) : el("p", { class: "small muted step-actions", text: STEP_DESC[c.current_step] });
   const sent = (c.submitted_steps || {})[c.current_step];
   const turn = steps[at] && steps[at].who === "principal";
@@ -1867,7 +1872,7 @@ async function drawCO(box) {
   const facts = el("div", { class: "facts" },
     [["Items with an RFQ", num(rfq.items)], ["RFQ impact a year", rfq.impact == null ? "—" : `${rfq.impact > 0 ? "+" : ""}${money(rfq.impact)}`],
       ["Counter offers set", num(co.items)], ["Counter offer impact", co.impact == null ? "—" : `${co.impact > 0 ? "+" : ""}${money(co.impact)}`],
-      ["New suggestions", num(plan.count)], ["Different from RFQ", num(plan.diff_count ?? plan.count)],
+      ["New suggestions", num(plan.count)], ["Same as the RFQ (no counter)", num(plan.same_as_rfq || 0)],
       ["Impact if applied vs RFQ", (plan.co_impact_vs_rfq ?? plan.co_impact) == null ? "—" : `${(plan.co_impact_vs_rfq ?? plan.co_impact) > 0 ? "+" : ""}${money(plan.co_impact_vs_rfq ?? plan.co_impact)}`]]
       .map(([l, v]) => el("div", {}, el("span", { text: l }), el("b", { text: v }))));
   const sample = plan.suggestions.slice(0, 5).map((s) => el("li", { class: "small", text: `${pct(s.co_disc, 1)} — ${s.note}` }));

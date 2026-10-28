@@ -46,6 +46,29 @@ Sponsorship is real value transferred and the engine quantifies it — but a ven
 quoting above market while sponsoring heavily is buying the price gap, and separating
 the ledgers is what makes that visible.
 
+## The web app (Node / Express)
+
+`server.ts` is the web app (`npm run dev`, or `npm run build && npm start`). Data is held in memory
+(a restart resets to the sample), so treat it as a beta.
+
+**Access control (beta, no passwords).** Sign-in is by email and creates a cookie session. Roles are enforced
+on every `/api` call, not just by hiding buttons:
+
+| Who | Can |
+|---|---|
+| **Admin** | everything, including `/api/admin/*`: periods and data hub, principals (add, import, edit), users, settings |
+| **Negotiator** | Negotiation (cycles, items, findings, counter offers), master data, documents. No periods, principals, users or settings |
+| **Viewer** | read-only |
+| **Vendor (principal)** | only `/api/p/*`, through a private link; sees only their own RFQ. No MOU, formulary, PO, benchmark, margin, findings or other principals' data, including through the vendor AI helper |
+
+Set `NEGO_ADMIN_PASSWORD` to require a password for admin accounts. Vendor links are random, expire,
+and can be revoked. Without one, nothing is reachable.
+
+**Admin hub.** Admin → Negotiation Periods holds the PO export, formulary, SKU master and SKU-principal
+tagging, uploaded once per period (e.g. *CnC 2026 End-Year*). Every principal's item list is built from it;
+only the principal's current MOU is uploaded per principal. Admin → Principals adds, imports (xlsx or csv
+template) and edits principals.
+
 ## Install
 
 ```bash

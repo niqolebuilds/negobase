@@ -212,3 +212,6 @@ table.items thead th.sortable.sorted .th-sort-icon { opacity: 1; color: var(--ac
 .progress-form .cat-field label.check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
 .progress-form .cat-field label.check input { width: auto; margin: 0; }
 .cat-field .hint { display: block; margin-top: 4px; }
+
+.step-blocked { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.step-blocked button[disabled] { opacity: .5; cursor: not-allowed; }

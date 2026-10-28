@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
 import ExcelJS from "exceljs";
 import { readTable, pick, hasColumn, toNumber, toIsoDate, type Row } from "./tabular.js";
+import { buildTemplate, readTemplate, checkRow, type TemplateRow } from "./template.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
@@ -1389,8 +1390,8 @@ function summarizeCycleItems(enriched: any[]) {
   const activeItems = enriched.filter((i) => i.item_status !== "Discontinue");
   const rfqFilledActive = activeItems.filter((i) => i.rfq_hna != null);
 
-  const marginFormularyTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0);
-  const marginPoTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0);
+  const marginFormularyTotal = enriched.some((i) => i.margin_impact_vs_formulary != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0) : null;
+  const marginPoTotal = enriched.some((i) => i.margin_impact_vs_po != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0) : null;
 
   return {
     items: enriched.length,
@@ -3079,8 +3080,10 @@ app.get("/api/nego/benchmarks", (_req: Request, res: Response) => {
   res.json({ sources: [{ source: "INAPROC e-Katalog", count: 116, latest: "2026-08-15" }] });
 });
 
-app.get("/api/nego/cycles/:cid/co-plan", (req: Request, res: Response) => {
-  const cid = Number(req.params.cid);
+// One counter-offer plan used by both the preview (GET) and the apply (POST): the lowest of the MOU
+// price, the last PO price and a confirmed benchmark, never below what the principal already quoted.
+// A suggestion equal to the RFQ discount is no counter, so it is not listed or counted.
+function computeCoPlan(cid: number) {
   const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
@@ -3091,9 +3094,7 @@ app.get("/api/nego/cycles/:cid/co-plan", (req: Request, res: Response) => {
   }
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   let coImpactVsRfq = 0;
-  let diffCount = 0;
-
-  const suggestions = items
+  const all = items
     .filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue")
     .map((i) => {
       const en = enrichCycleItem(i, ppn, c);
@@ -3109,13 +3110,10 @@ app.get("/api/nego/cycles/:cid/co-plan", (req: Request, res: Response) => {
       const co = best.price && gross ? Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - best.price / gross)) : i.rfq_disc || 0;
       const coDiscRounded = Number(co.toFixed(4));
       const coUnitPrice = calcUnitPrice(i.rfq_hna, i.rfq_qty, coDiscRounded, ppn, c?.binding, i.formulary_hna, i.last_po_price);
-
       const isDiff = Math.abs(coDiscRounded - (i.rfq_disc || 0)) > 0.0001;
       if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coUnitPrice != null) {
-        diffCount++;
         coImpactVsRfq += (coUnitPrice - en.rfq_unit_price) * en.annual_pcs;
       }
-
       return {
         item_id: i.id,
         co_disc: coDiscRounded,
@@ -3125,33 +3123,39 @@ app.get("/api/nego/cycles/:cid/co-plan", (req: Request, res: Response) => {
         diff_from_rfq: isDiff,
       };
     });
+  const fresh = all.filter((x) => x.diff_from_rfq);
+  return { all, fresh, same_as_rfq: all.length - fresh.length, co_impact_vs_rfq: coImpactVsRfq };
+}
 
+app.get("/api/nego/cycles/:cid/co-plan", (req: Request, res: Response) => {
+  const plan = computeCoPlan(Number(req.params.cid));
   res.json({
-    suggestions,
-    count: suggestions.length,
-    diff_count: diffCount,
-    co_impact_vs_rfq: coImpactVsRfq,
-    co_impact: coImpactVsRfq,
+    suggestions: plan.fresh,
+    count: plan.fresh.length,
+    same_as_rfq: plan.same_as_rfq,
+    diff_count: plan.fresh.length,
+    co_impact_vs_rfq: plan.co_impact_vs_rfq,
+    co_impact: plan.co_impact_vs_rfq,
     co_increases: 0,
   });
 });
 
 app.post("/api/admin/nego/cycles/:cid/co", (req: Request, res: Response) => {
   const cid = Number(req.params.cid);
-  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
-  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const overwrite = !!req.body?.overwrite;
+  const plan = computeCoPlan(cid);
+  const byItem = new Map(plan.all.map((x) => [x.item_id, x]));
   let applied = 0;
   for (const i of items) {
-    if (i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue") {
-      const en = enrichCycleItem(i, ppn, c);
-      const target = en.mou_unit_price || en.po_unit_price || en.rfq_unit_price;
-      const gross = (i.rfq_hna / i.rfq_qty) * (1 + ppn);
-      i.co_disc = target && gross ? Number(Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - target / gross)).toFixed(4)) : i.rfq_disc || 0;
-      applied++;
-    }
+    const sug = byItem.get(i.id);
+    if (!sug) continue;
+    if (!sug.diff_from_rfq) { if (overwrite) i.co_disc = null; continue; }   // equal to the RFQ: not a counter
+    if (!overwrite && i.co_disc != null) continue;                          // keep counters already set
+    i.co_disc = sug.co_disc;
+    applied++;
   }
-  res.json({ applied, co_impact: 0, scan: scanCycleAnomalies(cid) });
+  res.json({ applied, scan: scanCycleAnomalies(cid) });
 });
 
 app.post("/api/admin/nego/cycles/:cid/on-fill", (req: Request, res: Response) => {
@@ -3539,17 +3543,48 @@ app.post("/api/admin/nego/cycles/:cid/scan", (req: Request, res: Response) => {
   res.json({ ...counts, counts });
 });
 
+// Staff edits to one negotiation item: only these fields, with real values. (Nothing else on the item,
+// such as its id, ERP code or PO history, can be overwritten from a request.)
+const ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note"];
+const ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "mou_disc"];
+const ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
+function cleanItemChanges(input: any): { changes: any; error?: string } {
+  const out: any = {};
+  for (const [k, v] of Object.entries(input || {})) {
+    if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
+    else if (k === "item_status") {
+      if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
+      out[k] = v;
+    } else if (ITEM_DISC_FIELDS.includes(k)) {
+      if (v == null || v === "") { out[k] = null; continue; }
+      const raw = String(v).trim();
+      const n = toNumber(raw);
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid discount` };
+      const frac = raw.includes("%") ? n / 100 : n;
+      if (frac >= 1) return { changes: {}, error: `${k}: a discount must be between 0 and 1 (e.g. 0.15) or written as a percentage (15%)` };
+      out[k] = frac;
+    } else if (ITEM_NUM_FIELDS.includes(k)) {
+      if (v == null || v === "") { out[k] = null; continue; }
+      const n = toNumber(String(v));
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid number` };
+      out[k] = k.endsWith("qty") ? Math.round(n) : n;
+    } else return { changes: {}, error: `${k} can't be edited` };
+  }
+  return { changes: out };
+}
+
 app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req: Request, res: Response) => {
   const cid = Number(req.params.cid);
   const iid = Number(req.params.iid);
   const items = cycleItemsMap.get(cid) || [];
   const it = items.find((x) => x.id === iid);
   if (!it) return res.status(404).json({ error: "No such item" });
-  const changes = req.body?.changes || {};
-  Object.assign(it, changes);
+  const clean = cleanItemChanges(req.body?.changes || {});
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  Object.assign(it, clean.changes);
   const scan = scanCycleAnomalies(cid);
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(changes), scan });
+  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(clean.changes), scan });
 });
 
 app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req: Request, res: Response) => {
@@ -4045,7 +4080,7 @@ app.get("/api/p/me", (req: Request, res: Response) => {
     current_step: cycle.current_step,
     step_no: stepNumberMap[cycle.current_step] || 1,
     locked: lock.locked,
-    excel_upload: false,
+    excel_upload: true,
     lock_reason: lock.reason,
     submitted: cycle.submitted_steps?.[step] || null,
     due: cycle.step_due,
@@ -4325,6 +4360,167 @@ app.post("/api/p/submit", (req: Request, res: Response) => {
   res.json({ ok: true, step: nextStep, submitted_at: nowIso() });
 });
 
+// ---- Template_Nego (Excel) -----------------------------------------------------------------
+const TEMPLATE_PATH = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
+const STAFF_COLUMNS = ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "coDisc", "fb1Disc", "onDisc"];
+
+function templateOptions(c: any, forPrincipal: boolean) {
+  return {
+    forPrincipal,
+    showCounterOffer: !["prepare", "rfq"].includes(c.current_step) || !!c.submitted_steps?.rfq,
+    principal: c.principal?.name || "",
+    distributor: c.principal?.distributor || "",
+    contractStart: c.contract_start,
+    contractEnd: c.contract_end,
+    binding: c.binding,
+    deliveryFee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, ""),
+  };
+}
+
+async function sendWorkbook(res: Response, wb: ExcelJS.Workbook, filename: string) {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^\w.\- ]/g, "_")}"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+
+// Staff copy: the workbook with this negotiation's items, current MOU and every step so far.
+app.get("/api/nego/cycles/:cid/export.xlsx", async (req: Request, res: Response) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const items = cycleItemsMap.get(c.id) || [];
+  const wb = await buildTemplate(TEMPLATE_PATH, items, templateOptions(c, false));
+  await sendWorkbook(res, wb, `Template_Nego_${c.principal.name}.xlsx`);
+});
+
+// Vendor copy: no MOU, no analysis, only what the principal fills in.
+app.get("/api/p/template.xlsx", async (req: Request, res: Response) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle } = resolved;
+  const wb = await buildTemplate(TEMPLATE_PATH, cycleItemsMap.get(cycle.id) || [], templateOptions(cycle, true));
+  await sendWorkbook(res, wb, `Template_Nego_${cycle.principal.name}.xlsx`);
+});
+
+const STATUS_LABEL: Record<string, string> = { Active: "Active", Discontinue: "Discontinued" };
+function fieldNow(it: any, field: string) { return it[field] ?? null; }
+
+// Staff import: read the filled template, show every change, apply only on request.
+app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file")), async (req: Request, res: Response) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const file = (req as any).file as { originalname: string; buffer: Buffer } | undefined;
+  if (!file) return res.status(400).json({ error: "Choose the file first" });
+  let rows: TemplateRow[];
+  try { rows = await readTemplate(file.buffer); } catch (e: any) { return res.status(400).json({ error: e.message }); }
+  const items = cycleItemsMap.get(cid) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const byName = new Map(items.map((i) => [String(i.item_name).trim().toLowerCase(), i]));
+  const changes: any[] = [], errors: any[] = [], unmatched: any[] = [];
+  const seen = new Set<number>();
+  const perItem = new Map<number, any>();
+  let matched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code) || byName.get(r.item_name.trim().toLowerCase());
+    if (!it) { unmatched.push({ erp_code: r.erp_code, item_name: r.item_name }); continue; }
+    matched++; seen.add(it.id);
+    const chk = checkRow(r.cells, STAFF_COLUMNS);
+    chk.errors.forEach((m) => errors.push({ row: r.row, message: m }));
+    if (chk.errors.length) continue;
+    for (const ch of chk.changes) {
+      const old = fieldNow(it, ch.field);
+      const same = typeof ch.value === "number" && old != null ? Math.abs(Number(old) - ch.value) < 1e-9 : String(old ?? "") === String(ch.value);
+      if (same) continue;
+      changes.push({ item_id: it.id, erp_code: it.erp_code, item_name: it.item_name, field: ch.field, header: ch.header, old, new: ch.value });
+      perItem.set(it.id, { ...(perItem.get(it.id) || {}), [ch.field]: ch.value });
+    }
+  }
+  const byCol: Record<string, number> = {};
+  changes.forEach((x) => { byCol[x.header] = (byCol[x.header] || 0) + 1; });
+  const warning = matched === 0 ? "None of the rows match this negotiation's items. Is this the right principal's workbook?" : null;
+  if (String(req.body?.apply) === "1") {
+    if (warning) return res.status(400).json({ error: warning });
+    for (const [id, ch] of perItem) Object.assign(items.find((i) => i.id === id), ch);
+    const scan = scanCycleAnomalies(cid);
+    logAudit(actingUser().email, "cycle.import", { cycle_id: cid, items: perItem.size, changes: changes.length, file: file.originalname });
+    return res.json({ applied_items: perItem.size, applied_changes: changes.length, scan: { found: scan.open } });
+  }
+  res.json({
+    rows_in_file: rows.length, matched, unmatched_count: unmatched.length, unmatched: unmatched.slice(0, 50),
+    not_in_file: items.length - seen.size, items_changed: perItem.size, changes, changes_by_column: byCol, errors, warning,
+  });
+});
+
+// Vendor upload of the filled workbook: same checks as the form, only the columns of the current step,
+// and nothing is saved until the vendor confirms. Rows with a mistake are skipped and listed.
+app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req: Request, res: Response) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  const file = (req as any).file as { originalname: string; buffer: Buffer } | undefined;
+  if (!file) return res.status(400).json({ error: "Pilih file / Choose a file" });
+  let rows: TemplateRow[];
+  try { rows = await readTemplate(file.buffer); } catch (e: any) { return res.status(400).json({ error: `${e.message}` }); }
+  const allowed = step === "rfq" ? ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc"] : step === "feedback1" ? ["fb1Disc"] : [];
+  const items = cycleItemsMap.get(cycle.id) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const rejected: any[] = [], ready: { item: any; changes: any[] }[] = [];
+  let unmatched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code);
+    if (!it) { unmatched++; continue; }
+    const chk = checkRow(r.cells, allowed);
+    if (chk.errors.length) { rejected.push({ row: r.row, item_name: it.item_name, messages: chk.errors.map((m) => ({ id: m, en: m })) }); continue; }
+    if (chk.changes.length) ready.push({ item: it, changes: chk.changes });
+  }
+  if (String(req.body?.apply) === "1") {
+    for (const { item, changes } of ready) for (const ch of changes) item[ch.field] = ch.value;
+    scanCycleAnomalies(cycle.id);
+    return res.json({ applied: ready.length });
+  }
+  res.json({ accepted: ready.length, rejected, read_errors: [], unmatched_count: unmatched, notes: [] });
+});
+
+// Master data export
+app.get("/api/admin/master/items.xlsx", async (_req: Request, res: Response) => {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Master items");
+  ws.addRow(["ERP Code", "Item Name", "Generic Name", "Group", "Brand", "Catalog No. (REF)", "UOM", "Tags", "Status", "Source"]);
+  ws.getRow(1).font = { bold: true };
+  for (const m of itemMasterMap.values()) ws.addRow([m.erp_code, m.item_name, m.generic_name || "", m.group_key || "", m.brand || "", m.catalog_no || "", m.uom || "", m.tags || "", m.status || "", m.source || ""]);
+  ws.columns.forEach((c, i) => { c.width = [14, 42, 22, 22, 18, 18, 14, 16, 12, 14][i]; });
+  await sendWorkbook(res, wb, "master_items.xlsx");
+});
+
+// Submission package: agreed prices (Online Nego) per the binding, for the Excel confirmation / BAK draft
+app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req: Request, res: Response) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const items = (cycleItemsMap.get(c.id) || [])
+    .filter((i) => i.item_status !== "Discontinue")
+    .map((i) => enrichCycleItem(i, ppn, c))
+    .sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
+  const seen = new Set<string>();
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Confirmation");
+  ws.addRow([`Agreed prices: ${c.principal.name}`]);
+  ws.addRow([`Contract ${c.contract_start} to ${c.contract_end} · Binding ${c.binding}`]);
+  ws.addRow([]);
+  ws.addRow(["ERP Code", "Item Name", "Brand", "Catalog No. (REF)", "Qty/PO Unit", "HNA/PO Unit (excl. PPN)", "Agreed Disc%", "Agreed Price/pc (incl. PPN)"]);
+  ws.getRow(4).font = { bold: true };
+  for (const i of items) {
+    if (seen.has(i.erp_code) || i.on_disc == null) continue;
+    seen.add(i.erp_code);
+    ws.addRow([i.erp_code, i.item_name, i.brand, i.catalog_no, i.rfq_qty, i.rfq_hna, i.on_disc, i.on_unit_price]);
+  }
+  ws.columns.forEach((col, k) => { col.width = [14, 42, 18, 18, 12, 22, 14, 24][k]; });
+  logAudit(actingUser().email, "cycle.package", { cycle_id: c.id, rows: seen.size });
+  await sendWorkbook(res, wb, `Confirmation_${c.principal.name}.xlsx`);
+});
+
 app.get("/api/p/documents", (req: Request, res: Response) => {
   const resolved = resolvePrincipalCycle(req);
   if (!resolved) {
@@ -4410,15 +4606,6 @@ app.delete("/api/p/documents/:did", (req: Request, res: Response) => {
   });
 });
 
-app.get("/api/p/template.xlsx", (req: Request, res: Response) => {
-  if (!resolvePrincipalCycle(req)) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  const templatePath = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
-  if (fs.existsSync(templatePath)) {
-    res.download(templatePath, "Template_Nego.xlsx");
-  } else {
-    res.status(404).send("Template not found");
-  }
-});
 
 // ---- Vendor AI helper --------------------------------------------------------------------
 // Confidential by construction: the model is only ever given what the vendor already sees on their
@@ -4473,11 +4660,6 @@ Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)
   }
 });
 
-// Excel upload needs a multipart parser and a workbook reader, which this build doesn't have yet.
-// (It used to copy the MOU prices into the RFQ, so it is refused rather than faked.)
-app.post("/api/p/template", (_req: Request, res: Response) => {
-  res.status(501).json({ error: "Unggah Excel belum tersedia / Excel upload is not available yet. Please fill in the form." });
-});
 
 // --------------------------------------------------------------------------
 // Science Skills (openFDA + PubChem + ChEMBL) & Google Search Grounding

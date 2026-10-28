@@ -4,12 +4,12 @@ import fs from "fs";
 import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
-import ExcelJS2 from "exceljs";
+import ExcelJS3 from "exceljs";
 
 // tabular.ts
 import ExcelJS from "exceljs";
-function parseCsvText(text) {
-  const src = text.replace(/^﻿/, "");
+function parseCsvText(text2) {
+  const src = text2.replace(/^﻿/, "");
   const sep = detectSeparator(src);
   const records = [];
   let field = "";
@@ -129,6 +129,202 @@ function toIsoDate(v) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
+// template.ts
+import ExcelJS2 from "exceljs";
+var COL = {
+  erp: 1,
+  name: 2,
+  brand: 3,
+  ref: 4,
+  status: 5,
+  remarks: 6,
+  mouQty: 7,
+  mouHna: 8,
+  mouDisc: 9,
+  mouPrice: 10,
+  rfqQty: 11,
+  rfqHna: 12,
+  rfqDisc: 13,
+  rfqPrice: 14,
+  coDisc: 15,
+  coPrice: 16,
+  fb1Disc: 17,
+  fb1Price: 18,
+  onDisc: 19,
+  onPrice: 20
+};
+var FIRST_ROW = 8;
+var FORMULA_ROWS = 500;
+var fmtLongDate = (iso) => {
+  const m = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+  const [y, mo, d] = iso.split("-").map(Number);
+  return `${String(d).padStart(2, "0")} ${m[mo - 1]} ${y}`;
+};
+async function buildTemplate(templatePath, items, o) {
+  const wb = new ExcelJS2.Workbook();
+  await wb.xlsx.readFile(templatePath);
+  const ws = wb.getWorksheet("Form") || wb.worksheets[0];
+  ws.getCell("A1").value = `Contract Period: ${fmtLongDate(o.contractStart)}  -  ${fmtLongDate(o.contractEnd)}`;
+  const bindingText = o.binding === "Disc" ? "Discount (% off HNA)" : o.binding === "Nett to Disc" ? "Nett to Disc (formulary HNA \xD7 (1 \u2212 disc))" : "Nett Price (HNA after discount)";
+  ws.getCell("A2").value = `Binding: ${bindingText}`;
+  ws.getCell("A3").value = `Delivery Fee: ${o.deliveryFee}`;
+  ws.getCell("A4").value = `Principal: ${o.principal}`;
+  ws.getCell("A5").value = `Distributor: ${o.distributor || "-"}`;
+  const put = (r, c, v) => {
+    ws.getCell(r, c).value = v == null || v === "" ? null : v;
+  };
+  items.forEach((it, i) => {
+    const r = FIRST_ROW + i;
+    put(r, COL.erp, it.erp_code);
+    put(r, COL.name, it.item_name);
+    put(r, COL.brand, it.brand);
+    put(r, COL.ref, it.catalog_no);
+    put(r, COL.status, it.item_status);
+    put(r, COL.remarks, it.remarks);
+    if (!o.forPrincipal) {
+      put(r, COL.mouQty, it.mou_qty);
+      put(r, COL.mouHna, it.mou_hna);
+      put(r, COL.mouDisc, it.mou_disc);
+    }
+    put(r, COL.rfqQty, it.rfq_qty);
+    put(r, COL.rfqHna, it.rfq_hna);
+    put(r, COL.rfqDisc, it.rfq_disc);
+    if (!o.forPrincipal || o.showCounterOffer) put(r, COL.coDisc, it.co_disc);
+    put(r, COL.fb1Disc, it.fb1_disc);
+    if (!o.forPrincipal) put(r, COL.onDisc, it.on_disc);
+    if (r > FORMULA_ROWS) {
+      const L = (c) => ws.getColumn(c).letter;
+      const price = (q, h, d, abs = false) => {
+        const qa = abs ? `$${L(h)}${r}` : `${L(h)}${r}`, qq = abs ? `$${L(q)}${r}` : `${L(q)}${r}`;
+        return { formula: `IFERROR(IF(${qa}="","",${qa}/${qq}*(1-${L(d)}${r})*1.11),"")` };
+      };
+      if (!o.forPrincipal) ws.getCell(r, COL.mouPrice).value = price(COL.mouQty, COL.mouHna, COL.mouDisc);
+      ws.getCell(r, COL.rfqPrice).value = price(COL.rfqQty, COL.rfqHna, COL.rfqDisc);
+      ws.getCell(r, COL.coPrice).value = price(COL.rfqQty, COL.rfqHna, COL.coDisc, true);
+      ws.getCell(r, COL.fb1Price).value = price(COL.rfqQty, COL.rfqHna, COL.fb1Disc, true);
+      ws.getCell(r, COL.onPrice).value = price(COL.rfqQty, COL.rfqHna, COL.onDisc, true);
+    }
+  });
+  if (o.forPrincipal) {
+    ws.getCell("G6").value = "";
+    for (const c of [COL.mouQty, COL.mouHna, COL.mouDisc, COL.mouPrice]) {
+      ws.getColumn(c).hidden = true;
+    }
+    if (!o.showCounterOffer) for (const c of [COL.coDisc, COL.coPrice]) ws.getColumn(c).hidden = true;
+    for (const c of [COL.onDisc, COL.onPrice]) ws.getColumn(c).hidden = true;
+  }
+  return wb;
+}
+function text(v) {
+  if (v == null) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "object") {
+    const o = v;
+    if (o.result !== void 0) return text(o.result);
+    if (o.richText) return o.richText.map((t) => t.text).join("");
+    if (o.text !== void 0) return String(o.text);
+    return "";
+  }
+  return String(v).trim();
+}
+async function readTemplate(buffer) {
+  const wb = new ExcelJS2.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = wb.getWorksheet("Form") || wb.worksheets[0];
+  if (!ws) throw new Error("The workbook has no sheet");
+  let headerRow = 0;
+  const headers = {};
+  for (let r = 1; r <= 20 && !headerRow; r++) {
+    ws.getRow(r).eachCell((c, n) => {
+      if (text(c.value).toLowerCase() === "erp code") headerRow = r;
+    });
+  }
+  if (!headerRow) throw new Error('This is not Template_Nego: no "ERP Code" column found');
+  ws.getRow(headerRow).eachCell((c, n) => {
+    const t = text(c.value);
+    if (t) headers[t.toLowerCase()] = n;
+  });
+  const at = (names) => {
+    for (const n of names) if (headers[n.toLowerCase()]) return headers[n.toLowerCase()];
+    return 0;
+  };
+  const cols = {
+    erp: at(["ERP Code"]),
+    name: at(["Item Name"]),
+    brand: at(["Brand / Manufacturer", "Brand"]),
+    ref: at(["Catalog No. (REF)", "Catalog No"]),
+    status: at(["Item Status", "Status"]),
+    remarks: at(["Remarks"]),
+    rfqQty: at(["RFQ_Qty/PO Unit"]),
+    rfqHna: at(["RFQ_HNA/PO Unit (excl. PPN)"]),
+    rfqDisc: at(["RFQ_Disc%"]),
+    coDisc: at(["CO_Disc%"]),
+    fb1Disc: at(["FB1_Disc%"]),
+    onDisc: at(["ON_Disc%"])
+  };
+  const rows = [];
+  for (let r = headerRow + 1; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+    const get = (k) => cols[k] ? text(row.getCell(cols[k]).value) : "";
+    const erp = get("erp");
+    if (!erp && !get("name")) continue;
+    const cells = {};
+    for (const k of Object.keys(cols)) if (k !== "erp" && k !== "name") cells[k] = get(k);
+    rows.push({ row: r, erp_code: erp.toUpperCase(), item_name: get("name"), cells });
+  }
+  return rows;
+}
+var STATUS_WORDS = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue" };
+var FIELD_META = {
+  brand: { header: "Brand / Manufacturer", field: "brand", kind: "text" },
+  ref: { header: "Catalog No. (REF)", field: "catalog_no", kind: "text" },
+  status: { header: "Item Status", field: "item_status", kind: "status" },
+  remarks: { header: "Remarks", field: "remarks", kind: "text" },
+  rfqQty: { header: "RFQ_Qty/PO Unit", field: "rfq_qty", kind: "qty" },
+  rfqHna: { header: "RFQ_HNA/PO Unit", field: "rfq_hna", kind: "money" },
+  rfqDisc: { header: "RFQ_Disc%", field: "rfq_disc", kind: "disc" },
+  coDisc: { header: "CO_Disc%", field: "co_disc", kind: "disc" },
+  fb1Disc: { header: "FB1_Disc%", field: "fb1_disc", kind: "disc" },
+  onDisc: { header: "ON_Disc%", field: "on_disc", kind: "disc" }
+};
+function checkRow(cells, allowed) {
+  const changes = [];
+  const errors = [];
+  for (const key of allowed) {
+    const raw = (cells[key] ?? "").trim();
+    if (raw === "") continue;
+    const m = FIELD_META[key];
+    if (!m) continue;
+    if (m.kind === "text") {
+      changes.push({ field: m.field, header: m.header, value: raw.slice(0, 300) });
+      continue;
+    }
+    if (m.kind === "status") {
+      const v = STATUS_WORDS[raw.toLowerCase()];
+      if (!v) errors.push(`${m.header}: use Active or Discontinue`);
+      else changes.push({ field: m.field, header: m.header, value: v });
+      continue;
+    }
+    const n = toNumber(raw);
+    if (n == null) {
+      errors.push(`${m.header}: "${raw}" is not a number`);
+      continue;
+    }
+    if (m.kind === "qty") {
+      if (n < 1 || !Number.isFinite(n)) errors.push(`${m.header}: must be at least 1`);
+      else changes.push({ field: m.field, header: m.header, value: Math.round(n) });
+    } else if (m.kind === "money") {
+      if (n <= 0) errors.push(`${m.header}: must be more than 0`);
+      else changes.push({ field: m.field, header: m.header, value: n });
+    } else {
+      const frac = raw.includes("%") ? n / 100 : n;
+      if (frac < 0 || frac >= 1) errors.push(`${m.header}: a discount must be between 0% and 100% (a cell showing 15 means 1500%)`);
+      else changes.push({ field: m.field, header: m.header, value: frac });
+    }
+  }
+  return { changes, errors };
+}
+
 // server.ts
 import path from "path";
 import { fileURLToPath } from "url";
@@ -242,19 +438,19 @@ function daysBetween(fromIso, toIso) {
 function nowIso() {
   return (/* @__PURE__ */ new Date()).toISOString().slice(0, 19) + "Z";
 }
-function matchUoMQty(text) {
-  if (!text) return null;
-  const s = String(text).trim();
+function matchUoMQty(text2) {
+  if (!text2) return null;
+  const s = String(text2).trim();
   const multi = s.match(/(\d+)\s*(?:strip|blister|alu|tube|botol|vial|amp\w*|sachet|bag)\s*(?:@|x|isi|\*)\s*(\d+)/i);
   if (multi) return Math.max(1, parseInt(multi[1], 10) * parseInt(multi[2], 10));
   const m = s.match(/(?:@|\/|isi\s*|x\s*|:\s*|=\s*|of\s*)(\d+)/i) || s.match(/\b(\d+)\s*(?:pcs|pc|tab\w*|cap\w*|amp\w*|vial\w*|strip\w*|roll\w*|test\w*|pair\w*|bag\w*|btl|botol|sachet|syringe|unit|lembar|set)/i);
   return m ? Math.max(1, parseInt(m[1], 10)) : null;
 }
-function parseUoMQty(text) {
-  return matchUoMQty(text) ?? 1;
+function parseUoMQty(text2) {
+  return matchUoMQty(text2) ?? 1;
 }
-function inferClinicalUnit(text, itemName) {
-  const combined = `${text || ""} ${itemName || ""}`.toLowerCase();
+function inferClinicalUnit(text2, itemName) {
+  const combined = `${text2 || ""} ${itemName || ""}`.toLowerCase();
   if (/\bvial\b/.test(combined)) return "vial";
   if (/\b(ampul|ampoule|amp)\b/.test(combined)) return "ampoule";
   if (/\b(tablet|tab|kaplet|caplet)\b/.test(combined)) return "tablet";
@@ -1250,8 +1446,8 @@ function summarizeCycleItems(enriched) {
   const latestImpacts = enriched.filter((i) => i.impact != null).map((i) => i.impact);
   const activeItems = enriched.filter((i) => i.item_status !== "Discontinue");
   const rfqFilledActive = activeItems.filter((i) => i.rfq_hna != null);
-  const marginFormularyTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0);
-  const marginPoTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0);
+  const marginFormularyTotal = enriched.some((i) => i.margin_impact_vs_formulary != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0) : null;
+  const marginPoTotal = enriched.some((i) => i.margin_impact_vs_po != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0) : null;
   return {
     items: enriched.length,
     active: activeItems.length,
@@ -2132,8 +2328,8 @@ app.get("/api/home", (req, res) => {
   });
 });
 app.post("/api/chat", (req, res) => {
-  const text = String(req.body?.text || "").slice(0, 500);
-  res.json(parseChatText(text));
+  const text2 = String(req.body?.text || "").slice(0, 500);
+  res.json(parseChatText(text2));
 });
 app.post("/api/ai/chat", async (req, res) => {
   const message = String(req.body?.message || "").trim();
@@ -2402,11 +2598,11 @@ app.get("/api/vendor/:name", (req, res) => {
   res.json({ vendor, spend, products, alerts, currency: "IDR", is_sample: true });
 });
 app.get("/api/lookup", (req, res) => {
-  const text = String(req.query.text || "").toLowerCase();
+  const text2 = String(req.query.text || "").toLowerCase();
   const vendor = String(req.query.vendor || "").toLowerCase();
   const hospital = String(req.query.hospital || "").toLowerCase();
   const filtered = observations.filter((o) => {
-    if (text && !o.sku_name.toLowerCase().includes(text) && !o.sku.toLowerCase().includes(text)) return false;
+    if (text2 && !o.sku_name.toLowerCase().includes(text2) && !o.sku.toLowerCase().includes(text2)) return false;
     if (vendor && !o.vendor.toLowerCase().includes(vendor)) return false;
     if (hospital && !o.hospital.toLowerCase().includes(hospital)) return false;
     return true;
@@ -2811,8 +3007,7 @@ app.post("/api/admin/nego/cycles/:cid/benchmarks/:mid", (req, res) => {
 app.get("/api/nego/benchmarks", (_req, res) => {
   res.json({ sources: [{ source: "INAPROC e-Katalog", count: 116, latest: "2026-08-15" }] });
 });
-app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
-  const cid = Number(req.params.cid);
+function computeCoPlan(cid) {
   const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
@@ -2823,8 +3018,7 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
   }
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   let coImpactVsRfq = 0;
-  let diffCount = 0;
-  const suggestions = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").map((i) => {
+  const all = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").map((i) => {
     const en = enrichCycleItem(i, ppn, c);
     const bm = bestBmByItem.get(i.id);
     const candidates = [
@@ -2840,7 +3034,6 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
     const coUnitPrice = calcUnitPrice(i.rfq_hna, i.rfq_qty, coDiscRounded, ppn, c?.binding, i.formulary_hna, i.last_po_price);
     const isDiff = Math.abs(coDiscRounded - (i.rfq_disc || 0)) > 1e-4;
     if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coUnitPrice != null) {
-      diffCount++;
       coImpactVsRfq += (coUnitPrice - en.rfq_unit_price) * en.annual_pcs;
     }
     return {
@@ -2852,31 +3045,40 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
       diff_from_rfq: isDiff
     };
   });
+  const fresh = all.filter((x) => x.diff_from_rfq);
+  return { all, fresh, same_as_rfq: all.length - fresh.length, co_impact_vs_rfq: coImpactVsRfq };
+}
+app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
+  const plan = computeCoPlan(Number(req.params.cid));
   res.json({
-    suggestions,
-    count: suggestions.length,
-    diff_count: diffCount,
-    co_impact_vs_rfq: coImpactVsRfq,
-    co_impact: coImpactVsRfq,
+    suggestions: plan.fresh,
+    count: plan.fresh.length,
+    same_as_rfq: plan.same_as_rfq,
+    diff_count: plan.fresh.length,
+    co_impact_vs_rfq: plan.co_impact_vs_rfq,
+    co_impact: plan.co_impact_vs_rfq,
     co_increases: 0
   });
 });
 app.post("/api/admin/nego/cycles/:cid/co", (req, res) => {
   const cid = Number(req.params.cid);
-  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
-  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const overwrite = !!req.body?.overwrite;
+  const plan = computeCoPlan(cid);
+  const byItem = new Map(plan.all.map((x) => [x.item_id, x]));
   let applied = 0;
   for (const i of items) {
-    if (i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue") {
-      const en = enrichCycleItem(i, ppn, c);
-      const target = en.mou_unit_price || en.po_unit_price || en.rfq_unit_price;
-      const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
-      i.co_disc = target && gross ? Number(Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - target / gross)).toFixed(4)) : i.rfq_disc || 0;
-      applied++;
+    const sug = byItem.get(i.id);
+    if (!sug) continue;
+    if (!sug.diff_from_rfq) {
+      if (overwrite) i.co_disc = null;
+      continue;
     }
+    if (!overwrite && i.co_disc != null) continue;
+    i.co_disc = sug.co_disc;
+    applied++;
   }
-  res.json({ applied, co_impact: 0, scan: scanCycleAnomalies(cid) });
+  res.json({ applied, scan: scanCycleAnomalies(cid) });
 });
 app.post("/api/admin/nego/cycles/:cid/on-fill", (req, res) => {
   const cid = Number(req.params.cid);
@@ -3034,7 +3236,7 @@ app.get("/api/admin/nego/principals-template.csv", (_req, res) => {
   res.send("\uFEFF" + csv);
 });
 app.get("/api/admin/nego/principals-template.xlsx", async (_req, res) => {
-  const wb = new ExcelJS2.Workbook();
+  const wb = new ExcelJS3.Workbook();
   const ws = wb.addWorksheet("Principals");
   ws.addRow(PRINCIPAL_COLUMNS);
   PRINCIPAL_TEMPLATE_ROWS.forEach((r) => ws.addRow(r));
@@ -3291,17 +3493,51 @@ app.post("/api/admin/nego/cycles/:cid/scan", (req, res) => {
   const counts = scanCycleAnomalies(cid);
   res.json({ ...counts, counts });
 });
+var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note"];
+var ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "mou_disc"];
+var ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
+function cleanItemChanges(input) {
+  const out = {};
+  for (const [k, v] of Object.entries(input || {})) {
+    if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
+    else if (k === "item_status") {
+      if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
+      out[k] = v;
+    } else if (ITEM_DISC_FIELDS.includes(k)) {
+      if (v == null || v === "") {
+        out[k] = null;
+        continue;
+      }
+      const raw = String(v).trim();
+      const n = toNumber(raw);
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid discount` };
+      const frac = raw.includes("%") ? n / 100 : n;
+      if (frac >= 1) return { changes: {}, error: `${k}: a discount must be between 0 and 1 (e.g. 0.15) or written as a percentage (15%)` };
+      out[k] = frac;
+    } else if (ITEM_NUM_FIELDS.includes(k)) {
+      if (v == null || v === "") {
+        out[k] = null;
+        continue;
+      }
+      const n = toNumber(String(v));
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid number` };
+      out[k] = k.endsWith("qty") ? Math.round(n) : n;
+    } else return { changes: {}, error: `${k} can't be edited` };
+  }
+  return { changes: out };
+}
 app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req, res) => {
   const cid = Number(req.params.cid);
   const iid = Number(req.params.iid);
   const items = cycleItemsMap.get(cid) || [];
   const it = items.find((x) => x.id === iid);
   if (!it) return res.status(404).json({ error: "No such item" });
-  const changes = req.body?.changes || {};
-  Object.assign(it, changes);
+  const clean = cleanItemChanges(req.body?.changes || {});
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  Object.assign(it, clean.changes);
   const scan = scanCycleAnomalies(cid);
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(changes), scan });
+  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(clean.changes), scan });
 });
 app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req, res) => {
   const cid = Number(req.params.cid);
@@ -3737,7 +3973,7 @@ app.get("/api/p/me", (req, res) => {
     current_step: cycle.current_step,
     step_no: stepNumberMap[cycle.current_step] || 1,
     locked: lock.locked,
-    excel_upload: false,
+    excel_upload: true,
     lock_reason: lock.reason,
     submitted: cycle.submitted_steps?.[step] || null,
     due: cycle.step_due,
@@ -3984,6 +4220,179 @@ app.post("/api/p/submit", (req, res) => {
   cycleEventsMap.set(cycle.id, evs);
   res.json({ ok: true, step: nextStep, submitted_at: nowIso() });
 });
+var TEMPLATE_PATH = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
+var STAFF_COLUMNS = ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "coDisc", "fb1Disc", "onDisc"];
+function templateOptions(c, forPrincipal) {
+  return {
+    forPrincipal,
+    showCounterOffer: !["prepare", "rfq"].includes(c.current_step) || !!c.submitted_steps?.rfq,
+    principal: c.principal?.name || "",
+    distributor: c.principal?.distributor || "",
+    contractStart: c.contract_start,
+    contractEnd: c.contract_end,
+    binding: c.binding,
+    deliveryFee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, "")
+  };
+}
+async function sendWorkbook(res, wb, filename) {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^\w.\- ]/g, "_")}"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+app.get("/api/nego/cycles/:cid/export.xlsx", async (req, res) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const items = cycleItemsMap.get(c.id) || [];
+  const wb = await buildTemplate(TEMPLATE_PATH, items, templateOptions(c, false));
+  await sendWorkbook(res, wb, `Template_Nego_${c.principal.name}.xlsx`);
+});
+app.get("/api/p/template.xlsx", async (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle } = resolved;
+  const wb = await buildTemplate(TEMPLATE_PATH, cycleItemsMap.get(cycle.id) || [], templateOptions(cycle, true));
+  await sendWorkbook(res, wb, `Template_Nego_${cycle.principal.name}.xlsx`);
+});
+function fieldNow(it, field) {
+  return it[field] ?? null;
+}
+app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file")), async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Choose the file first" });
+  let rows;
+  try {
+    rows = await readTemplate(file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const items = cycleItemsMap.get(cid) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const byName = new Map(items.map((i) => [String(i.item_name).trim().toLowerCase(), i]));
+  const changes = [], errors = [], unmatched = [];
+  const seen = /* @__PURE__ */ new Set();
+  const perItem = /* @__PURE__ */ new Map();
+  let matched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code) || byName.get(r.item_name.trim().toLowerCase());
+    if (!it) {
+      unmatched.push({ erp_code: r.erp_code, item_name: r.item_name });
+      continue;
+    }
+    matched++;
+    seen.add(it.id);
+    const chk = checkRow(r.cells, STAFF_COLUMNS);
+    chk.errors.forEach((m) => errors.push({ row: r.row, message: m }));
+    if (chk.errors.length) continue;
+    for (const ch of chk.changes) {
+      const old = fieldNow(it, ch.field);
+      const same = typeof ch.value === "number" && old != null ? Math.abs(Number(old) - ch.value) < 1e-9 : String(old ?? "") === String(ch.value);
+      if (same) continue;
+      changes.push({ item_id: it.id, erp_code: it.erp_code, item_name: it.item_name, field: ch.field, header: ch.header, old, new: ch.value });
+      perItem.set(it.id, { ...perItem.get(it.id) || {}, [ch.field]: ch.value });
+    }
+  }
+  const byCol = {};
+  changes.forEach((x) => {
+    byCol[x.header] = (byCol[x.header] || 0) + 1;
+  });
+  const warning = matched === 0 ? "None of the rows match this negotiation's items. Is this the right principal's workbook?" : null;
+  if (String(req.body?.apply) === "1") {
+    if (warning) return res.status(400).json({ error: warning });
+    for (const [id, ch] of perItem) Object.assign(items.find((i) => i.id === id), ch);
+    const scan = scanCycleAnomalies(cid);
+    logAudit(actingUser().email, "cycle.import", { cycle_id: cid, items: perItem.size, changes: changes.length, file: file.originalname });
+    return res.json({ applied_items: perItem.size, applied_changes: changes.length, scan: { found: scan.open } });
+  }
+  res.json({
+    rows_in_file: rows.length,
+    matched,
+    unmatched_count: unmatched.length,
+    unmatched: unmatched.slice(0, 50),
+    not_in_file: items.length - seen.size,
+    items_changed: perItem.size,
+    changes,
+    changes_by_column: byCol,
+    errors,
+    warning
+  });
+});
+app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Pilih file / Choose a file" });
+  let rows;
+  try {
+    rows = await readTemplate(file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: `${e.message}` });
+  }
+  const allowed = step === "rfq" ? ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc"] : step === "feedback1" ? ["fb1Disc"] : [];
+  const items = cycleItemsMap.get(cycle.id) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const rejected = [], ready = [];
+  let unmatched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code);
+    if (!it) {
+      unmatched++;
+      continue;
+    }
+    const chk = checkRow(r.cells, allowed);
+    if (chk.errors.length) {
+      rejected.push({ row: r.row, item_name: it.item_name, messages: chk.errors.map((m) => ({ id: m, en: m })) });
+      continue;
+    }
+    if (chk.changes.length) ready.push({ item: it, changes: chk.changes });
+  }
+  if (String(req.body?.apply) === "1") {
+    for (const { item, changes } of ready) for (const ch of changes) item[ch.field] = ch.value;
+    scanCycleAnomalies(cycle.id);
+    return res.json({ applied: ready.length });
+  }
+  res.json({ accepted: ready.length, rejected, read_errors: [], unmatched_count: unmatched, notes: [] });
+});
+app.get("/api/admin/master/items.xlsx", async (_req, res) => {
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Master items");
+  ws.addRow(["ERP Code", "Item Name", "Generic Name", "Group", "Brand", "Catalog No. (REF)", "UOM", "Tags", "Status", "Source"]);
+  ws.getRow(1).font = { bold: true };
+  for (const m of itemMasterMap.values()) ws.addRow([m.erp_code, m.item_name, m.generic_name || "", m.group_key || "", m.brand || "", m.catalog_no || "", m.uom || "", m.tags || "", m.status || "", m.source || ""]);
+  ws.columns.forEach((c, i) => {
+    c.width = [14, 42, 22, 22, 18, 18, 14, 16, 12, 14][i];
+  });
+  await sendWorkbook(res, wb, "master_items.xlsx");
+});
+app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req, res) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const items = (cycleItemsMap.get(c.id) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c)).sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
+  const seen = /* @__PURE__ */ new Set();
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Confirmation");
+  ws.addRow([`Agreed prices: ${c.principal.name}`]);
+  ws.addRow([`Contract ${c.contract_start} to ${c.contract_end} \xB7 Binding ${c.binding}`]);
+  ws.addRow([]);
+  ws.addRow(["ERP Code", "Item Name", "Brand", "Catalog No. (REF)", "Qty/PO Unit", "HNA/PO Unit (excl. PPN)", "Agreed Disc%", "Agreed Price/pc (incl. PPN)"]);
+  ws.getRow(4).font = { bold: true };
+  for (const i of items) {
+    if (seen.has(i.erp_code) || i.on_disc == null) continue;
+    seen.add(i.erp_code);
+    ws.addRow([i.erp_code, i.item_name, i.brand, i.catalog_no, i.rfq_qty, i.rfq_hna, i.on_disc, i.on_unit_price]);
+  }
+  ws.columns.forEach((col, k) => {
+    col.width = [14, 42, 18, 18, 12, 22, 14, 24][k];
+  });
+  logAudit(actingUser().email, "cycle.package", { cycle_id: c.id, rows: seen.size });
+  await sendWorkbook(res, wb, `Confirmation_${c.principal.name}.xlsx`);
+});
 app.get("/api/p/documents", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
   if (!resolved) {
@@ -4064,15 +4473,6 @@ app.delete("/api/p/documents/:did", (req, res) => {
     missing_required: requiredKeys.filter((k) => !have.has(k))
   });
 });
-app.get("/api/p/template.xlsx", (req, res) => {
-  if (!resolvePrincipalCycle(req)) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  const templatePath = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
-  if (fs.existsSync(templatePath)) {
-    res.download(templatePath, "Template_Nego.xlsx");
-  } else {
-    res.status(404).send("Template not found");
-  }
-});
 var VENDOR_BLOCKED = /benchmark|target|baseline|margin|kompetitor|competitor|pesaing|formularium|formulary|harga\s+(acuan|kami|siloam|mou|po)\b|(our|siloam'?s?)\s+(price|mou|po)\b|principal\s+lain|vendor\s+lain|other\s+(principals?|vendors?|suppliers?)|ambang|threshold|findings?|temuan|cost\s*impact|saran\s+counter|counter.?offer\s+suggest|system\s*prompt|abaikan\s+instruksi|ignore\s+(all\s+)?(previous\s+)?instructions/i;
 function vendorChatFallback(msg, id, ctx) {
   const m = msg.toLowerCase();
@@ -4116,9 +4516,6 @@ Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)
   } catch (_e) {
     res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
   }
-});
-app.post("/api/p/template", (_req, res) => {
-  res.status(501).json({ error: "Unggah Excel belum tersedia / Excel upload is not available yet. Please fill in the form." });
 });
 var COMMON_PHARMA_TERMS = [
   "ceftriaxone",
@@ -4387,7 +4784,7 @@ async function generateWithSearchGrounding(prompt) {
           tools: [{ googleSearch: {} }]
         }
       });
-      const text = response.text || "";
+      const text2 = response.text || "";
       const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
       const groundingLinks = [];
       const seenUris = /* @__PURE__ */ new Set();
@@ -4399,7 +4796,7 @@ async function generateWithSearchGrounding(prompt) {
           groundingLinks.push({ uri, title });
         }
       }
-      return { text, groundingLinks, modelUsed: modelName };
+      return { text: text2, groundingLinks, modelUsed: modelName };
     } catch (err) {
       lastError = err;
       const msg = String(err?.message || err);
@@ -4411,10 +4808,10 @@ async function generateWithSearchGrounding(prompt) {
   }
   throw lastError || new Error("Gemini Search Grounding call failed");
 }
-function extractJsonBlock(text) {
-  if (!text) return null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1].trim() : text.trim();
+function extractJsonBlock(text2) {
+  if (!text2) return null;
+  const fenced = text2.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : text2.trim();
   const firstBrace = candidate.indexOf("{");
   const lastBrace = candidate.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace > firstBrace) {
