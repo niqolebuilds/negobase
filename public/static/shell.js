@@ -87,6 +87,12 @@ function updateAiRoleContext(page) {
   else tag.textContent = "Role: Negotiator";
 }
 
+// Beta: only accounts listed by the server (admins, when NEGO_ADMIN_PASSWORD is set) need a password.
+function needsPassword(email) {
+  const p = shell.provider || {};
+  return Boolean(p.password_required) || (p.password_required_for || []).includes(String(email).toLowerCase());
+}
+
 async function signIn(e) {
   e.preventDefault();
   const email = $("signin-email").value.trim();
@@ -94,7 +100,7 @@ async function signIn(e) {
   const err = $("signin-error");
   err.hidden = true;
   if (!email) { $("signin-email").focus(); return; }
-  if (!password && shell.provider && shell.provider.password_required) { $("signin-password").focus(); return; }
+  if (!password && needsPassword(email)) { $("signin-password").focus(); return; }
   try {
     const d = await send("/api/auth/signin", "POST", { email, password });
     $("signin-password").value = "";
@@ -344,7 +350,7 @@ async function shellInit() {
     shell.user = d.user;
     shell.provider = d.provider;
     $("signin-notice").textContent = d.provider ? d.provider.notice : "";
-    $("signin-password-row").hidden = !(d.provider && d.provider.password_required);
+    $("signin-password-row").hidden = !(d.provider && (d.provider.password_required || (d.provider.password_required_for || []).length));
     if (shell.user) await loadCatalog();
   } catch (e) {
     $("welcome").prepend(el("p", { class: "error", text: `Can't reach the server: ${e.message}` }));

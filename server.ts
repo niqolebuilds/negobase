@@ -1,6 +1,8 @@
 import express from "express";
 import type { Request, Response } from "express";
 import fs from "fs";
+import crypto from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
@@ -1159,7 +1161,12 @@ const usersList: any[] = [
   { id: 2, email: "negotiator@siloamhospitals.com", name: "Heldra Procurement", role: "negotiator", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 3, email: "viewer@siloamhospitals.com", name: "Category Analyst", role: "viewer", active: 1, created_at: nowIso(), created_by: "system", last_login: null, has_password: true },
 ];
-let currentSessionUser: any = usersList[0];
+// Per-request identity. Sessions live in memory (beta): a restart signs everyone out.
+const sessions = new Map<string, number>();
+const requestUser = new AsyncLocalStorage<{ user: any | null }>();
+function actingUser(): any {
+  return requestUser.getStore()?.user || { email: "system" };
+}
 
 const auditEvents: any[] = [
   { id: 1, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "nego.sample", detail: { opened: ["PT Medika Nusantara", "PT Farmasi Sejahtera", "PT Bio Diagnostik"] } },
@@ -1762,7 +1769,7 @@ seedNegoSample();
 
 // Pre-seed demo active link for each cycle so testing is immediately available
 for (const c of cyclesList) {
-  const token = `demo-token-${c.id}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const linkObj = {
     id: 1,
     cycle_id: c.id,
@@ -1777,6 +1784,7 @@ for (const c of cyclesList) {
   };
   cycleLinksMap.set(c.id, [linkObj]);
   tokenToLinkMap.set(token, linkObj);
+  console.log(`Demo vendor link for cycle ${c.id}: /p/${token}`);
 }
 
 function getPrincipalsPayload() {
@@ -1916,8 +1924,49 @@ function parseChatText(rawText: string) {
 // Express App & Routes
 // --------------------------------------------------------------------------
 const app = express();
+app.disable("x-powered-by");
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Resolve the signed-in user for this request (null when there is no valid session).
+app.use((req: Request, res: Response, next) => {
+  const sid = parseCookies(req)["nego_session"];
+  const uid = sid ? sessions.get(sid) : undefined;
+  const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
+  (req as any).user = user;
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  requestUser.run({ user }, next);
+});
+
+// Access control for the internal API.
+//   /api/auth/*  open (sign-in itself)
+//   /api/p/*     vendor portal: authorised by the vendor link token in resolvePrincipalCycle()
+//   /api/admin/* admin only; negotiators get master data, negotiation and documents
+//   viewers      read-only
+//   everything else needs a signed-in internal user
+const NEGOTIATOR_ADMIN_PATHS = /^\/admin\/(master|nego|documents)(\/|\.|$)/;
+app.use("/api", (req: Request, res: Response, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  const p = req.path;
+  if (p.startsWith("/auth/")) return next();
+  const isRead = req.method === "GET" || req.method === "HEAD";
+  if (!isRead && req.headers["x-requested-with"] !== "nego") {
+    return res.status(403).json({ error: "Missing app header" });
+  }
+  if (p.startsWith("/p/")) return next();
+  const user = (req as any).user;
+  if (!user) return res.status(401).json({ error: "Sign in required" });
+  if (user.role === "admin") return next();
+  if (p.startsWith("/admin/") || p === "/admin") {
+    if (user.role === "negotiator" && NEGOTIATOR_ADMIN_PATHS.test(p)) return next();
+    return res.status(403).json({ error: "Administrator access required" });
+  }
+  if (user.role === "viewer" && !isRead && p !== "/chat" && p !== "/ai/chat") {
+    return res.status(403).json({ error: "Viewers have read-only access" });
+  }
+  next();
+});
 
 app.use("/static", express.static(STATIC_DIR));
 
@@ -1929,75 +1978,108 @@ app.get("/analytics", (_req: Request, res: Response) => {
   res.sendFile(path.join(STATIC_DIR, "analytics.html"));
 });
 
+function setPrincipalCookie(req: Request, res: Response, token: string) {
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+}
+
+// A vendor link is valid only if it is known, not revoked and not expired.
+function validLink(token: string | undefined): any | null {
+  if (!token) return null;
+  const link = tokenToLinkMap.get(token);
+  if (!link || link.revoked_at) return null;
+  if (link.expires_at && new Date(link.expires_at).getTime() < Date.now()) return null;
+  return link;
+}
+
 app.get("/p", (req: Request, res: Response) => {
   const token = (req.query.token as string) || (req.query.t as string);
-  if (token) {
-    res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
-  }
+  if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
 
 app.get("/p/:token", (req: Request, res: Response) => {
   const token = String(req.params.token || "");
-  const link = tokenToLinkMap.get(token);
-  if (!link || link.revoked_at) {
-    const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-    if (!match) {
-      return res.redirect(303, "/p?invalid=1");
-    }
+  const link = validLink(token);
+  if (!link) return res.redirect(303, "/p?invalid=1");
+  link.last_used_at = nowIso();
+  const c = cyclesList.find((x) => x.id === link.cycle_id);
+  if (c) {
+    const evs = cycleEventsMap.get(c.id) || [];
+    evs.unshift({
+      id: evs.length + 1,
+      cycle_id: c.id,
+      at: nowIso(),
+      user_email: `principal:${c.principal.name}`,
+      action: "link.open",
+      detail: { link_id: link.id },
+    });
+    cycleEventsMap.set(c.id, evs);
   }
-  if (link) {
-    link.last_used_at = nowIso();
-    const c = cyclesList.find((x) => x.id === link.cycle_id);
-    if (c) {
-      const evs = cycleEventsMap.get(c.id) || [];
-      evs.unshift({
-        id: evs.length + 1,
-        cycle_id: c.id,
-        at: nowIso(),
-        user_email: `principal:${c.principal.name}`,
-        action: "link.open",
-        detail: { link_id: link.id },
-      });
-      cycleEventsMap.set(c.id, evs);
-    }
-  }
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
+  setPrincipalCookie(req, res, token);
   res.redirect(303, `/p?token=${encodeURIComponent(token)}`);
 });
 
 // Auth endpoints
-app.get("/api/auth/me", (_req: Request, res: Response) => {
+// Beta: sign-in is by email only, no password. If NEGO_ADMIN_PASSWORD is set, the
+// admin account additionally requires it. Roles are enforced by the /api guard above.
+const ADMIN_PASSWORD = process.env.NEGO_ADMIN_PASSWORD || "";
+const SESSION_HOURS = 12;
+
+function safeEqual(a: string, b: string): boolean {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+app.get("/api/auth/me", (req: Request, res: Response) => {
   res.json({
-    user: currentSessionUser,
+    user: (req as any).user || null,
     provider: {
-      name: "development",
+      name: "beta",
       password_required: false,
-      notice: "Development sign-in enabled: enter any email or submit directly to sign in as Administrator.",
+      password_required_for: ADMIN_PASSWORD ? usersList.filter((u) => u.role === "admin").map((u) => u.email) : [],
+      notice: "Beta sign-in: enter your Siloam email. Access follows your role.",
     },
   });
 });
 
 app.post("/api/auth/signin", (req: Request, res: Response) => {
-  const email = String(req.body?.email || "admin@siloamhospitals.com").trim().toLowerCase();
-  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active) || usersList[0];
-  currentSessionUser = found;
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active);
+  if (!found) {
+    logAudit(email || "unknown", "signin.failed", { reason: "no active account" });
+    return res.status(401).json({ error: "No active account for that email" });
+  }
+  if (found.role === "admin" && ADMIN_PASSWORD && !safeEqual(String(req.body?.password || ""), ADMIN_PASSWORD)) {
+    logAudit(found.email, "signin.failed", { reason: "bad password" });
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  const old = parseCookies(req)["nego_session"];
+  if (old) sessions.delete(old);
+  const sid = crypto.randomBytes(24).toString("base64url");
+  sessions.set(sid, found.id);
+  found.last_login = nowIso();
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
   logAudit(found.email, "signin");
   res.json({ user: found });
 });
 
-app.post("/api/auth/signout", (_req: Request, res: Response) => {
-  currentSessionUser = null;
+app.post("/api/auth/signout", (req: Request, res: Response) => {
+  const sid = parseCookies(req)["nego_session"];
+  if (sid) sessions.delete(sid);
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   res.json({ ok: true });
 });
 
+// Password setup is not part of the beta. These used to sign anyone in as admin.
 app.get("/api/auth/setup", (_req: Request, res: Response) => {
-  res.json({ email: usersList[0].email, name: usersList[0].name, min_length: 10 });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 
 app.post("/api/auth/setup", (_req: Request, res: Response) => {
-  currentSessionUser = usersList[0];
-  res.json({ user: currentSessionUser });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 
 // Core intelligence endpoints
@@ -2060,8 +2142,8 @@ app.get("/api/catalog", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/api/home", (_req: Request, res: Response) => {
-  const user = currentSessionUser || usersList[0];
+app.get("/api/home", (req: Request, res: Response) => {
+  const user = (req as any).user;
   const cal = computeCalendar(0, 3650);
   const dueSoon = cal.renewals.filter((r) => r.days_left <= 30 && !["agreed", "lost"].includes(r.progress?.stage));
   const highAlerts = computeAlerts().filter((a) => a.severity === "high");
@@ -2081,7 +2163,8 @@ app.post("/api/chat", (req: Request, res: Response) => {
 
 app.post("/api/ai/chat", async (req: Request, res: Response) => {
   const message = String(req.body?.message || "").trim();
-  const role = String(req.body?.role || "negotiator");
+  // Role comes from the session, never from the request body.
+  const role: string = (req as any).user?.role === "admin" ? "admin" : "negotiator";
   const cycleId = req.body?.cycleId ? Number(req.body.cycleId) : null;
   const history = Array.isArray(req.body?.history) ? req.body.history : [];
 
@@ -2428,7 +2511,7 @@ app.patch("/api/renewals/progress", (req: Request, res: Response) => {
   const { key, ...changes } = req.body || {};
   if (!key) return res.status(400).json({ error: "Unknown renewal" });
   const prev = renewalProgressMap.get(key) || { key, stage: "not_started" };
-  const updated = { ...prev, ...changes, updated_by: (currentSessionUser || usersList[0]).email, updated_at: nowIso() };
+  const updated = { ...prev, ...changes, updated_by: actingUser().email, updated_at: nowIso() };
   renewalProgressMap.set(key, updated);
   const evs = renewalEventsMap.get(key) || [];
   for (const [k, v] of Object.entries(changes)) {
@@ -2437,7 +2520,7 @@ app.patch("/api/renewals/progress", (req: Request, res: Response) => {
         id: evs.length + 1,
         key,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         field: k,
         old: prev[k] == null ? null : String(prev[k]),
         new: v == null ? null : String(v),
@@ -2994,7 +3077,7 @@ app.post("/api/admin/nego/principals/import", (req: Request, res: Response) => {
       contact_phone: r.contact_phone || r.WhatsApp || "",
       notes: r.notes || r.Notes || "",
       created_at: nowIso(),
-      created_by: (currentSessionUser || usersList[0]).email,
+      created_by: actingUser().email,
     });
     added++;
   }
@@ -3018,7 +3101,7 @@ app.post("/api/admin/nego/principals", (req: Request, res: Response) => {
     contact_phone: body.contact_phone || "",
     notes: body.notes || "",
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
   };
   principalsList.push(p);
   res.json(p);
@@ -3061,7 +3144,7 @@ app.post("/api/admin/nego/cycles", (req: Request, res: Response) => {
     prepared_at: null,
     submitted_steps: {},
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
   };
   cyclesList.push(c);
   cycleItemsMap.set(c.id, []);
@@ -3140,7 +3223,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
   const cid = Number(req.params.cid);
   const days = Math.max(1, Math.min(90, Number(req.body?.days) || 14));
   const links = cycleLinksMap.get(cid) || [];
-  const token = `invite-${cid}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString();
   const link = {
     id: links.length + 1,
@@ -3149,7 +3232,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
     path: `/p/${token}`,
     url: `/p/${token}`,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     expires_at: expiresAt,
     revoked_at: null,
     last_used_at: null,
@@ -3165,7 +3248,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
       id: evs.length + 1,
       cycle_id: cid,
       at: nowIso(),
-      user_email: (currentSessionUser || usersList[0]).email,
+      user_email: actingUser().email,
       action: "link.create",
       detail: { link_id: link.id, days },
     });
@@ -3190,7 +3273,7 @@ app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req: Request, res: Re
         id: evs.length + 1,
         cycle_id: cid,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         action: "link.revoke",
         detail: { link_id: link.id },
       });
@@ -3264,9 +3347,11 @@ app.put("/api/admin/settings", (req: Request, res: Response) => {
       changed.push(k);
     }
   }
-  if (changed.length) logAudit((currentSessionUser || usersList[0]).email, "settings.update", changes);
+  if (changed.length) logAudit(actingUser().email, "settings.update", changes);
   res.json({ settings: describeSettings(), changed });
 });
+
+const ROLES = ["admin", "negotiator", "viewer"];
 
 app.get("/api/admin/users", (_req: Request, res: Response) => {
   res.json({ users: usersList });
@@ -3275,6 +3360,8 @@ app.get("/api/admin/users", (_req: Request, res: Response) => {
 app.post("/api/admin/users", (req: Request, res: Response) => {
   const { email, name, role } = req.body || {};
   if (!email || !name) return res.status(400).json({ error: "Enter email and name" });
+  if (role && !ROLES.includes(role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  if (usersList.some((x) => x.email === String(email).trim().toLowerCase())) return res.status(409).json({ error: "That email already has an account" });
   const u = {
     id: usersList.length + 1,
     email: String(email).trim().toLowerCase(),
@@ -3282,7 +3369,7 @@ app.post("/api/admin/users", (req: Request, res: Response) => {
     role: role || "viewer",
     active: 1,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     last_login: null,
     has_password: false,
   };
@@ -3293,8 +3380,16 @@ app.post("/api/admin/users", (req: Request, res: Response) => {
 app.patch("/api/admin/users/:uid", (req: Request, res: Response) => {
   const u = usersList.find((x) => x.id === Number(req.params.uid));
   if (!u) return res.status(404).json({ error: "No such user" });
-  if (req.body?.role) u.role = req.body.role;
-  if (req.body?.active !== undefined) u.active = req.body.active ? 1 : 0;
+  if (req.body?.role && !ROLES.includes(req.body.role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  const nextRole = req.body?.role || u.role;
+  const nextActive = req.body?.active !== undefined ? (req.body.active ? 1 : 0) : u.active;
+  const otherAdmins = usersList.filter((x) => x.id !== u.id && x.role === "admin" && x.active).length;
+  if (u.role === "admin" && (nextRole !== "admin" || !nextActive) && !otherAdmins) {
+    return res.status(400).json({ error: "Keep at least one active administrator" });
+  }
+  u.role = nextRole;
+  u.active = nextActive;
+  if (!u.active) for (const [sid, uid] of sessions) if (uid === u.id) sessions.delete(sid);
   if (req.body?.name) u.name = req.body.name;
   res.json(u);
 });
@@ -3385,28 +3480,18 @@ function resolvePrincipalCycle(req: Request): { cycle: any; link?: any; step: st
   let foundCycle: any = null;
   let foundLink: any = null;
 
-  if (token) {
-    const link = tokenToLinkMap.get(token);
-    if (link) {
-      if (link.revoked_at) return null;
-      foundLink = link;
-      foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-    } else {
-      const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-      if (match) {
-        const cid = Number(match[1]);
-        foundCycle = cyclesList.find((x) => x.id === cid);
-      }
+  const link = validLink(token);
+  if (link) {
+    // A vendor link is bound to its own cycle; a cycle id in the query is ignored.
+    foundLink = link;
+    foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
+  } else {
+    // Without a valid link only signed-in staff may preview a portal, and they must name the cycle.
+    const user = (req as any).user;
+    const cid = Number(req.query.cid || req.query.cycle_id);
+    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
+      foundCycle = cyclesList.find((x) => x.id === cid);
     }
-  }
-
-  const cid = Number(req.query.cid || req.query.cycle_id);
-  if (!foundCycle && cid) {
-    foundCycle = cyclesList.find((x) => x.id === cid);
-  }
-
-  if (!foundCycle) {
-    foundCycle = cyclesList.find((c) => c.status === "open") || cyclesList[0];
   }
 
   if (!foundCycle) return null;
@@ -3953,7 +4038,8 @@ app.delete("/api/p/documents/:did", (req: Request, res: Response) => {
   });
 });
 
-app.get("/api/p/template.xlsx", (_req: Request, res: Response) => {
+app.get("/api/p/template.xlsx", (req: Request, res: Response) => {
+  if (!resolvePrincipalCycle(req)) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const templatePath = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
   if (fs.existsSync(templatePath)) {
     res.download(templatePath, "Template_Nego.xlsx");
@@ -4300,7 +4386,7 @@ Return ONLY a JSON object in a \`\`\`json code block with the following fields:
 
 app.post("/api/science/uom-standardize/apply", (req: Request, res: Response) => {
   const { cycle_id, item_id, erp_code, pcs_per_po_unit, standardized_po_unit_text, generic_name, group_key, clinical_unit } = req.body || {};
-  const userEmail = (currentSessionUser || usersList[0]).email;
+  const userEmail = actingUser().email;
   let updatedMaster = null;
   let updatedCycleItem = null;
 
@@ -4587,7 +4673,7 @@ app.post("/api/science/sku-benchmark/apply", (req: Request, res: Response) => {
     }
   }
 
-  logAudit((currentSessionUser || usersList[0]).email, "benchmark.grounded_apply", {
+  logAudit(actingUser().email, "benchmark.grounded_apply", {
     cycle_id: cid,
     item_id: iid,
     erp_code: it.erp_code,

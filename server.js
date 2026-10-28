@@ -1,6 +1,8 @@
 // server.ts
 import express from "express";
 import fs from "fs";
+import crypto from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
@@ -898,9 +900,7 @@ function computeCalendar(minDays, maxDays) {
 }
 var STEPS = [
   { key: "prepare", label: "Prepare", who: "admin" },
-  { key: "identification", label: "Item Identification", who: "principal" },
-  { key: "current_mou", label: "Current MOU", who: "reference" },
-  { key: "rfq", label: "RFQ", who: "principal" },
+  { key: "rfq", label: "RFQ & Identification", who: "principal" },
   { key: "counter_offer", label: "Counter Offer", who: "admin" },
   { key: "feedback1", label: "Feedback I", who: "principal" },
   { key: "online_nego", label: "Online Nego", who: "admin" },
@@ -909,12 +909,12 @@ var STEPS = [
 ];
 var STEP_LABEL = Object.fromEntries(STEPS.map((s) => [s.key, s.label]));
 var COLUMNS = [
-  { letter: "A", field: "erp_code", header: "ERP Code", section: "identification", kind: "text", who: "reference" },
-  { letter: "B", field: "item_name", header: "Item Name", section: "identification", kind: "text", who: "reference" },
-  { letter: "C", field: "brand", header: "Brand / Manufacturer", section: "identification", kind: "text", who: "principal" },
-  { letter: "D", field: "catalog_no", header: "Catalog No. (REF)", section: "identification", kind: "text", who: "principal" },
-  { letter: "E", field: "item_status", header: "Item Status", section: "identification", kind: "text", who: "principal" },
-  { letter: "F", field: "remarks", header: "Remarks", section: "identification", kind: "text", who: "optional" },
+  { letter: "A", field: "erp_code", header: "ERP Code", section: "rfq", kind: "text", who: "reference" },
+  { letter: "B", field: "item_name", header: "Item Name", section: "rfq", kind: "text", who: "reference" },
+  { letter: "C", field: "brand", header: "Brand / Manufacturer", section: "rfq", kind: "text", who: "principal" },
+  { letter: "D", field: "catalog_no", header: "Catalog No. (REF)", section: "rfq", kind: "text", who: "principal" },
+  { letter: "E", field: "item_status", header: "Item Status", section: "rfq", kind: "text", who: "principal" },
+  { letter: "F", field: "remarks", header: "Remarks", section: "rfq", kind: "text", who: "optional" },
   { letter: "G", field: "mou_qty", header: "MOU_Qty/PO Unit", section: "current_mou", kind: "int", who: "reference" },
   { letter: "H", field: "mou_hna", header: "MOU_HNA/PO Unit (excl. PPN)", section: "current_mou", kind: "money", who: "reference" },
   { letter: "I", field: "mou_disc", header: "MOU_Disc%", section: "current_mou", kind: "pct", who: "reference" },
@@ -928,22 +928,55 @@ var COLUMNS = [
   { letter: "Q", field: "fb1_disc", header: "FB1_Disc%", section: "feedback1", kind: "pct", who: "principal" },
   { letter: "R", field: "fb1_unit_price", header: "FB1_Unit Price/PCS (incl. PPN)", section: "feedback1", kind: "formula", who: "reference" },
   { letter: "S", field: "on_disc", header: "ON_Disc%", section: "online_nego", kind: "pct", who: "admin" },
-  { letter: "T", field: "on_unit_price", header: "ON_Unit Price/PCS (incl. PPN)", section: "online_nego", kind: "formula", who: "reference" }
+  { letter: "T", field: "on_unit_price", header: "ON_Unit Price/PCS (incl. PPN)", section: "online_nego", kind: "formula", who: "reference" },
+  { letter: "U", field: "margin_pc", header: "Margin/pc", section: "margin", kind: "money", who: "reference" },
+  { letter: "V", field: "margin_vs_formulary", header: "Margin vs Formularium", section: "margin", kind: "money", who: "reference" },
+  { letter: "W", field: "margin_vs_po", header: "Margin vs PO", section: "margin", kind: "money", who: "reference" }
 ];
 var SECTION_TITLES = {
-  identification: "ITEM IDENTIFICATION",
-  current_mou: "CURRENT MOU  (reference only)",
-  rfq: "RFQ (to be completed by Principal)",
+  rfq: "RFQ & ITEM IDENTIFICATION",
+  current_mou: "CURRENT MOU (reference only)",
   counter_offer: "COUNTER OFFER",
   feedback1: "FEEDBACK I",
-  online_nego: "ONLINE NEGO"
+  online_nego: "ONLINE NEGO",
+  margin: "MARGIN & IMPACT ANALYSIS"
 };
+var periodsList = [
+  {
+    id: 1,
+    name: "CnC 2026 End-Year",
+    category: "CnC",
+    active: true,
+    months_elapsed: 12,
+    created_at: nowIso(),
+    po_rows_count: 1420,
+    formulary_count: 512,
+    skus_count: 240,
+    principals_count: 16
+  },
+  {
+    id: 2,
+    name: "Drugs 2026 Mid-Year",
+    category: "Drugs",
+    active: false,
+    months_elapsed: 6,
+    created_at: nowIso(),
+    po_rows_count: 980,
+    formulary_count: 410,
+    skus_count: 165,
+    principals_count: 11
+  }
+];
 var usersList = [
   { id: 1, email: "admin@siloamhospitals.com", name: "Administrator", role: "admin", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 2, email: "negotiator@siloamhospitals.com", name: "Heldra Procurement", role: "negotiator", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 3, email: "viewer@siloamhospitals.com", name: "Category Analyst", role: "viewer", active: 1, created_at: nowIso(), created_by: "system", last_login: null, has_password: true }
 ];
-var currentSessionUser = usersList[0];
+var sessions = /* @__PURE__ */ new Map();
+var requestUser = new AsyncLocalStorage();
+function actingUser() {
+  return requestUser.getStore()?.user || { email: "system" };
+}
 var auditEvents = [
   { id: 1, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "nego.sample", detail: { opened: ["PT Medika Nusantara", "PT Farmasi Sejahtera", "PT Bio Diagnostik"] } }
 ];
@@ -972,25 +1005,43 @@ function parseCookies(req) {
   }
   return list;
 }
-function calcUnitPrice(hna, qty, disc, ppn = 0.11) {
-  if (hna == null || qty == null || qty === 0) return null;
+function calcUnitPrice(hna, qty, disc, ppn = 0.11, binding = "Nett", formularyHna = null, lastPoPrice = null) {
+  if (qty == null || qty <= 0) return null;
+  if (binding === "Nett to Disc") {
+    const baseHna = formularyHna != null && formularyHna > 0 ? formularyHna : lastPoPrice != null && lastPoPrice > 0 ? lastPoPrice : hna;
+    if (baseHna == null) return null;
+    return baseHna / qty * (1 - (disc || 0)) * (1 + ppn);
+  }
+  if (hna == null) return null;
   return hna / qty * (1 - (disc || 0)) * (1 + ppn);
 }
-function enrichCycleItem(item, ppn = 0.11) {
+function enrichCycleItem(item, ppn = 0.11, cycle) {
   const it = { ...item };
-  it.mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn);
-  it.rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn);
-  it.co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn) : null;
-  it.fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn) : null;
-  it.on_unit_price = it.on_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.on_disc, ppn) : null;
+  const binding = cycle?.binding || it.binding || "Nett";
+  const negoType = cycle?.nego_type || it.nego_type || "Renewal";
+  const monthsElapsed = cycle?.months_elapsed || 12;
   const perPo = it.mou_qty || it.rfq_qty || parseUoMQty(it.po_unit_text) || 1;
   it.po_unit_pcs = perPo;
-  it.annual_pcs = it.po_qty_12m ? it.po_qty_12m * perPo : null;
+  it.mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn, binding, it.formulary_hna, it.last_po_price);
+  it.rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn, binding, it.formulary_hna, it.last_po_price);
+  it.co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
+  it.fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
+  it.on_unit_price = it.on_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.on_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
   it.po_unit_price = it.last_po_price ? it.last_po_price / perPo * (1 + ppn) : null;
-  const base = it.mou_unit_price || it.po_unit_price || null;
-  const baseFrom = it.mou_unit_price ? "mou" : it.po_unit_price ? "po" : null;
-  it.base_price = base;
-  it.base_from = baseFrom;
+  const poQtyYtd = it.po_qty_12m || 0;
+  const poValueYtd = it.po_value_12m || 0;
+  it.annual_pcs = poQtyYtd ? poQtyYtd * perPo * 12 / monthsElapsed : null;
+  it.po_annualized_value = poValueYtd * 12 / monthsElapsed;
+  const benchFormulary = it.formulary_hna ? it.formulary_hna / perPo * (1 + ppn) : null;
+  const benchMou = it.mou_unit_price;
+  const benchPo = it.po_unit_price;
+  const primaryBench = benchFormulary || benchMou || benchPo || null;
+  const benchTag = primaryBench ? benchFormulary ? "Formularium" : benchMou ? "MOU" : "PO YTD" : "tanpa acuan";
+  it.bench_tag = benchTag;
+  it.primary_bench = primaryBench;
+  const basePrice = negoType === "Force Majeure" && benchMou ? benchMou : primaryBench;
+  it.base_price = basePrice;
+  it.base_from = benchTag;
   let latestStage = null;
   let latestPrice = null;
   for (const st of ["on", "fb1", "co", "rfq"]) {
@@ -1002,8 +1053,47 @@ function enrichCycleItem(item, ppn = 0.11) {
   }
   it.latest_stage = latestStage;
   it.latest_price = latestPrice;
-  it.change_pct = latestPrice != null && base ? latestPrice / base - 1 : null;
-  it.impact = latestPrice != null && base && it.annual_pcs ? (latestPrice - base) * it.annual_pcs : null;
+  it.change_pct = latestPrice != null && basePrice ? latestPrice / basePrice - 1 : null;
+  if (latestPrice != null && it.annual_pcs && it.po_annualized_value) {
+    it.impact = latestPrice * it.annual_pcs - it.po_annualized_value;
+  } else if (latestPrice != null && it.annual_pcs && basePrice) {
+    it.impact = (latestPrice - basePrice) * it.annual_pcs;
+  } else {
+    it.impact = null;
+  }
+  const hnaPerPc = it.rfq_hna ? it.rfq_hna / perPo : it.mou_hna ? it.mou_hna / perPo : it.formulary_hna ? it.formulary_hna / perPo : it.last_po_price ? it.last_po_price / perPo : null;
+  const baseMarginPrice = hnaPerPc != null ? hnaPerPc * (1 + ppn) : basePrice || null;
+  it.hna_per_pc = hnaPerPc;
+  it.base_margin_price = baseMarginPrice;
+  it.margin_pc_rfq = baseMarginPrice && it.rfq_unit_price != null ? baseMarginPrice - it.rfq_unit_price : null;
+  it.margin_pc_co = baseMarginPrice && it.co_unit_price != null ? baseMarginPrice - it.co_unit_price : null;
+  it.margin_pc_fb1 = baseMarginPrice && it.fb1_unit_price != null ? baseMarginPrice - it.fb1_unit_price : null;
+  it.margin_pc_on = baseMarginPrice && it.on_unit_price != null ? baseMarginPrice - it.on_unit_price : null;
+  const formPrice = benchFormulary || benchMou;
+  it.formulary_unit_price = formPrice;
+  it.margin_pc_formulary = baseMarginPrice && formPrice != null ? baseMarginPrice - formPrice : null;
+  it.margin_pc_po = baseMarginPrice && benchPo != null ? baseMarginPrice - benchPo : null;
+  it.margin_pc = baseMarginPrice && latestPrice != null ? baseMarginPrice - latestPrice : null;
+  it.margin_pct = baseMarginPrice && it.margin_pc != null ? it.margin_pc / baseMarginPrice : null;
+  it.margin_annual_rfq = it.margin_pc_rfq != null && it.annual_pcs ? it.margin_pc_rfq * it.annual_pcs : null;
+  it.margin_annual_co = it.margin_pc_co != null && it.annual_pcs ? it.margin_pc_co * it.annual_pcs : null;
+  it.margin_annual_fb1 = it.margin_pc_fb1 != null && it.annual_pcs ? it.margin_pc_fb1 * it.annual_pcs : null;
+  it.margin_annual_on = it.margin_pc_on != null && it.annual_pcs ? it.margin_pc_on * it.annual_pcs : null;
+  it.margin_annual_formulary = it.margin_pc_formulary != null && it.annual_pcs ? it.margin_pc_formulary * it.annual_pcs : null;
+  it.margin_annual_po = it.margin_pc_po != null && it.annual_pcs ? it.margin_pc_po * it.annual_pcs : null;
+  it.margin_annual = it.margin_pc != null && it.annual_pcs ? it.margin_pc * it.annual_pcs : null;
+  it.margin_impact_rfq_vs_formulary = it.margin_annual_rfq != null && it.margin_annual_formulary != null ? it.margin_annual_rfq - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.rfq_unit_price != null ? (formPrice - it.rfq_unit_price) * it.annual_pcs : null;
+  it.margin_impact_rfq_vs_po = it.margin_annual_rfq != null && it.margin_annual_po != null ? it.margin_annual_rfq - it.margin_annual_po : it.annual_pcs && benchPo != null && it.rfq_unit_price != null ? (benchPo - it.rfq_unit_price) * it.annual_pcs : null;
+  it.margin_impact_co_vs_formulary = it.margin_annual_co != null && it.margin_annual_formulary != null ? it.margin_annual_co - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.co_unit_price != null ? (formPrice - it.co_unit_price) * it.annual_pcs : null;
+  it.margin_impact_co_vs_po = it.margin_annual_co != null && it.margin_annual_po != null ? it.margin_annual_co - it.margin_annual_po : it.annual_pcs && benchPo != null && it.co_unit_price != null ? (benchPo - it.co_unit_price) * it.annual_pcs : null;
+  it.margin_impact_fb1_vs_formulary = it.margin_annual_fb1 != null && it.margin_annual_formulary != null ? it.margin_annual_fb1 - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.fb1_unit_price != null ? (formPrice - it.fb1_unit_price) * it.annual_pcs : null;
+  it.margin_impact_fb1_vs_po = it.margin_annual_fb1 != null && it.margin_annual_po != null ? it.margin_annual_fb1 - it.margin_annual_po : it.annual_pcs && benchPo != null && it.fb1_unit_price != null ? (benchPo - it.fb1_unit_price) * it.annual_pcs : null;
+  it.margin_impact_on_vs_formulary = it.margin_annual_on != null && it.margin_annual_formulary != null ? it.margin_annual_on - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.on_unit_price != null ? (formPrice - it.on_unit_price) * it.annual_pcs : null;
+  it.margin_impact_on_vs_po = it.margin_annual_on != null && it.margin_annual_po != null ? it.margin_annual_on - it.margin_annual_po : it.annual_pcs && benchPo != null && it.on_unit_price != null ? (benchPo - it.on_unit_price) * it.annual_pcs : null;
+  it.margin_vs_formulary = it.margin_annual != null && it.margin_annual_formulary != null ? it.margin_annual - it.margin_annual_formulary : it.annual_pcs && formPrice != null && latestPrice != null ? (formPrice - latestPrice) * it.annual_pcs : null;
+  it.margin_vs_po = it.margin_annual != null && it.margin_annual_po != null ? it.margin_annual - it.margin_annual_po : it.annual_pcs && benchPo != null && latestPrice != null ? (benchPo - latestPrice) * it.annual_pcs : null;
+  it.margin_impact_vs_formulary = it.margin_vs_formulary;
+  it.margin_impact_vs_po = it.margin_vs_po;
   return it;
 }
 function summarizeCycleItems(enriched) {
@@ -1014,35 +1104,53 @@ function summarizeCycleItems(enriched) {
     ["on", "Online nego"]
   ].map(([key, label]) => {
     const rows = enriched.filter((i) => i[`${key}_unit_price`] != null && i.base_price);
-    const deltas = rows.filter((i) => i.annual_pcs).map((i) => (i[`${key}_unit_price`] - i.base_price) * i.annual_pcs);
+    const deltas = rows.filter((i) => i.annual_pcs).map((i) => {
+      if (i.po_annualized_value) {
+        return i[`${key}_unit_price`] * i.annual_pcs - i.po_annualized_value;
+      }
+      return (i[`${key}_unit_price`] - i.base_price) * i.annual_pcs;
+    });
+    const marginFormDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_formulary != null || i.formulary_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_formulary`] ?? (i.formulary_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
+    const marginPoDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_po != null || i.po_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_po`] ?? (i.po_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
     return {
       key,
       label,
       items: rows.length,
       increases: rows.filter((i) => i[`${key}_unit_price`] > i.base_price * 1.0005).length,
       decreases: rows.filter((i) => i[`${key}_unit_price`] < i.base_price * 0.9995).length,
-      impact: deltas.length ? deltas.reduce((a, b) => a + b, 0) : null
+      impact: deltas.length ? deltas.reduce((a, b) => a + b, 0) : null,
+      margin_impact_vs_formulary: marginFormDeltas.length ? marginFormDeltas.reduce((a, b) => a + b, 0) : null,
+      margin_impact_vs_po: marginPoDeltas.length ? marginPoDeltas.reduce((a, b) => a + b, 0) : null
     };
   });
   const latestImpacts = enriched.filter((i) => i.impact != null).map((i) => i.impact);
+  const activeItems = enriched.filter((i) => i.item_status !== "Discontinue");
+  const rfqFilledActive = activeItems.filter((i) => i.rfq_hna != null);
+  const marginFormularyTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0);
+  const marginPoTotal = enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0);
   return {
     items: enriched.length,
-    active: enriched.filter((i) => i.item_status !== "Discontinue").length,
+    active: activeItems.length,
     discontinued: enriched.filter((i) => i.item_status === "Discontinue").length,
     with_mou: enriched.filter((i) => i.mou_unit_price != null).length,
     with_po: enriched.filter((i) => i.po_qty_12m != null).length,
     baseline_spend: enriched.filter((i) => i.base_price && i.annual_pcs).reduce((s, i) => s + i.base_price * i.annual_pcs, 0),
-    po_value_12m: enriched.reduce((s, i) => s + (i.po_value_12m || 0), 0),
+    po_value_12m: enriched.reduce((s, i) => s + (i.po_annualized_value || i.po_value_12m || 0), 0),
     stages,
-    rfq_filled: enriched.filter((i) => i.rfq_hna != null).length,
+    rfq_filled: rfqFilledActive.length,
+    rfq_active_pct: activeItems.length ? rfqFilledActive.length / activeItems.length : 0,
     latest_impact: latestImpacts.length ? latestImpacts.reduce((a, b) => a + b, 0) : null,
-    margin: null
+    margin_vs_formulary: marginFormularyTotal,
+    margin_vs_po: marginPoTotal,
+    margin_impact_vs_formulary: marginFormularyTotal,
+    margin_impact_vs_po: marginPoTotal
   };
 }
 function scanCycleAnomalies(cid) {
+  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const enriched = items.map((i) => enrichCycleItem(i, ppn));
+  const enriched = items.map((i) => enrichCycleItem(i, ppn, c));
   const existing = cycleAnomaliesMap.get(cid) || [];
   const existingDecisions = /* @__PURE__ */ new Map();
   for (const a of existing) {
@@ -1074,43 +1182,63 @@ function scanCycleAnomalies(cid) {
   for (let idx = 0; idx < items.length; idx++) {
     const raw = items[idx];
     const en = enriched[idx];
-    if (raw.rfq_disc != null && raw.rfq_disc > 1 && raw.rfq_disc <= 100) {
+    const primaryBench = en.primary_bench;
+    const benchTag = en.bench_tag || "acuan";
+    if (raw.rfq_qty && raw.mou_qty && raw.rfq_qty !== raw.mou_qty) {
       pushFinding(
         raw,
-        "disc_whole:rfq_disc",
-        "Discount typed as whole number",
-        "high",
-        `RFQ_Disc% is ${raw.rfq_disc}. That looks like ${raw.rfq_disc}% typed as a whole number.`,
-        "rfq_disc",
-        raw.rfq_disc / 100,
-        `Set to ${raw.rfq_disc}%`
-      );
-    }
-    if (raw.mou_qty && raw.rfq_qty && raw.mou_qty !== raw.rfq_qty) {
-      pushFinding(
-        raw,
-        "pack_changed",
-        "Pack size changed",
+        "pack_mismatch:rfq_qty",
+        "Qty/PO unit mismatch",
         "medium",
-        `Pack size changed from ${raw.mou_qty} (MOU) to ${raw.rfq_qty} (RFQ) per PO unit.`,
+        `Qty/PO unit mismatch: RFQ Qty (${raw.rfq_qty}) berbeda dengan MOU UOM (${raw.mou_qty}). Periksa konversi kemasan.`,
         "rfq_qty",
         raw.mou_qty,
-        `Set RFQ Qty to ${raw.mou_qty}`
+        `Samakan dengan MOU (${raw.mou_qty})`
       );
     }
-    if (en.change_pct != null && en.change_pct > 5e-3 && raw.rfq_hna && raw.rfq_qty && en.mou_unit_price) {
-      const gross = raw.rfq_hna / raw.rfq_qty * (1 + ppn);
-      const holdDisc = Math.max(0, Math.min(0.95, 1 - en.mou_unit_price / gross));
+    if (raw.rfq_disc != null && raw.rfq_disc > 1) {
       pushFinding(
         raw,
-        "price_increase",
-        "Price increase vs MOU",
-        en.change_pct > 0.15 ? "high" : "medium",
-        `RFQ unit price is +${(en.change_pct * 100).toFixed(1)}% above current MOU (${rp(en.rfq_unit_price)} vs ${rp(en.mou_unit_price)}/pc).`,
-        "co_disc",
-        Number(holdDisc.toFixed(4)),
-        `Counter at ${(holdDisc * 100).toFixed(1)}% to hold MOU price`
+        "disc_format:rfq_disc",
+        "Format diskon tidak realistis",
+        "high",
+        `Diskon RFQ diisi ${raw.rfq_disc}. Format harus desimal 0-1 (contoh: 0.15 untuk 15%).`,
+        "rfq_disc",
+        raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc / 100 : 0.15,
+        `Koreksi ke ${raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc + "%" : "15%"}`
       );
+    }
+    if (en.latest_price != null && primaryBench && primaryBench > 0) {
+      const priceIncreaseRatio = en.latest_price / primaryBench - 1;
+      if (priceIncreaseRatio > 0.5) {
+        const gross = raw.rfq_hna && raw.rfq_qty ? raw.rfq_hna / raw.rfq_qty * (1 + ppn) : en.latest_price;
+        const targetDisc = gross > primaryBench ? Math.max(0, Math.min(0.95, 1 - primaryBench / gross)) : 0;
+        pushFinding(
+          raw,
+          "price_increase_high",
+          "Kenaikan harga >50% vs acuan",
+          "high",
+          `Harga nett/pc naik ${(priceIncreaseRatio * 100).toFixed(1)}% (>50%) di atas acuan ${benchTag} (${rp(en.latest_price)} vs ${rp(primaryBench)}).`,
+          "co_disc",
+          Number(targetDisc.toFixed(4)),
+          `Counter diskon ${(targetDisc * 100).toFixed(1)}% untuk tahan harga ${benchTag}`
+        );
+      }
+    }
+    if (en.rfq_unit_price != null && primaryBench && primaryBench > 0) {
+      const priceDecreaseRatio = (primaryBench - en.rfq_unit_price) / primaryBench;
+      if (priceDecreaseRatio > 5e-3) {
+        pushFinding(
+          raw,
+          "price_decrease_rfq",
+          "Penurunan harga RFQ >0.5%",
+          "low",
+          `Harga penawaran RFQ lebih hemat ${(priceDecreaseRatio * 100).toFixed(1)}% vs acuan ${benchTag} (${rp(en.rfq_unit_price)} vs ${rp(primaryBench)}).`,
+          void 0,
+          void 0,
+          `Pertahankan harga penawaran ini`
+        );
+      }
     }
   }
   cycleAnomaliesMap.set(cid, findings);
@@ -1363,7 +1491,7 @@ function seedNegoSample() {
 }
 seedNegoSample();
 for (const c of cyclesList) {
-  const token = `demo-token-${c.id}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const linkObj = {
     id: 1,
     cycle_id: c.id,
@@ -1378,6 +1506,7 @@ for (const c of cyclesList) {
   };
   cycleLinksMap.set(c.id, [linkObj]);
   tokenToLinkMap.set(token, linkObj);
+  console.log(`Demo vendor link for cycle ${c.id}: /p/${token}`);
 }
 function getPrincipalsPayload() {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
@@ -1386,16 +1515,32 @@ function getPrincipalsPayload() {
     const cyc = cyclesList.find((c) => c.principal_id === p.id);
     const daysLeft = p.mou_end ? daysBetween(today, p.mou_end) : null;
     const openCycle = cyc && cyc.status === "open";
-    const mouAlert = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths && !openCycle);
+    const within6m = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths);
+    const mouAlert = Boolean(within6m && !openCycle);
     return {
       ...p,
       mou_days_left: daysLeft,
+      within_6m: within6m,
       mou_alert: mouAlert,
       overdue_days: null,
       cycle: cyc ? getCycleSummaryCard(cyc) : null
     };
   });
-  return { principals: rows, alert_months: alertMonths, steps: STEPS };
+  const expiringWithin6m = rows.filter((p) => p.within_6m);
+  const expiringOpen = expiringWithin6m.filter((p) => p.cycle && p.cycle.status === "open").length;
+  const expiringUnopened = expiringWithin6m.length - expiringOpen;
+  const openWithFindings = rows.filter((p) => p.cycle && p.cycle.status === "open" && p.cycle.open_anomalies > 0).length;
+  return {
+    principals: rows,
+    alert_months: alertMonths,
+    steps: STEPS,
+    kpi_mou_6m: {
+      total: expiringWithin6m.length,
+      open: expiringOpen,
+      unopened: expiringUnopened
+    },
+    principals_with_findings: openWithFindings
+  };
 }
 var INTENT_RULES = [
   ["help", ["help", "what can you do", "how do i use", "how does this work", "what do you do"]],
@@ -1480,8 +1625,40 @@ function parseChatText(rawText) {
   };
 }
 var app = express();
+app.disable("x-powered-by");
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  const sid = parseCookies(req)["nego_session"];
+  const uid = sid ? sessions.get(sid) : void 0;
+  const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
+  req.user = user;
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  requestUser.run({ user }, next);
+});
+var NEGOTIATOR_ADMIN_PATHS = /^\/admin\/(master|nego|documents)(\/|\.|$)/;
+app.use("/api", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  const p = req.path;
+  if (p.startsWith("/auth/")) return next();
+  const isRead = req.method === "GET" || req.method === "HEAD";
+  if (!isRead && req.headers["x-requested-with"] !== "nego") {
+    return res.status(403).json({ error: "Missing app header" });
+  }
+  if (p.startsWith("/p/")) return next();
+  const user = req.user;
+  if (!user) return res.status(401).json({ error: "Sign in required" });
+  if (user.role === "admin") return next();
+  if (p.startsWith("/admin/") || p === "/admin") {
+    if (user.role === "negotiator" && NEGOTIATOR_ADMIN_PATHS.test(p)) return next();
+    return res.status(403).json({ error: "Administrator access required" });
+  }
+  if (user.role === "viewer" && !isRead && p !== "/chat" && p !== "/ai/chat") {
+    return res.status(403).json({ error: "Viewers have read-only access" });
+  }
+  next();
+});
 app.use("/static", express.static(STATIC_DIR));
 app.get("/", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));
@@ -1489,68 +1666,93 @@ app.get("/", (_req, res) => {
 app.get("/analytics", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "analytics.html"));
 });
+function setPrincipalCookie(req, res, token) {
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+}
+function validLink(token) {
+  if (!token) return null;
+  const link = tokenToLinkMap.get(token);
+  if (!link || link.revoked_at) return null;
+  if (link.expires_at && new Date(link.expires_at).getTime() < Date.now()) return null;
+  return link;
+}
 app.get("/p", (req, res) => {
   const token = req.query.token || req.query.t;
-  if (token) {
-    res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
-  }
+  if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
 app.get("/p/:token", (req, res) => {
   const token = String(req.params.token || "");
-  const link = tokenToLinkMap.get(token);
-  if (!link || link.revoked_at) {
-    const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-    if (!match) {
-      return res.redirect(303, "/p?invalid=1");
-    }
+  const link = validLink(token);
+  if (!link) return res.redirect(303, "/p?invalid=1");
+  link.last_used_at = nowIso();
+  const c = cyclesList.find((x) => x.id === link.cycle_id);
+  if (c) {
+    const evs = cycleEventsMap.get(c.id) || [];
+    evs.unshift({
+      id: evs.length + 1,
+      cycle_id: c.id,
+      at: nowIso(),
+      user_email: `principal:${c.principal.name}`,
+      action: "link.open",
+      detail: { link_id: link.id }
+    });
+    cycleEventsMap.set(c.id, evs);
   }
-  if (link) {
-    link.last_used_at = nowIso();
-    const c = cyclesList.find((x) => x.id === link.cycle_id);
-    if (c) {
-      const evs = cycleEventsMap.get(c.id) || [];
-      evs.unshift({
-        id: evs.length + 1,
-        cycle_id: c.id,
-        at: nowIso(),
-        user_email: `principal:${c.principal.name}`,
-        action: "link.open",
-        detail: { link_id: link.id }
-      });
-      cycleEventsMap.set(c.id, evs);
-    }
-  }
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
+  setPrincipalCookie(req, res, token);
   res.redirect(303, `/p?token=${encodeURIComponent(token)}`);
 });
-app.get("/api/auth/me", (_req, res) => {
+var ADMIN_PASSWORD = process.env.NEGO_ADMIN_PASSWORD || "";
+var SESSION_HOURS = 12;
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+app.get("/api/auth/me", (req, res) => {
   res.json({
-    user: currentSessionUser,
+    user: req.user || null,
     provider: {
-      name: "development",
+      name: "beta",
       password_required: false,
-      notice: "Development sign-in enabled: enter any registered Siloam email (e.g. admin@siloamhospitals.com)."
+      password_required_for: ADMIN_PASSWORD ? usersList.filter((u) => u.role === "admin").map((u) => u.email) : [],
+      notice: "Beta sign-in: enter your Siloam email. Access follows your role."
     }
   });
 });
 app.post("/api/auth/signin", (req, res) => {
-  const email = String(req.body?.email || "admin@siloamhospitals.com").trim().toLowerCase();
-  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active) || usersList[0];
-  currentSessionUser = found;
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active);
+  if (!found) {
+    logAudit(email || "unknown", "signin.failed", { reason: "no active account" });
+    return res.status(401).json({ error: "No active account for that email" });
+  }
+  if (found.role === "admin" && ADMIN_PASSWORD && !safeEqual(String(req.body?.password || ""), ADMIN_PASSWORD)) {
+    logAudit(found.email, "signin.failed", { reason: "bad password" });
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  const old = parseCookies(req)["nego_session"];
+  if (old) sessions.delete(old);
+  const sid = crypto.randomBytes(24).toString("base64url");
+  sessions.set(sid, found.id);
+  found.last_login = nowIso();
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
   logAudit(found.email, "signin");
   res.json({ user: found });
 });
-app.post("/api/auth/signout", (_req, res) => {
-  currentSessionUser = null;
+app.post("/api/auth/signout", (req, res) => {
+  const sid = parseCookies(req)["nego_session"];
+  if (sid) sessions.delete(sid);
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   res.json({ ok: true });
 });
 app.get("/api/auth/setup", (_req, res) => {
-  res.json({ email: usersList[0].email, name: usersList[0].name, min_length: 10 });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 app.post("/api/auth/setup", (_req, res) => {
-  currentSessionUser = usersList[0];
-  res.json({ user: currentSessionUser });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 app.get("/api/status", (_req, res) => {
   const bySource = {};
@@ -1609,8 +1811,8 @@ app.get("/api/catalog", (_req, res) => {
     currency: "IDR"
   });
 });
-app.get("/api/home", (_req, res) => {
-  const user = currentSessionUser || usersList[0];
+app.get("/api/home", (req, res) => {
+  const user = req.user;
   const cal = computeCalendar(0, 3650);
   const dueSoon = cal.renewals.filter((r) => r.days_left <= 30 && !["agreed", "lost"].includes(r.progress?.stage));
   const highAlerts = computeAlerts().filter((a) => a.severity === "high");
@@ -1625,6 +1827,126 @@ app.get("/api/home", (_req, res) => {
 app.post("/api/chat", (req, res) => {
   const text = String(req.body?.text || "").slice(0, 500);
   res.json(parseChatText(text));
+});
+app.post("/api/ai/chat", async (req, res) => {
+  const message = String(req.body?.message || "").trim();
+  const role = req.user?.role === "admin" ? "admin" : "negotiator";
+  const cycleId = req.body?.cycleId ? Number(req.body.cycleId) : null;
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  if (!message) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+  const normMsg = message.toLowerCase().trim();
+  if (normMsg.includes("margin") || normMsg.includes("hitung margin") || normMsg.includes("bisa hitung margin")) {
+    let cycleMarginDetail = "";
+    if (cycleId) {
+      const cyc = cyclesList.find((c) => c.id === cycleId);
+      if (cyc) {
+        const items = cycleItemsMap.get(cyc.id) || [];
+        const ppn = Number(settingsValues.ppn_rate) || 0.11;
+        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
+        const summary = summarizeCycleItems(enriched);
+        cycleMarginDetail = `
+
+\u{1F4CC} **Data Negosiasi Saat Ini (${cyc.principal.name})**:
+\u2022 Total Margin Impact vs Formularium: **${rp(summary.margin_impact_vs_formulary)}**
+\u2022 Total Margin Impact vs PO: **${rp(summary.margin_impact_vs_po)}**
+(Buka drawer item untuk melihat tabel Margin/pc di setiap step negosiasi).`;
+      }
+    }
+    return res.json({
+      reply: `Fitur **Calculated Margin per Item** sudah aktif di sistem! Berikut cara perhitungannya:
+
+1. **Base Price**: \`HNA/pc \xD7 1,11\` (HNA/pc + PPN 11%)
+2. **Margin/pc per Step**: \`Base Price - Harga/pc\` (tersedia per step: RFQ, Counter Offer, Feedback I, Online Nego)
+3. **Margin Impact**: \`\u03A3 (Qty Annualized \xD7 Margin/pc Step) - Margin Saat Ini\`, disajikan dalam 2 versi:
+   \u2022 **Versi vs Formularium**: Membandingkan margin step terhadap harga acuan Formularium/MOU
+   \u2022 **Versi vs PO**: Membandingkan margin step terhadap harga PO riil 12 bulan terakhir${cycleMarginDetail}`,
+      role
+    });
+  }
+  if (normMsg.includes("cost impact") || normMsg.includes("rumus cost") || normMsg.includes("rumus") && normMsg.includes("impact") && !normMsg.includes("margin")) {
+    return res.json({
+      reply: "Rumus **Cost Impact** penawaran:\n\n**Cost Impact = \u03A3 ((Harga Satuan Step \xD7 Qty Tahunan) - Total Nilai PO Tahunan)**\n\n\u2022 **Nilai Negatif (-)**: **Saving** (Penghematan belanja bagi RS).\n\u2022 **Nilai Positif (+)**: **Cost Increase** (Beban biaya naik yang perlu dinegosiasikan ulang).\n\n\u{1F4A1} *Tips*: Pastikan satuan kemasan (UOM/pack size) telah cocok dengan Master Formulary sebelum menyetujui harga satuan.",
+      role
+    });
+  }
+  if (normMsg === "halo" || normMsg === "hai" || normMsg === "hi" || normMsg === "hello") {
+    return res.json({
+      reply: "Halo! Saya asisten **AI Negotiation Intelligence**. Ada yang bisa saya bantu terkait analisa harga, verifikasi penawaran, aturan diskon, atau persiapan counter offer?",
+      role
+    });
+  }
+  let systemInstruction = "";
+  if (role === "principal") {
+    systemInstruction = `You are the Vendor & Principal Assistant for healthcare procurement negotiations.
+Communicate professionally and politely in Indonesian.
+Assist vendors and principals with: RFQ submissions (Qty, HNA, Discount, Catalog Number, Brand), packaging conversions, UOM, and portal guidance.
+CRITICAL CONFIDENTIALITY: NEVER disclose hospital internal benchmarks, PO history, or target prices.
+Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+  } else if (role === "admin") {
+    systemInstruction = `You are the Procurement Admin Intelligence Assistant for hospital procurement.
+Assist Procurement Administrators with: Period data management, PO exports, Master Formulary, Master SKU, and engine financial settings.
+Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+  } else {
+    let cycleInfo = "";
+    if (cycleId) {
+      const cyc = cyclesList.find((c) => c.id === cycleId);
+      if (cyc) {
+        const items = cycleItemsMap.get(cyc.id) || [];
+        const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
+        const ppn = Number(settingsValues.ppn_rate) || 0.11;
+        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
+        const summary = summarizeCycleItems(enriched);
+        cycleInfo = `Current Cycle: ${cyc.principal.name} (${cyc.principal.category}), Step: ${cyc.current_step}, Active Items: ${summary.active}, Open Findings: ${anoms.length}, Total Spend: ${rp(summary.po_value_12m)}`;
+      }
+    }
+    systemInstruction = `You are the Negotiation Intelligence Strategist for hospital procurement negotiators.
+Help negotiators analyze price increases, counter-offers, binding contracts, and cost impact.
+Cost impact formula: SUM per item ((harga step x qty) - nilai PO). Negative is savings!
+Margin formula: (HNA x 1.11) - step price.
+Keep answers crisp, direct, and under 3-4 sentences in Indonesian. Use bold formatting (**bold**) for key numbers or terms.
+${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
+  }
+  try {
+    const contents = [];
+    for (const h of history.slice(-4)) {
+      if (h.role && h.text) {
+        contents.push({
+          role: h.role === "assistant" || h.role === "model" ? "model" : "user",
+          parts: [{ text: String(h.text) }]
+        });
+      }
+    }
+    contents.push({
+      role: "user",
+      parts: [{ text: message }]
+    });
+    const callPromise = ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents,
+      config: {
+        systemInstruction,
+        temperature: 0.3,
+        maxOutputTokens: 300
+      }
+    });
+    const timeoutPromise = new Promise(
+      (_, reject) => setTimeout(() => reject(new Error("AI response timeout")), 3500)
+    );
+    const response = await Promise.race([callPromise, timeoutPromise]);
+    const reply = response.text || "Saya siap membantu proses negosiasi dan verifikasi penawaran harga.";
+    res.json({ reply, role });
+  } catch (err) {
+    console.error("Gemini AI chat notice:", err?.message || err);
+    let fallbackText = "";
+    if (role === "principal") {
+      fallbackText = "Untuk penawaran RFQ, pastikan format diskon dimasukkan antara 0 dan 1 (contoh: 0.15 untuk 15%) dan cek kesesuaian kemasan (UOM) dengan katalog resmi.";
+    } else {
+      fallbackText = `Terkait pertanyaan Anda: Silakan tinjau rincian item aktif, perbandingan harga step terhadap nilai PO tahunan, dan selesaikan temuan (findings) pada tabel negosiasi di atas.`;
+    }
+    res.json({ reply: fallbackText, role, fallback: true });
+  }
 });
 app.get("/api/options", (req, res) => {
   const sku = String(req.query.sku || "");
@@ -1831,7 +2153,7 @@ app.patch("/api/renewals/progress", (req, res) => {
   const { key, ...changes } = req.body || {};
   if (!key) return res.status(400).json({ error: "Unknown renewal" });
   const prev = renewalProgressMap.get(key) || { key, stage: "not_started" };
-  const updated = { ...prev, ...changes, updated_by: (currentSessionUser || usersList[0]).email, updated_at: nowIso() };
+  const updated = { ...prev, ...changes, updated_by: actingUser().email, updated_at: nowIso() };
   renewalProgressMap.set(key, updated);
   const evs = renewalEventsMap.get(key) || [];
   for (const [k, v] of Object.entries(changes)) {
@@ -1840,7 +2162,7 @@ app.patch("/api/renewals/progress", (req, res) => {
         id: evs.length + 1,
         key,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         field: k,
         old: prev[k] == null ? null : String(prev[k]),
         new: v == null ? null : String(v)
@@ -1948,8 +2270,13 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
 });
 app.get("/api/nego/cycles/:cid/items", (req, res) => {
   const cid = Number(req.params.cid);
-  const q = String(req.query.q || "").toLowerCase();
+  const q = String(req.query.q || "").toLowerCase().trim();
   const filter = String(req.query.filter || "all");
+  const sort = String(req.query.sort || "sort");
+  const sortCol = String(req.query.sort_col || "");
+  const sortDir = String(req.query.sort_dir || "asc").toLowerCase();
+  const statusFilter = String(req.query.status || "all");
+  const brandFilter = String(req.query.brand || "all");
   const offset = Math.max(0, Number(req.query.offset || 0));
   const limit = Math.max(1, Math.min(500, Number(req.query.limit || 50)));
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
@@ -1975,16 +2302,83 @@ app.get("/api/nego/cycles/:cid/items", (req, res) => {
       flags: openByItem.get(i.id) || []
     };
   });
+  const allBrands = [...new Set(rawItems.map((i) => i.brand).filter(Boolean))].sort();
+  const allStatuses = [...new Set(rawItems.map((i) => i.item_status || "Active").filter(Boolean))].sort();
   if (q) {
-    rows = rows.filter((r) => `${r.erp_code || ""} ${r.item_name || ""} ${r.brand || ""} ${r.catalog_no || ""}`.toLowerCase().includes(q));
+    rows = rows.filter(
+      (r) => `${r.erp_code || ""} ${r.item_name || ""} ${r.brand || ""} ${r.catalog_no || ""} ${r.remarks || ""}`.toLowerCase().includes(q)
+    );
+  }
+  if (statusFilter && statusFilter !== "all") {
+    rows = rows.filter((r) => (r.item_status || "Active").toLowerCase() === statusFilter.toLowerCase());
+  }
+  if (brandFilter && brandFilter !== "all") {
+    rows = rows.filter((r) => (r.brand || "").toLowerCase() === brandFilter.toLowerCase());
   }
   if (filter === "anomalies") rows = rows.filter((r) => r.flags.length > 0);
   else if (filter === "increase") rows = rows.filter((r) => (r.change_pct || 0) > 5e-4);
   else if (filter === "decrease") rows = rows.filter((r) => (r.change_pct || 0) < -5e-4);
   else if (filter === "no_mou") rows = rows.filter((r) => !r.mou_unit_price);
   else if (filter === "no_rfq") rows = rows.filter((r) => r.rfq_hna == null && r.item_status !== "Discontinue");
+  else if (filter === "has_rfq") rows = rows.filter((r) => r.rfq_hna != null);
   else if (filter === "discontinued") rows = rows.filter((r) => r.item_status === "Discontinue");
-  res.json({ total: rows.length, offset, items: rows.slice(offset, offset + limit) });
+  else if (filter === "active") rows = rows.filter((r) => r.item_status !== "Discontinue");
+  else if (filter === "has_co") rows = rows.filter((r) => r.co_disc != null);
+  else if (filter === "has_fb1") rows = rows.filter((r) => r.fb1_disc != null);
+  else if (filter === "has_on") rows = rows.filter((r) => r.on_disc != null);
+  if (sortCol) {
+    const dir = sortDir === "desc" ? -1 : 1;
+    rows.sort((a, b) => {
+      let va = a[sortCol];
+      let vb = b[sortCol];
+      if (sortCol === "flags" || sortCol === "findings") {
+        va = a.flags.length;
+        vb = b.flags.length;
+      }
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === "string" || typeof vb === "string") {
+        return String(va).localeCompare(String(vb), void 0, { numeric: true, sensitivity: "base" }) * dir;
+      }
+      return (Number(va) - Number(vb)) * dir;
+    });
+  } else if (sort) {
+    if (sort === "name_asc") rows.sort((a, b) => (a.item_name || "").localeCompare(b.item_name || ""));
+    else if (sort === "name_desc") rows.sort((a, b) => (b.item_name || "").localeCompare(a.item_name || ""));
+    else if (sort === "erp_asc") rows.sort((a, b) => (a.erp_code || "").localeCompare(b.erp_code || "", void 0, { numeric: true }));
+    else if (sort === "erp_desc") rows.sort((a, b) => (b.erp_code || "").localeCompare(a.erp_code || "", void 0, { numeric: true }));
+    else if (sort === "impact") rows.sort((a, b) => Math.abs(b.impact || 0) - Math.abs(a.impact || 0));
+    else if (sort === "change") rows.sort((a, b) => (b.change_pct || -Infinity) - (a.change_pct || -Infinity));
+    else if (sort === "change_down") rows.sort((a, b) => (a.change_pct || Infinity) - (b.change_pct || Infinity));
+    else if (sort === "spend") rows.sort((a, b) => (b.po_value_12m || 0) - (a.po_value_12m || 0));
+    else if (sort === "rfq_price_desc") rows.sort((a, b) => (b.rfq_unit_price || 0) - (a.rfq_unit_price || 0));
+    else if (sort === "rfq_price_asc") rows.sort((a, b) => (a.rfq_unit_price ?? Infinity) - (b.rfq_unit_price ?? Infinity));
+    else if (sort === "mou_price_desc") rows.sort((a, b) => (b.mou_unit_price || 0) - (a.mou_unit_price || 0));
+    else if (sort === "mou_price_asc") rows.sort((a, b) => (a.mou_unit_price ?? Infinity) - (b.mou_unit_price ?? Infinity));
+    else if (sort === "co_disc_desc") rows.sort((a, b) => (b.co_disc || 0) - (a.co_disc || 0));
+    else if (sort === "fb1_disc_desc") rows.sort((a, b) => (b.fb1_disc || 0) - (a.fb1_disc || 0));
+    else if (sort === "on_disc_desc") rows.sort((a, b) => (b.on_disc || 0) - (a.on_disc || 0));
+    else if (sort === "margin_pc_desc") rows.sort((a, b) => (b.margin_pc || 0) - (a.margin_pc || 0));
+    else if (sort === "margin_pc_asc") rows.sort((a, b) => (a.margin_pc ?? Infinity) - (b.margin_pc ?? Infinity));
+    else if (sort === "margin_form_desc") rows.sort((a, b) => (b.margin_impact_vs_formulary || 0) - (a.margin_impact_vs_formulary || 0));
+    else if (sort === "margin_po_desc") rows.sort((a, b) => (b.margin_impact_vs_po || 0) - (a.margin_impact_vs_po || 0));
+    else if (sort === "findings") rows.sort((a, b) => b.flags.length - a.flags.length);
+    else if (sort === "sort") {
+      rows.sort((a, b) => (a.sort_order ?? a.id) - (b.sort_order ?? b.id));
+    }
+  }
+  res.json({
+    total: rows.length,
+    offset,
+    items: rows.slice(offset, offset + limit),
+    brands: allBrands,
+    statuses: allStatuses,
+    counts: {
+      total: rawItems.length,
+      filtered: rows.length
+    }
+  });
 });
 app.get("/api/nego/cycles/:cid/items/:iid", (req, res) => {
   const cid = Number(req.params.cid);
@@ -2107,6 +2501,7 @@ app.get("/api/nego/benchmarks", (_req, res) => {
 });
 app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
   const cid = Number(req.params.cid);
+  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
   const bestBmByItem = /* @__PURE__ */ new Map();
@@ -2115,8 +2510,10 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
     if (!prev || b.price_pp < prev.price_pp) bestBmByItem.set(b.item_id, b);
   }
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const suggestions = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").slice(0, 50).map((i) => {
-    const en = enrichCycleItem(i, ppn);
+  let coImpactVsRfq = 0;
+  let diffCount = 0;
+  const suggestions = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").map((i) => {
+    const en = enrichCycleItem(i, ppn, c);
     const bm = bestBmByItem.get(i.id);
     const candidates = [
       en.mou_unit_price ? { price: en.mou_unit_price, label: "MOU" } : null,
@@ -2127,23 +2524,40 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
     const best = candidates[0] || { price: en.rfq_unit_price || 0, label: "RFQ" };
     const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
     const co = best.price && gross ? Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - best.price / gross)) : i.rfq_disc || 0;
+    const coDiscRounded = Number(co.toFixed(4));
+    const coUnitPrice = calcUnitPrice(i.rfq_hna, i.rfq_qty, coDiscRounded, ppn, c?.binding, i.formulary_hna, i.last_po_price);
+    const isDiff = Math.abs(coDiscRounded - (i.rfq_disc || 0)) > 1e-4;
+    if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coUnitPrice != null) {
+      diffCount++;
+      coImpactVsRfq += (coUnitPrice - en.rfq_unit_price) * en.annual_pcs;
+    }
     return {
       item_id: i.id,
-      co_disc: Number(co.toFixed(4)),
+      co_disc: coDiscRounded,
+      co_unit_price: coUnitPrice,
       note: `Match ${best.label} reference (${rp(best.price || 0)}/pc).`,
-      before: i.co_disc
+      before: i.co_disc,
+      diff_from_rfq: isDiff
     };
   });
-  res.json({ suggestions, count: suggestions.length, co_impact: 0, co_increases: 0 });
+  res.json({
+    suggestions,
+    count: suggestions.length,
+    diff_count: diffCount,
+    co_impact_vs_rfq: coImpactVsRfq,
+    co_impact: coImpactVsRfq,
+    co_increases: 0
+  });
 });
 app.post("/api/admin/nego/cycles/:cid/co", (req, res) => {
   const cid = Number(req.params.cid);
+  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   let applied = 0;
   for (const i of items) {
     if (i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue") {
-      const en = enrichCycleItem(i, ppn);
+      const en = enrichCycleItem(i, ppn, c);
       const target = en.mou_unit_price || en.po_unit_price || en.rfq_unit_price;
       const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
       i.co_disc = target && gross ? Number(Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - target / gross)).toFixed(4)) : i.rfq_disc || 0;
@@ -2178,6 +2592,84 @@ app.get("/api/nego/cycles/:cid/package", (req, res) => {
     missing_on: items.filter((i) => i.on_disc == null).slice(0, 10).map((i) => i.erp_code)
   });
 });
+app.get("/api/admin/periods", (_req, res) => {
+  res.json({ periods: periodsList });
+});
+app.post("/api/admin/periods", (req, res) => {
+  const body = req.body || {};
+  if (!body.name) return res.status(400).json({ error: "Period name is required" });
+  const p = {
+    id: periodsList.length + 1,
+    name: String(body.name).trim(),
+    category: body.category || "CnC",
+    active: false,
+    months_elapsed: Number(body.months_elapsed) || 12,
+    created_at: nowIso(),
+    po_rows_count: 0,
+    formulary_count: 0,
+    skus_count: 0,
+    principals_count: 0
+  };
+  periodsList.push(p);
+  res.json(p);
+});
+app.post("/api/admin/periods/:id/activate", (req, res) => {
+  const pid = Number(req.params.id);
+  for (const per of periodsList) {
+    per.active = per.id === pid;
+  }
+  const activePeriod = periodsList.find((p) => p.id === pid);
+  res.json({ active_period: activePeriod, periods: periodsList });
+});
+app.post("/api/admin/periods/:id/upload", (req, res) => {
+  const pid = Number(req.params.id);
+  const per = periodsList.find((p) => p.id === pid);
+  if (!per) return res.status(404).json({ error: "Period not found" });
+  const kind = String(req.body?.kind || "po");
+  const count = Number(req.body?.count || 120);
+  if (kind === "po") per.po_rows_count += count;
+  else if (kind === "formulary") per.formulary_count += count;
+  else if (kind === "skus") per.skus_count += count;
+  else if (kind === "tagging") per.principals_count += Math.round(count / 10);
+  res.json({ period: per, kind, count });
+});
+app.get("/api/admin/nego/principals-template.csv", (_req, res) => {
+  const csv = [
+    "Principal,Distributor,Category,NegoType,Binding,MOU Start,MOU End,Contract Start,Contract End,PIC,Email,WhatsApp,Notes",
+    "PT Medika Nusantara,PT Distributor Sejahtera,Drugs,Renewal,Nett to Disc,2024-01-31,2027-01-30,2027-02-01,2030-01-31,Budi Santoso,budi@medika.com,08123456789,Annual review",
+    "PT Bio Diagnostik,,CnC,New Vendor,Nett,,2027-02-01,2030-01-31,Dewi Sartika,dewi@biodiag.com,08129876543,New lab reagents",
+    "PT Farmasi Sejahtera,PT Anugerah Pharma,Drugs & CnC,Addendum,Discount,2023-06-01,2026-05-31,2026-06-01,2029-05-31,Andi Pratama,andi@farmasi.com,08134567890,Mid-year addendum"
+  ].join("\n");
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", "attachment; filename=principals_template.csv");
+  res.send(csv);
+});
+app.post("/api/admin/nego/principals/import", (req, res) => {
+  const rows = Array.isArray(req.body?.principals) ? req.body.principals : [];
+  let added = 0;
+  for (const r of rows) {
+    if (!r.name && !r.Principal) continue;
+    const name = String(r.name || r.Principal).trim();
+    principalsList.push({
+      id: principalsList.length + 1,
+      name,
+      distributor: r.distributor || r.Distributor || "",
+      category: r.category || r.Category || "CnC",
+      nego_type: r.nego_type || r.NegoType || "Renewal",
+      binding: r.binding || r.Binding || "Nett",
+      mou_start: r.mou_start || r["MOU Start"] || null,
+      mou_end: r.mou_end || r["MOU End"] || null,
+      contact_name: r.contact_name || r.PIC || "",
+      contact_email: r.contact_email || r.Email || "",
+      contact_phone: r.contact_phone || r.WhatsApp || "",
+      notes: r.notes || r.Notes || "",
+      created_at: nowIso(),
+      created_by: actingUser().email
+    });
+    added++;
+  }
+  res.json({ added, total: principalsList.length });
+});
 app.post("/api/admin/nego/principals", (req, res) => {
   const body = req.body || {};
   if (!body.name) return res.status(400).json({ error: "Principal name is required" });
@@ -2185,7 +2677,8 @@ app.post("/api/admin/nego/principals", (req, res) => {
     id: principalsList.length + 1,
     name: String(body.name).trim(),
     distributor: body.distributor || "",
-    category: body.category || "Consumables",
+    category: body.category || "CnC",
+    nego_type: body.nego_type || "Renewal",
     binding: body.binding || "Nett",
     mou_start: body.mou_start || null,
     mou_end: body.mou_end || null,
@@ -2194,7 +2687,7 @@ app.post("/api/admin/nego/principals", (req, res) => {
     contact_phone: body.contact_phone || "",
     notes: body.notes || "",
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email
+    created_by: actingUser().email
   };
   principalsList.push(p);
   res.json(p);
@@ -2216,21 +2709,25 @@ app.post("/api/admin/nego/cycles", (req, res) => {
   const pid = Number(req.body?.principal_id);
   const p = principalsList.find((x) => x.id === pid);
   if (!p) return res.status(404).json({ error: "No such principal" });
+  const activePeriod = periodsList.find((per) => per.active) || periodsList[0];
   const c = {
     id: cyclesList.length + 1,
     principal_id: p.id,
     principal: { ...p },
+    nego_type: req.body?.nego_type || p.nego_type || "Renewal",
     contract_start: req.body?.contract_start || "2027-01-01",
     contract_end: req.body?.contract_end || "2029-12-31",
     binding: req.body?.binding || p.binding || "Nett",
-    delivery_fee: req.body?.delivery_fee || "Free for all Siloam Hospitals units",
+    delivery_fee: req.body?.delivery_fee || "Free for all hospital units",
+    period_id: activePeriod?.id || 1,
+    months_elapsed: activePeriod?.months_elapsed || 12,
     status: "open",
     current_step: "prepare",
     step_due: null,
     prepared_at: null,
     submitted_steps: {},
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email
+    created_by: actingUser().email
   };
   cyclesList.push(c);
   cycleItemsMap.set(c.id, []);
@@ -2242,8 +2739,13 @@ app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   const cid = Number(req.params.cid);
   const c = cyclesList.find((x) => x.id === cid);
   if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const items = cycleItemsMap.get(cid) || [];
+  const nextStep = String(req.body?.step || "");
+  if (c.current_step === "prepare" && nextStep !== "prepare" && items.length === 0) {
+    return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+  }
   if (req.body?.step) {
-    c.current_step = String(req.body.step);
+    c.current_step = nextStep;
     if (c.current_step === "closed") c.status = "closed";
   }
   res.json(getCycleSummaryCard(c));
@@ -2295,7 +2797,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
   const cid = Number(req.params.cid);
   const days = Math.max(1, Math.min(90, Number(req.body?.days) || 14));
   const links = cycleLinksMap.get(cid) || [];
-  const token = `invite-${cid}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1e3).toISOString();
   const link = {
     id: links.length + 1,
@@ -2304,7 +2806,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
     path: `/p/${token}`,
     url: `/p/${token}`,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     expires_at: expiresAt,
     revoked_at: null,
     last_used_at: null
@@ -2319,7 +2821,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
       id: evs.length + 1,
       cycle_id: cid,
       at: nowIso(),
-      user_email: (currentSessionUser || usersList[0]).email,
+      user_email: actingUser().email,
       action: "link.create",
       detail: { link_id: link.id, days }
     });
@@ -2342,7 +2844,7 @@ app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req, res) => {
         id: evs.length + 1,
         cycle_id: cid,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         action: "link.revoke",
         detail: { link_id: link.id }
       });
@@ -2406,15 +2908,18 @@ app.put("/api/admin/settings", (req, res) => {
       changed.push(k);
     }
   }
-  if (changed.length) logAudit((currentSessionUser || usersList[0]).email, "settings.update", changes);
+  if (changed.length) logAudit(actingUser().email, "settings.update", changes);
   res.json({ settings: describeSettings(), changed });
 });
+var ROLES = ["admin", "negotiator", "viewer"];
 app.get("/api/admin/users", (_req, res) => {
   res.json({ users: usersList });
 });
 app.post("/api/admin/users", (req, res) => {
   const { email, name, role } = req.body || {};
   if (!email || !name) return res.status(400).json({ error: "Enter email and name" });
+  if (role && !ROLES.includes(role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  if (usersList.some((x) => x.email === String(email).trim().toLowerCase())) return res.status(409).json({ error: "That email already has an account" });
   const u = {
     id: usersList.length + 1,
     email: String(email).trim().toLowerCase(),
@@ -2422,7 +2927,7 @@ app.post("/api/admin/users", (req, res) => {
     role: role || "viewer",
     active: 1,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     last_login: null,
     has_password: false
   };
@@ -2432,8 +2937,18 @@ app.post("/api/admin/users", (req, res) => {
 app.patch("/api/admin/users/:uid", (req, res) => {
   const u = usersList.find((x) => x.id === Number(req.params.uid));
   if (!u) return res.status(404).json({ error: "No such user" });
-  if (req.body?.role) u.role = req.body.role;
-  if (req.body?.active !== void 0) u.active = req.body.active ? 1 : 0;
+  if (req.body?.role && !ROLES.includes(req.body.role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  const nextRole = req.body?.role || u.role;
+  const nextActive = req.body?.active !== void 0 ? req.body.active ? 1 : 0 : u.active;
+  const otherAdmins = usersList.filter((x) => x.id !== u.id && x.role === "admin" && x.active).length;
+  if (u.role === "admin" && (nextRole !== "admin" || !nextActive) && !otherAdmins) {
+    return res.status(400).json({ error: "Keep at least one active administrator" });
+  }
+  u.role = nextRole;
+  u.active = nextActive;
+  if (!u.active) {
+    for (const [sid, uid] of sessions) if (uid === u.id) sessions.delete(sid);
+  }
   if (req.body?.name) u.name = req.body.name;
   res.json(u);
 });
@@ -2511,26 +3026,16 @@ function resolvePrincipalCycle(req) {
   const token = req.query.token || req.headers["x-principal-token"] || cookies["nego_principal"];
   let foundCycle = null;
   let foundLink = null;
-  if (token) {
-    const link = tokenToLinkMap.get(token);
-    if (link) {
-      if (link.revoked_at) return null;
-      foundLink = link;
-      foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-    } else {
-      const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-      if (match) {
-        const cid2 = Number(match[1]);
-        foundCycle = cyclesList.find((x) => x.id === cid2);
-      }
+  const link = validLink(token);
+  if (link) {
+    foundLink = link;
+    foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
+  } else {
+    const user = req.user;
+    const cid = Number(req.query.cid || req.query.cycle_id);
+    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
+      foundCycle = cyclesList.find((x) => x.id === cid);
     }
-  }
-  const cid = Number(req.query.cid || req.query.cycle_id);
-  if (!foundCycle && cid) {
-    foundCycle = cyclesList.find((x) => x.id === cid);
-  }
-  if (!foundCycle) {
-    foundCycle = cyclesList.find((c) => c.status === "open") || cyclesList[0];
   }
   if (!foundCycle) return null;
   const queryStep = req.query.step;
@@ -2771,6 +3276,13 @@ app.patch("/api/p/items/:iid", (req, res) => {
     return res.status(404).json({ error: "No such item" });
   }
   const { changes, confirm } = req.body || {};
+  const isRfqLocked = cycle.current_step !== "prepare" && cycle.current_step !== "rfq";
+  if (isRfqLocked && changes) {
+    if (changes.rfq_qty !== void 0 || changes.rfq_hna !== void 0 || changes.rfq_disc !== void 0) {
+      return res.status(403).json({ error: "Formulir RFQ telah dikunci karena negosiasi telah memasuki tahap berikutnya." });
+    }
+  }
+  let cautionMessage = null;
   if (changes) {
     if (changes.item_status !== void 0) it.item_status = changes.item_status;
     if (changes.brand !== void 0) it.brand = String(changes.brand).trim();
@@ -2778,39 +3290,58 @@ app.patch("/api/p/items/:iid", (req, res) => {
     if (changes.remarks !== void 0) it.remarks = String(changes.remarks).trim();
     if (changes.rfq_qty !== void 0) {
       it.rfq_qty = changes.rfq_qty != null && changes.rfq_qty !== "" ? parseInt(String(changes.rfq_qty).replace(/[^\d]/g, "")) || null : null;
+      if (it.mou_qty && it.rfq_qty && it.rfq_qty !== it.mou_qty) {
+        cautionMessage = "Satuan/jumlah per kemasan berbeda dengan acuan MOU.";
+      }
     }
     if (changes.rfq_hna !== void 0) {
       if (changes.rfq_hna == null || changes.rfq_hna === "") {
         it.rfq_hna = null;
       } else {
         const clean = String(changes.rfq_hna).replace(/\./g, "").replace(",", ".");
-        it.rfq_hna = parseFloat(clean) || null;
+        const val = parseFloat(clean);
+        if (isNaN(val) || val < 0) {
+          return res.status(400).json({ error: "Harga HNA tidak valid. Mohon periksa kembali harga yang dimasukkan." });
+        }
+        it.rfq_hna = val;
+        const refHna = it.mou_hna || it.last_po_price;
+        if (refHna && (val > refHna * 1.5 || val < refHna * 0.2)) {
+          cautionMessage = "Mohon periksa kembali kesesuaian harga yang dimasukkan.";
+        }
       }
     }
     if (changes.rfq_disc !== void 0) {
       if (changes.rfq_disc == null || changes.rfq_disc === "") {
         it.rfq_disc = null;
       } else {
-        let d = parseFloat(String(changes.rfq_disc).replace("%", "").replace(/\./g, "").replace(",", "."));
-        if (!isNaN(d)) {
-          if (d > 1) d = d / 100;
-          it.rfq_disc = d;
-        } else {
-          it.rfq_disc = null;
+        const rawStr = String(changes.rfq_disc).trim();
+        const hasPct = rawStr.includes("%");
+        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
+        const d = parseFloat(clean);
+        if (isNaN(d) || d < 0) {
+          return res.status(400).json({ error: "Diskon tidak valid. Masukkan angka desimal 0 s/d 1 atau persentase (contoh: 0.15 atau 15%)." });
         }
+        if (d > 1 && !hasPct) {
+          return res.status(400).json({ error: `Diskon '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%) atau ketik dengan tanda % (contoh: ${rawStr}%).` });
+        }
+        it.rfq_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
       }
     }
     if (changes.fb1_disc !== void 0) {
       if (changes.fb1_disc == null || changes.fb1_disc === "") {
         it.fb1_disc = null;
       } else {
-        let d = parseFloat(String(changes.fb1_disc).replace("%", "").replace(/\./g, "").replace(",", "."));
-        if (!isNaN(d)) {
-          if (d > 1) d = d / 100;
-          it.fb1_disc = d;
-        } else {
-          it.fb1_disc = null;
+        const rawStr = String(changes.fb1_disc).trim();
+        const hasPct = rawStr.includes("%");
+        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
+        const d = parseFloat(clean);
+        if (isNaN(d) || d < 0) {
+          return res.status(400).json({ error: "Diskon Feedback I tidak valid." });
         }
+        if (d > 1 && !hasPct) {
+          return res.status(400).json({ error: `Diskon Feedback I '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%).` });
+        }
+        it.fb1_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
       }
     }
     if (changes.price_reason !== void 0) {
@@ -2823,7 +3354,8 @@ app.patch("/api/p/items/:iid", (req, res) => {
     it.principal_confirmed = Array.from(set).join(",");
   }
   scanCycleAnomalies(cycle.id);
-  res.json(formatPrincipalItem(it, step));
+  const formatted = formatPrincipalItem(it, step);
+  res.json({ ...formatted, caution: cautionMessage });
 });
 app.post("/api/p/fill", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
@@ -3000,7 +3532,8 @@ app.delete("/api/p/documents/:did", (req, res) => {
     missing_required: requiredKeys.filter((k) => !have.has(k))
   });
 });
-app.get("/api/p/template.xlsx", (_req, res) => {
+app.get("/api/p/template.xlsx", (req, res) => {
+  if (!resolvePrincipalCycle(req)) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const templatePath = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
   if (fs.existsSync(templatePath)) {
     res.download(templatePath, "Template_Nego.xlsx");
@@ -3404,7 +3937,7 @@ Return ONLY a JSON object in a \`\`\`json code block with the following fields:
 });
 app.post("/api/science/uom-standardize/apply", (req, res) => {
   const { cycle_id, item_id, erp_code, pcs_per_po_unit, standardized_po_unit_text, generic_name, group_key, clinical_unit } = req.body || {};
-  const userEmail = (currentSessionUser || usersList[0]).email;
+  const userEmail = actingUser().email;
   let updatedMaster = null;
   let updatedCycleItem = null;
   if (erp_code && itemMasterMap.has(String(erp_code))) {
@@ -3669,7 +4202,7 @@ app.post("/api/science/sku-benchmark/apply", (req, res) => {
       m.status = "reviewed";
     }
   }
-  logAudit((currentSessionUser || usersList[0]).email, "benchmark.grounded_apply", {
+  logAudit(actingUser().email, "benchmark.grounded_apply", {
     cycle_id: cid,
     item_id: iid,
     erp_code: it.erp_code,
