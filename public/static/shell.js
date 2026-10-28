@@ -341,6 +341,11 @@ async function principalEnter(cidParam) {
     }
 
     select.value = String(activeCid);
+    const updateSrc = async (cid) => {
+      openLink.href = `/p?cycle_id=${cid}`;
+      // The preview carries its own short-lived token, so it doesn't depend on cookies inside the frame.
+      try { iframe.src = (await api(`/api/admin/nego/cycles/${cid}/preview-link`)).url; }
+      catch (_) { iframe.src = `/p?cycle_id=${cid}`; }
     const updateSrc = (cid) => {
       const cyc = openCycles.find(c => c.cycle_id === cid);
       const tkn = cyc?.token || "";

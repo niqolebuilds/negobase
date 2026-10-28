@@ -2156,7 +2156,8 @@ const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize:
 const withFiles = (mw: any) => (req: Request, res: Response, next: any) =>
   mw(req, res, (err: any) => (err ? res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "File is larger than 30 MB" : String(err.message || err) }) : next()));
 
-app.use("/static", express.static(STATIC_DIR));
+// no-cache: browsers re-check every file, so a deploy never leaves a page running old scripts
+app.use("/static", express.static(STATIC_DIR, { etag: true, setHeaders: (res) => res.setHeader("Cache-Control", "no-cache") }));
 
 app.get("/", (_req: Request, res: Response) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));
@@ -3669,6 +3670,28 @@ app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
   }
 
   res.json(link);
+});
+
+// A short-lived link for the staff "Principal" tab preview. The embedded portal sends this token itself,
+// so it works even where the browser blocks cookies inside a nested frame.
+app.get("/api/admin/nego/cycles/:cid/preview-link", (req: Request, res: Response) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const links = cycleLinksMap.get(cid) || [];
+  const now = Date.now();
+  let link = links.find((l) => l.preview && !l.revoked_at && new Date(l.expires_at).getTime() > now + 30 * 60 * 1000);
+  if (!link) {
+    const token = crypto.randomBytes(24).toString("base64url");
+    link = {
+      id: links.length + 1, cycle_id: cid, token, path: `/p/${token}`, url: `/p/${token}`, preview: true,
+      created_at: nowIso(), created_by: actingUser().email, expires_at: new Date(now + 8 * 3600 * 1000).toISOString(), revoked_at: null, last_used_at: null,
+    };
+    links.unshift(link);
+    cycleLinksMap.set(cid, links);
+    tokenToLinkMap.set(token, link);
+  }
+  res.json({ url: `/p?token=${encodeURIComponent(link.token)}` });
 });
 
 app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req: Request, res: Response) => {

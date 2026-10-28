@@ -150,7 +150,7 @@ async function call(path, { method = "GET", body, form } = {}) {
   const r = await fetch(path, opts);
   let j = {};
   try { j = await r.json(); } catch (_) { /* not json */ }
-  if (r.status === 401) { showInvalid(); throw new Error(j.error || "401"); }
+  if (r.status === 401) { showInvalid(); const e401 = new Error(j.error || "401"); e401.status = 401; throw e401; }
   if (!r.ok) {
     const e = String(j.error || r.statusText);
     const err = new Error(e.includes(" / ") ? e.split(" / ")[P.lang === "id" ? 0 : 1] : e);
@@ -190,6 +190,12 @@ async function boot() {
   setLang(P.lang, false);
   aiInit();
   if (new URLSearchParams(location.search).get("invalid")) { showInvalid(); return; }
+  try { P.me = await call("/api/p/me"); } catch (e) {
+    // A 401 already showed "link not valid". Anything else (network, server error) is shown, not hidden behind "Loading".
+    if (e.status !== 401 && !/401/.test(e.message)) {
+      put(clear($("app")), el("section", { class: "pcard center" }, el("h1", { text: t("err") }), el("p", { text: e.message || "" }),
+        el("button", { type: "button", class: "pbtn primary", text: t("retry"), onclick: () => location.reload() })));
+    }
   try {
     P.me = await call("/api/p/me");
   } catch (err) {

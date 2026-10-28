@@ -2162,7 +2162,7 @@ app.use("/api", (req, res, next) => {
 });
 var fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 4 } });
 var withFiles = (mw) => (req, res, next) => mw(req, res, (err) => err ? res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "File is larger than 30 MB" : String(err.message || err) }) : next());
-app.use("/static", express.static(STATIC_DIR));
+app.use("/static", express.static(STATIC_DIR, { etag: true, setHeaders: (res) => res.setHeader("Cache-Control", "no-cache") }));
 app.get("/", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));
 });
@@ -3600,6 +3600,34 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
     cycleEventsMap.set(cid, evs);
   }
   res.json(link);
+});
+app.get("/api/admin/nego/cycles/:cid/preview-link", (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const links = cycleLinksMap.get(cid) || [];
+  const now = Date.now();
+  let link = links.find((l) => l.preview && !l.revoked_at && new Date(l.expires_at).getTime() > now + 30 * 60 * 1e3);
+  if (!link) {
+    const token = crypto.randomBytes(24).toString("base64url");
+    link = {
+      id: links.length + 1,
+      cycle_id: cid,
+      token,
+      path: `/p/${token}`,
+      url: `/p/${token}`,
+      preview: true,
+      created_at: nowIso(),
+      created_by: actingUser().email,
+      expires_at: new Date(now + 8 * 3600 * 1e3).toISOString(),
+      revoked_at: null,
+      last_used_at: null
+    };
+    links.unshift(link);
+    cycleLinksMap.set(cid, links);
+    tokenToLinkMap.set(token, link);
+  }
+  res.json({ url: `/p?token=${encodeURIComponent(link.token)}` });
 });
 app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req, res) => {
   const cid = Number(req.params.cid);
