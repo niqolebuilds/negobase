@@ -9,10 +9,10 @@ function adminEnter(sub) {
   const nego = shell.user && shell.user.role === "negotiator";  // read-only master data, nothing else
   if (nego) sub = "master";
   $("admin-subtabs").hidden = nego;
-  adminState.sub = ["periods", "data", "master", "documents", "settings", "users", "activity"].includes(sub) ? sub : "periods";
+  adminState.sub = ["periods", "principals", "data", "master", "documents", "settings", "users", "activity"].includes(sub) ? sub : "periods";
   document.querySelectorAll("#admin-subtabs a").forEach((a) => a.classList.toggle("on", a.dataset.sub === adminState.sub));
   const body = clear($("admin-body"));
-  return ({ periods: adminPeriods, data: adminData, master: adminMaster, documents: adminDocs, settings: adminSettings, users: adminUsers, activity: adminActivity })[adminState.sub](body);
+  return ({ periods: adminPeriods, principals: adminPrincipals, data: adminData, master: adminMaster, documents: adminDocs, settings: adminSettings, users: adminUsers, activity: adminActivity })[adminState.sub](body);
 }
 
 function card(title, sub, ...kids) {
@@ -56,11 +56,9 @@ async function adminPeriods(body) {
       el("div", { class: "preview ok", style: "display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;" },
         el("div", {},
           el("h3", { text: `Active Period: ${activePeriod.name}` }),
-          el("p", { class: "small muted", text: `Category: ${activePeriod.category} · Running months: ${activePeriod.months_elapsed} months · Created: ${fmtDate(activePeriod.created_at)}` })),
+          el("p", { class: "small muted", text: `Category: ${activePeriod.category} · Running months: ${activePeriod.months_elapsed} months · Created: ${fmtDate(String(activePeriod.created_at).slice(0, 10))}` })),
         el("div", { style: "display: flex; gap: 8px; flex-wrap: wrap;" },
-          act("Add Principal", () => principalForm(), "primary"),
-          act("Import Principals", () => importPrincipals(), "secondary"),
-          el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "Download CSV Template ⤓" })
+          el("a", { class: "act secondary", href: "#admin/principals", text: "Principals: add or import →" })
         )
       )
     );
@@ -69,16 +67,18 @@ async function adminPeriods(body) {
     clear(uploadGridBox);
     const grid = el("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px;" });
     const UPLOAD_CARDS = [
-      { kind: "po_export", label: "PO Export (YTD / 12 Months)", desc: "Purchase order volume and spend per hospital and SKU.", count: activePeriod.po_rows_count },
-      { kind: "formulary", label: "Master Formulary", desc: "Approved formulary list with conversion units and baseline HNA.", count: activePeriod.formulary_count },
-      { kind: "sku_master", label: "Master SKU", desc: "SKU database with clinical units, generic names, and molecule tags.", count: activePeriod.sku_master_count },
-      { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Mapping of SKUs to exclusive or authorized principals.", count: activePeriod.sku_tagging_count },
+      { kind: "po_export", label: "PO Export (raw PO lines)", desc: "Raw PO lines. Qty, value, average price and annualized figures per item are calculated by the app.", cols: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital", count: activePeriod.po_rows_count },
+      { kind: "formulary", label: "Formulary", desc: "Formulary items with pack unit and (optional) formulary HNA.", cols: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA", count: activePeriod.formulary_count },
+      { kind: "sku_master", label: "Master SKU", desc: "SKU master: names, generic, brand, REF and unit.", cols: "ERP Code, Item Name, Generic Name, Brand, Catalog No. (REF), UOM", count: activePeriod.sku_master_count },
+      { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Which principal supplies each SKU.", cols: "ERP Code, Principal", count: activePeriod.sku_tagging_count },
     ];
 
     UPLOAD_CARDS.forEach((c) => {
       const finput = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only" });
+      const info = (activePeriod.files || {})[c.kind];
       const statusSpan = el("div", { class: "small", style: "margin-top: 6px;" },
-        c.count ? el("span", { class: "zone good", text: `${num(c.count)} rows loaded ✓` }) : el("span", { class: "zone warn", text: "Not uploaded yet" })
+        c.count ? el("span", { class: "zone good", text: `${num(c.count)} rows loaded ✓` }) : el("span", { class: "zone warn", text: "Not uploaded yet" }),
+        info ? el("div", { class: "muted", text: `${info.name} · ${new Date(info.at).toLocaleString("en-GB")} · ${info.by}` }) : null
       );
       const zone = dropZone(finput, `Upload ${c.label}`);
       finput.addEventListener("change", async () => {
@@ -86,10 +86,10 @@ async function adminPeriods(body) {
         const fd = new FormData();
         fd.append("file", finput.files[0]);
         fd.append("kind", c.kind);
-        statusSpan.textContent = "Uploading & parsing…";
+        statusSpan.textContent = "Uploading & reading…";
         try {
           const res = await upload(`/api/admin/periods/${activePeriod.id}/upload`, fd);
-          toast(`Uploaded ${c.label}: ${res.rows} rows processed`);
+          toast(`${c.label}: ${res.rows} rows loaded${res.skipped ? `, ${res.skipped} skipped` : ""}`);
           adminEnter("periods");
         } catch (e) {
           statusSpan.textContent = `Error: ${e.message}`;
@@ -98,7 +98,8 @@ async function adminPeriods(body) {
       });
       const cCard = el("div", { class: "card", style: "padding: 14px; border: 1px solid var(--border);" },
         el("b", { text: c.label }),
-        el("p", { class: "small muted", style: "margin: 4px 0 10px 0;", text: c.desc }),
+        el("p", { class: "small muted", style: "margin: 4px 0 6px 0;", text: c.desc }),
+        el("p", { class: "small muted", style: "margin: 0 0 10px 0;", text: `Columns: ${c.cols}` }),
         zone,
         statusSpan
       );
@@ -129,27 +130,28 @@ async function adminPeriods(body) {
     }) }
   ], periods);
 
-  // New Period Form
-  const pName = el("input", { required: "", placeholder: "e.g. CnC 2026 End-Year or Drugs 2026 Mid-Year" });
-  const pCat = el("select", {},
-    el("option", { value: "CnC", text: "CnC (Consumables & Chemicals)" }),
-    el("option", { value: "Drugs", text: "Drugs & Pharmaceuticals" }),
-    el("option", { value: "Reagents", text: "Reagents & Lab" }),
-    el("option", { value: "All", text: "All Categories" })
-  );
+  // New Period Form: category + Mid-/End-Year + year, e.g. "CnC 2026 End-Year"
+  const pCat = el("select", {}, el("option", { value: "CnC", text: "CnC" }), el("option", { value: "Drugs", text: "Drugs" }));
+  const pHalf = el("select", {}, el("option", { value: "End-Year", text: "End-Year" }), el("option", { value: "Mid-Year", text: "Mid-Year" }));
+  const pYear = el("input", { type: "number", min: "2020", max: "2100", value: String(new Date().getFullYear()) });
   const pMonths = el("input", { type: "number", min: "1", max: "12", value: "12" });
+  const preview = el("p", { class: "small" });
+  const syncName = () => { preview.textContent = `Period name: ${pCat.value} ${pYear.value} ${pHalf.value}`; };
+  [pCat, pHalf, pYear].forEach((x) => x.addEventListener("input", syncName));
+  syncName();
   const formMsg = el("p", { class: "error", hidden: "" });
   const pForm = el("form", { class: "progress-form" },
-    adminField("Period Name", pName),
-    el("div", { class: "row2" }, adminField("Category", pCat), adminField("Running Months (Bulan Berjalan)", pMonths, "Used for annualizing PO spend (YTD * 12 / bulan berjalan)")),
+    el("div", { class: "row2" }, adminField("Category", pCat), adminField("Cycle", pHalf)),
+    el("div", { class: "row2" }, adminField("Year", pYear), adminField("Running months (bulan berjalan)", pMonths, "Annualized = YTD × 12 ÷ running months")),
+    preview,
     formMsg,
-    el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Create Period" }))
+    el("div", { class: "actions" }, el("button", { type: "submit", class: "act", text: "Create period" }))
   );
   pForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
-      await send("/api/admin/periods", "POST", { name: pName.value, category: pCat.value, months_elapsed: parseInt(pMonths.value, 10) || 12 });
-      toast(`Period "${pName.value}" created`);
+      const made = await send("/api/admin/periods", "POST", { category: pCat.value, half: pHalf.value, year: parseInt(pYear.value, 10), months_elapsed: parseInt(pMonths.value, 10) || 12 });
+      toast(`Period "${made.name}" created`);
       adminEnter("periods");
     } catch (err) {
       formMsg.textContent = err.message;
@@ -157,6 +159,34 @@ async function adminPeriods(body) {
     }
   });
   clear(newPeriodFormBox).append(pForm);
+}
+
+// ---------- principals (add, import, edit) ----------
+async function adminPrincipals(body) {
+  const listBox = el("div");
+  body.append(
+    card("Principals",
+      "Every principal Siloam negotiates with: Drugs and CnC, renewals, new vendors, addenda and force majeure. Add them one by one or import the template. The negotiation team opens each negotiation from the Negotiation tab.",
+      el("div", { class: "actions" },
+        act("Add principal", () => principalForm(), "primary"),
+        act("Import principals", () => importPrincipals(), "secondary"),
+        el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.xlsx", text: "Excel template ⤓" }),
+        el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "CSV template ⤓" }))),
+    card("All principals", null, listBox));
+  let d;
+  try { d = await api("/api/nego/principals"); } catch (err) { listBox.append(el("p", { class: "error", text: err.message })); return; }
+  const tbl = el("table");
+  clear(listBox).append(d.principals.length ? el("div", { class: "table-wrap" }, tbl) : el("p", { class: "muted", text: "No principals yet. Add one or import the template." }));
+  if (!d.principals.length) return;
+  table(tbl, [
+    { label: "Principal", get: (p) => el("div", {}, el("b", { text: p.name }), el("div", { class: "small muted", text: p.distributor || "" })) },
+    { label: "Category", get: (p) => p.category || "—" },
+    { label: "Type", get: (p) => p.nego_type || "Renewal" },
+    { label: "Binding", get: (p) => p.binding || "Nett" },
+    { label: "Current MOU", get: (p) => (p.mou_end ? `${p.mou_start ? fmtDate(p.mou_start) + " – " : "until "}${fmtDate(p.mou_end)}` : el("span", { class: "muted", text: p.nego_type === "New Vendor" ? "New vendor" : "Not set" })) },
+    { label: "Negotiation", get: (p) => (p.cycle ? p.cycle.step_label : el("span", { class: "muted", text: "Not started" })) },
+    { label: "", get: (p) => act("Edit", () => principalForm(p), "ghost") },
+  ], d.principals);
 }
 
 function dropZone(input, label) {

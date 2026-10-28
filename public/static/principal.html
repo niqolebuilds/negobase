@@ -22,6 +22,12 @@
 <main id="app" class="pmain"><p class="muted">Memuat… / Loading…</p></main>
 <dialog id="dlg" class="pdlg"><div id="dlg-body"></div></dialog>
 <div id="ptoast" class="ptoast" role="status" hidden></div>
+<button type="button" id="aibtn" class="aifab" aria-expanded="false" aria-controls="aipanel"><span aria-hidden="true">✦</span> <b>AI</b></button>
+<section id="aipanel" class="aipanel" role="dialog" aria-label="AI" hidden>
+  <header><b id="ai-title">Asisten</b><button type="button" id="ai-close" class="pbtn small ghost" aria-label="Tutup">×</button></header>
+  <div id="ai-log" class="ailog" aria-live="polite"></div>
+  <form id="ai-form" class="aiform"><input id="ai-input" autocomplete="off" maxlength="500"><button type="submit" class="pbtn primary small" id="ai-send">Kirim</button></form>
+</section>
 <script src="/static/principal.js"></script>
 </body>
 </html>

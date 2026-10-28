@@ -1,6 +1,331 @@
 // server.ts
 import express from "express";
 import fs from "fs";
+import crypto from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
+import multer from "multer";
+import ExcelJS3 from "exceljs";
+
+// tabular.ts
+import ExcelJS from "exceljs";
+function parseCsvText(text2) {
+  const src = text2.replace(/^﻿/, "");
+  const sep = detectSeparator(src);
+  const records = [];
+  let field = "";
+  let rec = [];
+  let quoted = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else quoted = false;
+      } else field += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === sep) {
+      rec.push(field);
+      field = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && src[i + 1] === "\n") i++;
+      rec.push(field);
+      field = "";
+      if (rec.some((c) => c.trim() !== "")) records.push(rec);
+      rec = [];
+    } else field += ch;
+  }
+  rec.push(field);
+  if (rec.some((c) => c.trim() !== "")) records.push(rec);
+  return recordsToRows(records);
+}
+function detectSeparator(src) {
+  const first = src.split(/\r?\n/, 1)[0] || "";
+  const commas = (first.match(/,/g) || []).length;
+  const semis = (first.match(/;/g) || []).length;
+  return semis > commas ? ";" : ",";
+}
+function recordsToRows(records) {
+  if (!records.length) return [];
+  const headers = records[0].map((h) => h.trim());
+  return records.slice(1).map((r) => {
+    const row = {};
+    headers.forEach((h, i) => {
+      if (h) row[h] = (r[i] ?? "").trim();
+    });
+    return row;
+  });
+}
+function cellText(v) {
+  if (v == null) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "object") {
+    const o = v;
+    if (o.result !== void 0) return cellText(o.result);
+    if (o.richText) return o.richText.map((t) => t.text).join("");
+    if (o.text !== void 0) return String(o.text);
+    if (o.error) return "";
+  }
+  return String(v).trim();
+}
+async function readTable(file) {
+  const name = file.originalname.toLowerCase();
+  if (name.endsWith(".xlsx")) {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(file.buffer);
+    const ws = wb.worksheets.find((w) => w.rowCount > 0);
+    if (!ws) return [];
+    const records = [];
+    ws.eachRow({ includeEmpty: false }, (row) => {
+      const cells = [];
+      for (let c = 1; c <= row.cellCount; c++) cells.push(cellText(row.getCell(c).value));
+      if (cells.some((c) => c !== "")) records.push(cells);
+    });
+    return recordsToRows(records);
+  }
+  if (name.endsWith(".csv") || name.endsWith(".txt")) return parseCsvText(file.buffer.toString("utf-8"));
+  throw new Error("Unsupported file type. Upload .csv or .xlsx");
+}
+var norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+function pick(row, ...aliases) {
+  const keys = Object.keys(row);
+  for (const a of aliases) {
+    const na = norm(a);
+    const k = keys.find((x) => norm(x) === na);
+    if (k !== void 0 && row[k] !== "") return row[k];
+  }
+  return "";
+}
+function hasColumn(rows, ...aliases) {
+  if (!rows.length) return false;
+  const keys = Object.keys(rows[0]).map(norm);
+  return aliases.some((a) => keys.includes(norm(a)));
+}
+function toNumber(v) {
+  if (v == null) return null;
+  let s = String(v).trim().replace(/rp/i, "").replace(/%/g, "").replace(/\s/g, "");
+  if (!s) return null;
+  const lastDot = s.lastIndexOf(".");
+  const lastComma = s.lastIndexOf(",");
+  if (lastDot >= 0 && lastComma >= 0) {
+    s = lastComma > lastDot ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+  } else if (lastComma >= 0) {
+    s = /^\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, "") : s.replace(",", ".");
+  } else if (lastDot >= 0 && /^\d{1,3}(\.\d{3})+$/.test(s)) {
+    s = s.replace(/\./g, "");
+  }
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? null : n;
+}
+function toIsoDate(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+// template.ts
+import ExcelJS2 from "exceljs";
+var COL = {
+  erp: 1,
+  name: 2,
+  brand: 3,
+  ref: 4,
+  status: 5,
+  remarks: 6,
+  mouQty: 7,
+  mouHna: 8,
+  mouDisc: 9,
+  mouPrice: 10,
+  rfqQty: 11,
+  rfqHna: 12,
+  rfqDisc: 13,
+  rfqPrice: 14,
+  coDisc: 15,
+  coPrice: 16,
+  fb1Disc: 17,
+  fb1Price: 18,
+  onDisc: 19,
+  onPrice: 20
+};
+var FIRST_ROW = 8;
+var FORMULA_ROWS = 500;
+var fmtLongDate = (iso) => {
+  const m = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+  const [y, mo, d] = iso.split("-").map(Number);
+  return `${String(d).padStart(2, "0")} ${m[mo - 1]} ${y}`;
+};
+async function buildTemplate(templatePath, items, o) {
+  const wb = new ExcelJS2.Workbook();
+  await wb.xlsx.readFile(templatePath);
+  const ws = wb.getWorksheet("Form") || wb.worksheets[0];
+  ws.getCell("A1").value = `Contract Period: ${fmtLongDate(o.contractStart)}  -  ${fmtLongDate(o.contractEnd)}`;
+  const bindingText = o.binding === "Disc" ? "Discount (% off HNA)" : o.binding === "Nett to Disc" ? "Nett to Disc (formulary HNA \xD7 (1 \u2212 disc))" : "Nett Price (HNA after discount)";
+  ws.getCell("A2").value = `Binding: ${bindingText}`;
+  ws.getCell("A3").value = `Delivery Fee: ${o.deliveryFee}`;
+  ws.getCell("A4").value = `Principal: ${o.principal}`;
+  ws.getCell("A5").value = `Distributor: ${o.distributor || "-"}`;
+  const put = (r, c, v) => {
+    ws.getCell(r, c).value = v == null || v === "" ? null : v;
+  };
+  items.forEach((it, i) => {
+    const r = FIRST_ROW + i;
+    put(r, COL.erp, it.erp_code);
+    put(r, COL.name, it.item_name);
+    put(r, COL.brand, it.brand);
+    put(r, COL.ref, it.catalog_no);
+    put(r, COL.status, it.item_status);
+    put(r, COL.remarks, it.remarks);
+    if (!o.forPrincipal) {
+      put(r, COL.mouQty, it.mou_qty);
+      put(r, COL.mouHna, it.mou_hna);
+      put(r, COL.mouDisc, it.mou_disc);
+    }
+    put(r, COL.rfqQty, it.rfq_qty);
+    put(r, COL.rfqHna, it.rfq_hna);
+    put(r, COL.rfqDisc, it.rfq_disc);
+    if (!o.forPrincipal || o.showCounterOffer) put(r, COL.coDisc, it.co_disc);
+    put(r, COL.fb1Disc, it.fb1_disc);
+    if (!o.forPrincipal) put(r, COL.onDisc, it.on_disc);
+    if (r > FORMULA_ROWS) {
+      const L = (c) => ws.getColumn(c).letter;
+      const price = (q, h, d, abs = false) => {
+        const qa = abs ? `$${L(h)}${r}` : `${L(h)}${r}`, qq = abs ? `$${L(q)}${r}` : `${L(q)}${r}`;
+        return { formula: `IFERROR(IF(${qa}="","",${qa}/${qq}*(1-${L(d)}${r})*1.11),"")` };
+      };
+      if (!o.forPrincipal) ws.getCell(r, COL.mouPrice).value = price(COL.mouQty, COL.mouHna, COL.mouDisc);
+      ws.getCell(r, COL.rfqPrice).value = price(COL.rfqQty, COL.rfqHna, COL.rfqDisc);
+      ws.getCell(r, COL.coPrice).value = price(COL.rfqQty, COL.rfqHna, COL.coDisc, true);
+      ws.getCell(r, COL.fb1Price).value = price(COL.rfqQty, COL.rfqHna, COL.fb1Disc, true);
+      ws.getCell(r, COL.onPrice).value = price(COL.rfqQty, COL.rfqHna, COL.onDisc, true);
+    }
+  });
+  if (o.forPrincipal) {
+    ws.getCell("G6").value = "";
+    for (const c of [COL.mouQty, COL.mouHna, COL.mouDisc, COL.mouPrice]) {
+      ws.getColumn(c).hidden = true;
+    }
+    if (!o.showCounterOffer) for (const c of [COL.coDisc, COL.coPrice]) ws.getColumn(c).hidden = true;
+    for (const c of [COL.onDisc, COL.onPrice]) ws.getColumn(c).hidden = true;
+  }
+  return wb;
+}
+function text(v) {
+  if (v == null) return "";
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "object") {
+    const o = v;
+    if (o.result !== void 0) return text(o.result);
+    if (o.richText) return o.richText.map((t) => t.text).join("");
+    if (o.text !== void 0) return String(o.text);
+    return "";
+  }
+  return String(v).trim();
+}
+async function readTemplate(buffer) {
+  const wb = new ExcelJS2.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = wb.getWorksheet("Form") || wb.worksheets[0];
+  if (!ws) throw new Error("The workbook has no sheet");
+  let headerRow = 0;
+  const headers = {};
+  for (let r = 1; r <= 20 && !headerRow; r++) {
+    ws.getRow(r).eachCell((c, n) => {
+      if (text(c.value).toLowerCase() === "erp code") headerRow = r;
+    });
+  }
+  if (!headerRow) throw new Error('This is not Template_Nego: no "ERP Code" column found');
+  ws.getRow(headerRow).eachCell((c, n) => {
+    const t = text(c.value);
+    if (t) headers[t.toLowerCase()] = n;
+  });
+  const at = (names) => {
+    for (const n of names) if (headers[n.toLowerCase()]) return headers[n.toLowerCase()];
+    return 0;
+  };
+  const cols = {
+    erp: at(["ERP Code"]),
+    name: at(["Item Name"]),
+    brand: at(["Brand / Manufacturer", "Brand"]),
+    ref: at(["Catalog No. (REF)", "Catalog No"]),
+    status: at(["Item Status", "Status"]),
+    remarks: at(["Remarks"]),
+    rfqQty: at(["RFQ_Qty/PO Unit"]),
+    rfqHna: at(["RFQ_HNA/PO Unit (excl. PPN)"]),
+    rfqDisc: at(["RFQ_Disc%"]),
+    coDisc: at(["CO_Disc%"]),
+    fb1Disc: at(["FB1_Disc%"]),
+    onDisc: at(["ON_Disc%"])
+  };
+  const rows = [];
+  for (let r = headerRow + 1; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+    const get = (k) => cols[k] ? text(row.getCell(cols[k]).value) : "";
+    const erp = get("erp");
+    if (!erp && !get("name")) continue;
+    const cells = {};
+    for (const k of Object.keys(cols)) if (k !== "erp" && k !== "name") cells[k] = get(k);
+    rows.push({ row: r, erp_code: erp.toUpperCase(), item_name: get("name"), cells });
+  }
+  return rows;
+}
+var STATUS_WORDS = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue" };
+var FIELD_META = {
+  brand: { header: "Brand / Manufacturer", field: "brand", kind: "text" },
+  ref: { header: "Catalog No. (REF)", field: "catalog_no", kind: "text" },
+  status: { header: "Item Status", field: "item_status", kind: "status" },
+  remarks: { header: "Remarks", field: "remarks", kind: "text" },
+  rfqQty: { header: "RFQ_Qty/PO Unit", field: "rfq_qty", kind: "qty" },
+  rfqHna: { header: "RFQ_HNA/PO Unit", field: "rfq_hna", kind: "money" },
+  rfqDisc: { header: "RFQ_Disc%", field: "rfq_disc", kind: "disc" },
+  coDisc: { header: "CO_Disc%", field: "co_disc", kind: "disc" },
+  fb1Disc: { header: "FB1_Disc%", field: "fb1_disc", kind: "disc" },
+  onDisc: { header: "ON_Disc%", field: "on_disc", kind: "disc" }
+};
+function checkRow(cells, allowed) {
+  const changes = [];
+  const errors = [];
+  for (const key of allowed) {
+    const raw = (cells[key] ?? "").trim();
+    if (raw === "") continue;
+    const m = FIELD_META[key];
+    if (!m) continue;
+    if (m.kind === "text") {
+      changes.push({ field: m.field, header: m.header, value: raw.slice(0, 300) });
+      continue;
+    }
+    if (m.kind === "status") {
+      const v = STATUS_WORDS[raw.toLowerCase()];
+      if (!v) errors.push(`${m.header}: use Active or Discontinue`);
+      else changes.push({ field: m.field, header: m.header, value: v });
+      continue;
+    }
+    const n = toNumber(raw);
+    if (n == null) {
+      errors.push(`${m.header}: "${raw}" is not a number`);
+      continue;
+    }
+    if (m.kind === "qty") {
+      if (n < 1 || !Number.isFinite(n)) errors.push(`${m.header}: must be at least 1`);
+      else changes.push({ field: m.field, header: m.header, value: Math.round(n) });
+    } else if (m.kind === "money") {
+      if (n <= 0) errors.push(`${m.header}: must be more than 0`);
+      else changes.push({ field: m.field, header: m.header, value: n });
+    } else {
+      const frac = raw.includes("%") ? n / 100 : n;
+      if (frac < 0 || frac >= 1) errors.push(`${m.header}: a discount must be between 0% and 100% (a cell showing 15 means 1500%)`);
+      else changes.push({ field: m.field, header: m.header, value: frac });
+    }
+  }
+  return { changes, errors };
+}
+
+// server.ts
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
@@ -113,17 +438,19 @@ function daysBetween(fromIso, toIso) {
 function nowIso() {
   return (/* @__PURE__ */ new Date()).toISOString().slice(0, 19) + "Z";
 }
-function parseUoMQty(text) {
-  if (!text) return 1;
-  const s = String(text).trim();
+function matchUoMQty(text2) {
+  if (!text2) return null;
+  const s = String(text2).trim();
   const multi = s.match(/(\d+)\s*(?:strip|blister|alu|tube|botol|vial|amp\w*|sachet|bag)\s*(?:@|x|isi|\*)\s*(\d+)/i);
   if (multi) return Math.max(1, parseInt(multi[1], 10) * parseInt(multi[2], 10));
-  const m = s.match(/(?:@|isi\s*|x\s*|:\s*|=\s*|of\s*)(\d+)/i) || s.match(/\b(\d+)\s*(?:pcs|pc|tab\w*|cap\w*|amp\w*|vial\w*|strip\w*|roll\w*|test\w*|pair\w*|bag\w*|btl|botol|sachet|syringe|unit|lembar|set)/i);
-  if (m) return Math.max(1, parseInt(m[1], 10));
-  return 1;
+  const m = s.match(/(?:@|\/|isi\s*|x\s*|:\s*|=\s*|of\s*)(\d+)/i) || s.match(/\b(\d+)\s*(?:pcs|pc|tab\w*|cap\w*|amp\w*|vial\w*|strip\w*|roll\w*|test\w*|pair\w*|bag\w*|btl|botol|sachet|syringe|unit|lembar|set)/i);
+  return m ? Math.max(1, parseInt(m[1], 10)) : null;
 }
-function inferClinicalUnit(text, itemName) {
-  const combined = `${text || ""} ${itemName || ""}`.toLowerCase();
+function parseUoMQty(text2) {
+  return matchUoMQty(text2) ?? 1;
+}
+function inferClinicalUnit(text2, itemName) {
+  const combined = `${text2 || ""} ${itemName || ""}`.toLowerCase();
   if (/\bvial\b/.test(combined)) return "vial";
   if (/\b(ampul|ampoule|amp)\b/.test(combined)) return "ampoule";
   if (/\b(tablet|tab|kaplet|caplet)\b/.test(combined)) return "tablet";
@@ -898,9 +1225,7 @@ function computeCalendar(minDays, maxDays) {
 }
 var STEPS = [
   { key: "prepare", label: "Prepare", who: "admin" },
-  { key: "identification", label: "Item Identification", who: "principal" },
-  { key: "current_mou", label: "Current MOU", who: "reference" },
-  { key: "rfq", label: "RFQ", who: "principal" },
+  { key: "rfq", label: "RFQ & Identification", who: "principal" },
   { key: "counter_offer", label: "Counter Offer", who: "admin" },
   { key: "feedback1", label: "Feedback I", who: "principal" },
   { key: "online_nego", label: "Online Nego", who: "admin" },
@@ -909,12 +1234,12 @@ var STEPS = [
 ];
 var STEP_LABEL = Object.fromEntries(STEPS.map((s) => [s.key, s.label]));
 var COLUMNS = [
-  { letter: "A", field: "erp_code", header: "ERP Code", section: "identification", kind: "text", who: "reference" },
-  { letter: "B", field: "item_name", header: "Item Name", section: "identification", kind: "text", who: "reference" },
-  { letter: "C", field: "brand", header: "Brand / Manufacturer", section: "identification", kind: "text", who: "principal" },
-  { letter: "D", field: "catalog_no", header: "Catalog No. (REF)", section: "identification", kind: "text", who: "principal" },
-  { letter: "E", field: "item_status", header: "Item Status", section: "identification", kind: "text", who: "principal" },
-  { letter: "F", field: "remarks", header: "Remarks", section: "identification", kind: "text", who: "optional" },
+  { letter: "A", field: "erp_code", header: "ERP Code", section: "rfq", kind: "text", who: "reference" },
+  { letter: "B", field: "item_name", header: "Item Name", section: "rfq", kind: "text", who: "reference" },
+  { letter: "C", field: "brand", header: "Brand / Manufacturer", section: "rfq", kind: "text", who: "principal" },
+  { letter: "D", field: "catalog_no", header: "Catalog No. (REF)", section: "rfq", kind: "text", who: "principal" },
+  { letter: "E", field: "item_status", header: "Item Status", section: "rfq", kind: "text", who: "principal" },
+  { letter: "F", field: "remarks", header: "Remarks", section: "rfq", kind: "text", who: "optional" },
   { letter: "G", field: "mou_qty", header: "MOU_Qty/PO Unit", section: "current_mou", kind: "int", who: "reference" },
   { letter: "H", field: "mou_hna", header: "MOU_HNA/PO Unit (excl. PPN)", section: "current_mou", kind: "money", who: "reference" },
   { letter: "I", field: "mou_disc", header: "MOU_Disc%", section: "current_mou", kind: "pct", who: "reference" },
@@ -928,22 +1253,50 @@ var COLUMNS = [
   { letter: "Q", field: "fb1_disc", header: "FB1_Disc%", section: "feedback1", kind: "pct", who: "principal" },
   { letter: "R", field: "fb1_unit_price", header: "FB1_Unit Price/PCS (incl. PPN)", section: "feedback1", kind: "formula", who: "reference" },
   { letter: "S", field: "on_disc", header: "ON_Disc%", section: "online_nego", kind: "pct", who: "admin" },
-  { letter: "T", field: "on_unit_price", header: "ON_Unit Price/PCS (incl. PPN)", section: "online_nego", kind: "formula", who: "reference" }
+  { letter: "T", field: "on_unit_price", header: "ON_Unit Price/PCS (incl. PPN)", section: "online_nego", kind: "formula", who: "reference" },
+  { letter: "U", field: "margin_pc", header: "Margin/pc", section: "margin", kind: "money", who: "reference" },
+  { letter: "V", field: "margin_vs_formulary", header: "Margin vs Formularium", section: "margin", kind: "money", who: "reference" },
+  { letter: "W", field: "margin_vs_po", header: "Margin vs PO", section: "margin", kind: "money", who: "reference" }
 ];
 var SECTION_TITLES = {
-  identification: "ITEM IDENTIFICATION",
-  current_mou: "CURRENT MOU  (reference only)",
-  rfq: "RFQ (to be completed by Principal)",
+  rfq: "RFQ & ITEM IDENTIFICATION",
+  current_mou: "CURRENT MOU (reference only)",
   counter_offer: "COUNTER OFFER",
   feedback1: "FEEDBACK I",
-  online_nego: "ONLINE NEGO"
+  online_nego: "ONLINE NEGO",
+  margin: "MARGIN & IMPACT ANALYSIS"
 };
+var periodsList = [
+  { id: 1, name: "CnC 2026 End-Year", category: "CnC", half: "End-Year", year: 2026, active: true, months_elapsed: 12, created_at: nowIso(), po_rows_count: 0, formulary_count: 0, sku_master_count: 0, sku_tagging_count: 0 },
+  { id: 2, name: "Drugs 2026 Mid-Year", category: "Drugs", half: "Mid-Year", year: 2026, active: false, months_elapsed: 6, created_at: nowIso(), po_rows_count: 0, formulary_count: 0, sku_master_count: 0, sku_tagging_count: 0 }
+];
+var periodDataMap = /* @__PURE__ */ new Map();
+function periodDataFor(id) {
+  let d = periodDataMap.get(id);
+  if (!d) {
+    d = { po: [], formulary: [], skus: [], tagging: [], files: {} };
+    periodDataMap.set(id, d);
+  }
+  return d;
+}
+function syncPeriodCounts(per) {
+  const d = periodDataFor(per.id);
+  per.po_rows_count = d.po.length;
+  per.formulary_count = d.formulary.length;
+  per.sku_master_count = d.skus.length;
+  per.sku_tagging_count = d.tagging.length;
+}
+var mouStore = /* @__PURE__ */ new Map();
 var usersList = [
   { id: 1, email: "admin@siloamhospitals.com", name: "Administrator", role: "admin", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 2, email: "negotiator@siloamhospitals.com", name: "Heldra Procurement", role: "negotiator", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 3, email: "viewer@siloamhospitals.com", name: "Category Analyst", role: "viewer", active: 1, created_at: nowIso(), created_by: "system", last_login: null, has_password: true }
 ];
-var currentSessionUser = usersList[0];
+var sessions = /* @__PURE__ */ new Map();
+var requestUser = new AsyncLocalStorage();
+function actingUser() {
+  return requestUser.getStore()?.user || { email: "system" };
+}
 var auditEvents = [
   { id: 1, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "nego.sample", detail: { opened: ["PT Medika Nusantara", "PT Farmasi Sejahtera", "PT Bio Diagnostik"] } }
 ];
@@ -972,25 +1325,44 @@ function parseCookies(req) {
   }
   return list;
 }
-function calcUnitPrice(hna, qty, disc, ppn = 0.11) {
-  if (hna == null || qty == null || qty === 0) return null;
+function calcUnitPrice(hna, qty, disc, ppn = 0.11, binding = "Nett", formularyHna = null, lastPoPrice = null) {
+  if (qty == null || qty <= 0) return null;
+  if (binding === "Nett to Disc") {
+    const baseHna = formularyHna != null && formularyHna > 0 ? formularyHna : lastPoPrice != null && lastPoPrice > 0 ? lastPoPrice : hna;
+    if (baseHna == null) return null;
+    return baseHna / qty * (1 - (disc || 0)) * (1 + ppn);
+  }
+  if (hna == null) return null;
   return hna / qty * (1 - (disc || 0)) * (1 + ppn);
 }
-function enrichCycleItem(item, ppn = 0.11) {
+var cycleOf = (cid) => cyclesList.find((x) => x.id === cid);
+function enrichCycleItem(item, ppn = 0.11, cycle) {
   const it = { ...item };
-  it.mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn);
-  it.rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn);
-  it.co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn) : null;
-  it.fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn) : null;
-  it.on_unit_price = it.on_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.on_disc, ppn) : null;
+  const binding = cycle?.binding || it.binding || "Nett";
+  const negoType = cycle?.nego_type || it.nego_type || "Renewal";
+  const monthsElapsed = cycle?.months_elapsed || 12;
   const perPo = it.mou_qty || it.rfq_qty || parseUoMQty(it.po_unit_text) || 1;
   it.po_unit_pcs = perPo;
-  it.annual_pcs = it.po_qty_12m ? it.po_qty_12m * perPo : null;
+  it.mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn, binding, it.formulary_hna, it.last_po_price);
+  it.rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn, binding, it.formulary_hna, it.last_po_price);
+  it.co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
+  it.fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
+  it.on_unit_price = it.on_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.on_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
   it.po_unit_price = it.last_po_price ? it.last_po_price / perPo * (1 + ppn) : null;
-  const base = it.mou_unit_price || it.po_unit_price || null;
-  const baseFrom = it.mou_unit_price ? "mou" : it.po_unit_price ? "po" : null;
-  it.base_price = base;
-  it.base_from = baseFrom;
+  const poQtyYtd = it.po_qty_12m || 0;
+  const poValueYtd = it.po_value_12m || 0;
+  it.annual_pcs = poQtyYtd ? poQtyYtd * perPo * 12 / monthsElapsed : null;
+  it.po_annualized_value = poValueYtd * 12 / monthsElapsed;
+  const benchFormulary = it.formulary_hna ? it.formulary_hna / perPo * (1 + ppn) : null;
+  const benchMou = it.mou_unit_price;
+  const benchPo = it.po_unit_price;
+  const primaryBench = benchFormulary || benchMou || benchPo || null;
+  const benchTag = primaryBench ? benchFormulary ? "Formularium" : benchMou ? "MOU" : "PO YTD" : "tanpa acuan";
+  it.bench_tag = benchTag;
+  it.primary_bench = primaryBench;
+  const basePrice = negoType === "Force Majeure" && benchMou ? benchMou : primaryBench;
+  it.base_price = basePrice;
+  it.base_from = benchTag;
   let latestStage = null;
   let latestPrice = null;
   for (const st of ["on", "fb1", "co", "rfq"]) {
@@ -1002,8 +1374,51 @@ function enrichCycleItem(item, ppn = 0.11) {
   }
   it.latest_stage = latestStage;
   it.latest_price = latestPrice;
-  it.change_pct = latestPrice != null && base ? latestPrice / base - 1 : null;
-  it.impact = latestPrice != null && base && it.annual_pcs ? (latestPrice - base) * it.annual_pcs : null;
+  it.change_pct = latestPrice != null && basePrice ? latestPrice / basePrice - 1 : null;
+  const impactFor = (price) => {
+    if (price == null || !it.annual_pcs) return null;
+    if (negoType === "Force Majeure" && benchMou) return (price - benchMou) * it.annual_pcs;
+    if (it.po_annualized_value) return price * it.annual_pcs - it.po_annualized_value;
+    return basePrice ? (price - basePrice) * it.annual_pcs : null;
+  };
+  it.impact_rfq = impactFor(it.rfq_unit_price);
+  it.impact_co = impactFor(it.co_unit_price);
+  it.impact_fb1 = impactFor(it.fb1_unit_price);
+  it.impact_on = impactFor(it.on_unit_price);
+  it.impact = impactFor(latestPrice);
+  const hnaPerPc = it.rfq_hna ? it.rfq_hna / perPo : it.mou_hna ? it.mou_hna / perPo : it.formulary_hna ? it.formulary_hna / perPo : it.last_po_price ? it.last_po_price / perPo : null;
+  const baseMarginPrice = hnaPerPc != null ? hnaPerPc * (1 + ppn) : basePrice || null;
+  it.hna_per_pc = hnaPerPc;
+  it.base_margin_price = baseMarginPrice;
+  it.margin_pc_rfq = baseMarginPrice && it.rfq_unit_price != null ? baseMarginPrice - it.rfq_unit_price : null;
+  it.margin_pc_co = baseMarginPrice && it.co_unit_price != null ? baseMarginPrice - it.co_unit_price : null;
+  it.margin_pc_fb1 = baseMarginPrice && it.fb1_unit_price != null ? baseMarginPrice - it.fb1_unit_price : null;
+  it.margin_pc_on = baseMarginPrice && it.on_unit_price != null ? baseMarginPrice - it.on_unit_price : null;
+  const formPrice = benchFormulary || benchMou;
+  it.formulary_unit_price = formPrice;
+  it.margin_pc_formulary = baseMarginPrice && formPrice != null ? baseMarginPrice - formPrice : null;
+  it.margin_pc_po = baseMarginPrice && benchPo != null ? baseMarginPrice - benchPo : null;
+  it.margin_pc = baseMarginPrice && latestPrice != null ? baseMarginPrice - latestPrice : null;
+  it.margin_pct = baseMarginPrice && it.margin_pc != null ? it.margin_pc / baseMarginPrice : null;
+  it.margin_annual_rfq = it.margin_pc_rfq != null && it.annual_pcs ? it.margin_pc_rfq * it.annual_pcs : null;
+  it.margin_annual_co = it.margin_pc_co != null && it.annual_pcs ? it.margin_pc_co * it.annual_pcs : null;
+  it.margin_annual_fb1 = it.margin_pc_fb1 != null && it.annual_pcs ? it.margin_pc_fb1 * it.annual_pcs : null;
+  it.margin_annual_on = it.margin_pc_on != null && it.annual_pcs ? it.margin_pc_on * it.annual_pcs : null;
+  it.margin_annual_formulary = it.margin_pc_formulary != null && it.annual_pcs ? it.margin_pc_formulary * it.annual_pcs : null;
+  it.margin_annual_po = it.margin_pc_po != null && it.annual_pcs ? it.margin_pc_po * it.annual_pcs : null;
+  it.margin_annual = it.margin_pc != null && it.annual_pcs ? it.margin_pc * it.annual_pcs : null;
+  it.margin_impact_rfq_vs_formulary = it.margin_annual_rfq != null && it.margin_annual_formulary != null ? it.margin_annual_rfq - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.rfq_unit_price != null ? (formPrice - it.rfq_unit_price) * it.annual_pcs : null;
+  it.margin_impact_rfq_vs_po = it.margin_annual_rfq != null && it.margin_annual_po != null ? it.margin_annual_rfq - it.margin_annual_po : it.annual_pcs && benchPo != null && it.rfq_unit_price != null ? (benchPo - it.rfq_unit_price) * it.annual_pcs : null;
+  it.margin_impact_co_vs_formulary = it.margin_annual_co != null && it.margin_annual_formulary != null ? it.margin_annual_co - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.co_unit_price != null ? (formPrice - it.co_unit_price) * it.annual_pcs : null;
+  it.margin_impact_co_vs_po = it.margin_annual_co != null && it.margin_annual_po != null ? it.margin_annual_co - it.margin_annual_po : it.annual_pcs && benchPo != null && it.co_unit_price != null ? (benchPo - it.co_unit_price) * it.annual_pcs : null;
+  it.margin_impact_fb1_vs_formulary = it.margin_annual_fb1 != null && it.margin_annual_formulary != null ? it.margin_annual_fb1 - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.fb1_unit_price != null ? (formPrice - it.fb1_unit_price) * it.annual_pcs : null;
+  it.margin_impact_fb1_vs_po = it.margin_annual_fb1 != null && it.margin_annual_po != null ? it.margin_annual_fb1 - it.margin_annual_po : it.annual_pcs && benchPo != null && it.fb1_unit_price != null ? (benchPo - it.fb1_unit_price) * it.annual_pcs : null;
+  it.margin_impact_on_vs_formulary = it.margin_annual_on != null && it.margin_annual_formulary != null ? it.margin_annual_on - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.on_unit_price != null ? (formPrice - it.on_unit_price) * it.annual_pcs : null;
+  it.margin_impact_on_vs_po = it.margin_annual_on != null && it.margin_annual_po != null ? it.margin_annual_on - it.margin_annual_po : it.annual_pcs && benchPo != null && it.on_unit_price != null ? (benchPo - it.on_unit_price) * it.annual_pcs : null;
+  it.margin_vs_formulary = it.margin_annual != null && it.margin_annual_formulary != null ? it.margin_annual - it.margin_annual_formulary : it.annual_pcs && formPrice != null && latestPrice != null ? (formPrice - latestPrice) * it.annual_pcs : null;
+  it.margin_vs_po = it.margin_annual != null && it.margin_annual_po != null ? it.margin_annual - it.margin_annual_po : it.annual_pcs && benchPo != null && latestPrice != null ? (benchPo - latestPrice) * it.annual_pcs : null;
+  it.margin_impact_vs_formulary = it.margin_vs_formulary;
+  it.margin_impact_vs_po = it.margin_vs_po;
   return it;
 }
 function summarizeCycleItems(enriched) {
@@ -1013,36 +1428,50 @@ function summarizeCycleItems(enriched) {
     ["fb1", "Feedback I"],
     ["on", "Online nego"]
   ].map(([key, label]) => {
-    const rows = enriched.filter((i) => i[`${key}_unit_price`] != null && i.base_price);
-    const deltas = rows.filter((i) => i.annual_pcs).map((i) => (i[`${key}_unit_price`] - i.base_price) * i.annual_pcs);
+    const rows = enriched.filter((i) => i.item_status !== "Discontinue" && i[`${key}_unit_price`] != null);
+    const deltas = rows.map((i) => i[`impact_${key}`]).filter((v) => v != null);
+    const marginFormDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_formulary != null || i.formulary_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_formulary`] ?? (i.formulary_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
+    const marginPoDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_po != null || i.po_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_po`] ?? (i.po_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
     return {
       key,
       label,
       items: rows.length,
-      increases: rows.filter((i) => i[`${key}_unit_price`] > i.base_price * 1.0005).length,
-      decreases: rows.filter((i) => i[`${key}_unit_price`] < i.base_price * 0.9995).length,
-      impact: deltas.length ? deltas.reduce((a, b) => a + b, 0) : null
+      increases: rows.filter((i) => i.base_price && i[`${key}_unit_price`] > i.base_price * 1.0005).length,
+      decreases: rows.filter((i) => i.base_price && i[`${key}_unit_price`] < i.base_price * 0.9995).length,
+      impact: deltas.length ? deltas.reduce((a, b) => a + b, 0) : null,
+      margin_impact_vs_formulary: marginFormDeltas.length ? marginFormDeltas.reduce((a, b) => a + b, 0) : null,
+      margin_impact_vs_po: marginPoDeltas.length ? marginPoDeltas.reduce((a, b) => a + b, 0) : null
     };
   });
   const latestImpacts = enriched.filter((i) => i.impact != null).map((i) => i.impact);
+  const activeItems = enriched.filter((i) => i.item_status !== "Discontinue");
+  const rfqFilledActive = activeItems.filter((i) => i.rfq_hna != null);
+  const marginFormularyTotal = enriched.some((i) => i.margin_impact_vs_formulary != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0) : null;
+  const marginPoTotal = enriched.some((i) => i.margin_impact_vs_po != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0) : null;
   return {
     items: enriched.length,
-    active: enriched.filter((i) => i.item_status !== "Discontinue").length,
+    active: activeItems.length,
     discontinued: enriched.filter((i) => i.item_status === "Discontinue").length,
     with_mou: enriched.filter((i) => i.mou_unit_price != null).length,
     with_po: enriched.filter((i) => i.po_qty_12m != null).length,
-    baseline_spend: enriched.filter((i) => i.base_price && i.annual_pcs).reduce((s, i) => s + i.base_price * i.annual_pcs, 0),
-    po_value_12m: enriched.reduce((s, i) => s + (i.po_value_12m || 0), 0),
+    // "Spend" is what Siloam actually pays: the PO value, annualized (YTD x 12 / months elapsed).
+    po_value_12m: enriched.reduce((s, i) => s + (i.po_annualized_value || 0), 0),
+    baseline_spend: enriched.reduce((s, i) => s + (i.po_annualized_value || 0), 0),
     stages,
-    rfq_filled: enriched.filter((i) => i.rfq_hna != null).length,
+    rfq_filled: rfqFilledActive.length,
+    rfq_active_pct: activeItems.length ? rfqFilledActive.length / activeItems.length : 0,
     latest_impact: latestImpacts.length ? latestImpacts.reduce((a, b) => a + b, 0) : null,
-    margin: null
+    margin_vs_formulary: marginFormularyTotal,
+    margin_vs_po: marginPoTotal,
+    margin_impact_vs_formulary: marginFormularyTotal,
+    margin_impact_vs_po: marginPoTotal
   };
 }
 function scanCycleAnomalies(cid) {
+  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const enriched = items.map((i) => enrichCycleItem(i, ppn));
+  const enriched = items.map((i) => enrichCycleItem(i, ppn, c));
   const existing = cycleAnomaliesMap.get(cid) || [];
   const existingDecisions = /* @__PURE__ */ new Map();
   for (const a of existing) {
@@ -1074,43 +1503,68 @@ function scanCycleAnomalies(cid) {
   for (let idx = 0; idx < items.length; idx++) {
     const raw = items[idx];
     const en = enriched[idx];
-    if (raw.rfq_disc != null && raw.rfq_disc > 1 && raw.rfq_disc <= 100) {
+    const primaryBench = en.primary_bench;
+    const benchTag = en.bench_tag || "acuan";
+    const poPack = matchUoMQty(raw.po_unit_text);
+    const packRefs = [];
+    if (raw.mou_qty) packRefs.push([raw.mou_qty, "MOU UOM"]);
+    if (poPack) packRefs.push([poPack, `isi kemasan PO (${raw.po_unit_text})`]);
+    const packBad = raw.rfq_qty ? packRefs.find(([q]) => q !== raw.rfq_qty) : null;
+    if (packBad) {
       pushFinding(
         raw,
-        "disc_whole:rfq_disc",
-        "Discount typed as whole number",
-        "high",
-        `RFQ_Disc% is ${raw.rfq_disc}. That looks like ${raw.rfq_disc}% typed as a whole number.`,
-        "rfq_disc",
-        raw.rfq_disc / 100,
-        `Set to ${raw.rfq_disc}%`
-      );
-    }
-    if (raw.mou_qty && raw.rfq_qty && raw.mou_qty !== raw.rfq_qty) {
-      pushFinding(
-        raw,
-        "pack_changed",
-        "Pack size changed",
+        "pack_mismatch:rfq_qty",
+        "Qty/PO unit mismatch",
         "medium",
-        `Pack size changed from ${raw.mou_qty} (MOU) to ${raw.rfq_qty} (RFQ) per PO unit.`,
+        `Qty/PO unit mismatch: RFQ Qty (${raw.rfq_qty}) berbeda dengan ${packBad[1]} (${packBad[0]}). Periksa konversi kemasan.`,
         "rfq_qty",
-        raw.mou_qty,
-        `Set RFQ Qty to ${raw.mou_qty}`
+        packBad[0],
+        `Samakan dengan ${packBad[1]} (${packBad[0]})`
       );
     }
-    if (en.change_pct != null && en.change_pct > 5e-3 && raw.rfq_hna && raw.rfq_qty && en.mou_unit_price) {
-      const gross = raw.rfq_hna / raw.rfq_qty * (1 + ppn);
-      const holdDisc = Math.max(0, Math.min(0.95, 1 - en.mou_unit_price / gross));
+    if (raw.rfq_disc != null && raw.rfq_disc > 1) {
       pushFinding(
         raw,
-        "price_increase",
-        "Price increase vs MOU",
-        en.change_pct > 0.15 ? "high" : "medium",
-        `RFQ unit price is +${(en.change_pct * 100).toFixed(1)}% above current MOU (${rp(en.rfq_unit_price)} vs ${rp(en.mou_unit_price)}/pc).`,
-        "co_disc",
-        Number(holdDisc.toFixed(4)),
-        `Counter at ${(holdDisc * 100).toFixed(1)}% to hold MOU price`
+        "disc_format:rfq_disc",
+        "Format diskon tidak realistis",
+        "high",
+        `Diskon RFQ diisi ${raw.rfq_disc}. Format harus desimal 0-1 (contoh: 0.15 untuk 15%).`,
+        "rfq_disc",
+        raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc / 100 : 0.15,
+        `Koreksi ke ${raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc + "%" : "15%"}`
       );
+    }
+    if (en.latest_price != null && primaryBench && primaryBench > 0) {
+      const priceIncreaseRatio = en.latest_price / primaryBench - 1;
+      if (priceIncreaseRatio > 0.5) {
+        const gross = raw.rfq_hna && raw.rfq_qty ? raw.rfq_hna / raw.rfq_qty * (1 + ppn) : en.latest_price;
+        const targetDisc = gross > primaryBench ? Math.max(0, Math.min(0.95, 1 - primaryBench / gross)) : 0;
+        pushFinding(
+          raw,
+          "price_increase_high",
+          "Kenaikan harga >50% vs acuan",
+          "high",
+          `Harga nett/pc naik ${(priceIncreaseRatio * 100).toFixed(1)}% (>50%) di atas acuan ${benchTag} (${rp(en.latest_price)} vs ${rp(primaryBench)}).`,
+          "co_disc",
+          Number(targetDisc.toFixed(4)),
+          `Counter diskon ${(targetDisc * 100).toFixed(1)}% untuk tahan harga ${benchTag}`
+        );
+      }
+    }
+    if (en.rfq_unit_price != null && primaryBench && primaryBench > 0) {
+      const priceDecreaseRatio = (primaryBench - en.rfq_unit_price) / primaryBench;
+      if (priceDecreaseRatio > 5e-3) {
+        pushFinding(
+          raw,
+          "price_decrease_rfq",
+          "Penurunan harga RFQ >0.5%",
+          "low",
+          `Harga penawaran RFQ lebih hemat ${(priceDecreaseRatio * 100).toFixed(1)}% vs acuan ${benchTag} (${rp(en.rfq_unit_price)} vs ${rp(primaryBench)}).`,
+          void 0,
+          void 0,
+          `Pertahankan harga penawaran ini`
+        );
+      }
     }
   }
   cycleAnomaliesMap.set(cid, findings);
@@ -1133,11 +1587,239 @@ function getCycleSummaryCard(c) {
     open_anomalies: anoms.filter((a) => a.status === "open").length
   };
 }
+var CATEGORY_TOKENS = {
+  drugs: "Drugs",
+  drug: "Drugs",
+  obat: "Drugs",
+  pharma: "Drugs",
+  pharmaceuticals: "Drugs",
+  cnc: "CnC",
+  consumables: "CnC",
+  consumable: "CnC",
+  reagents: "CnC",
+  reagent: "CnC",
+  "consumables & chemicals": "CnC"
+};
+function normalizeCategory(v) {
+  const parts = (Array.isArray(v) ? v : String(v ?? "").split(/[,;&/|]|\band\b|\+/i)).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+  const set = /* @__PURE__ */ new Set();
+  for (const part of parts) {
+    const t = CATEGORY_TOKENS[part];
+    if (!t) return null;
+    set.add(t);
+  }
+  if (!set.size) return null;
+  return set.has("Drugs") && set.has("CnC") ? "Drugs & CnC" : [...set][0];
+}
+var NEGO_TYPES = ["Renewal", "New Vendor", "Addendum", "Force Majeure"];
+var BINDINGS = ["Nett", "Disc", "Nett to Disc"];
+function normalizeBinding(v) {
+  const t = String(v ?? "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  if (!t) return "Nett";
+  if (["nett", "net", "nett price", "net price"].includes(t)) return "Nett";
+  if (["disc", "discount", "diskon"].includes(t)) return "Disc";
+  if (["nett to disc", "net to disc", "nett to discount"].includes(t)) return "Nett to Disc";
+  return null;
+}
+function normalizeNegoType(v) {
+  const t = String(v ?? "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  if (!t) return "Renewal";
+  return NEGO_TYPES.find((n) => n.toLowerCase() === t) || null;
+}
+function parseItemCodes(v) {
+  const list = Array.isArray(v) ? v : String(v ?? "").split(/[,;\n\r\t ]+/);
+  return [...new Set(list.map((x) => String(x).trim().toUpperCase()).filter(Boolean))];
+}
+function cleanPrincipalFields(b, partial = false) {
+  const f = {};
+  if (!partial || b.name !== void 0) {
+    const name = String(b.name ?? "").trim();
+    if (!name) return { error: "Principal name is required" };
+    f.name = name;
+  }
+  if (!partial || b.category !== void 0) {
+    const cat = normalizeCategory(b.category);
+    if (!cat) return { error: "Category must be Drugs, CnC, or both" };
+    f.category = cat;
+  }
+  if (!partial || b.nego_type !== void 0) {
+    const nt = normalizeNegoType(b.nego_type);
+    if (!nt) return { error: `Negotiation type must be one of: ${NEGO_TYPES.join(", ")}` };
+    f.nego_type = nt;
+  }
+  if (!partial || b.binding !== void 0) {
+    const bd = normalizeBinding(b.binding);
+    if (!bd) return { error: `Binding must be one of: ${BINDINGS.join(", ")}` };
+    f.binding = bd;
+  }
+  for (const k of ["distributor", "contact_name", "contact_email", "contact_phone", "notes"]) {
+    if (!partial || b[k] !== void 0) f[k] = String(b[k] ?? "").trim();
+  }
+  if (!partial || b.item_codes !== void 0) f.item_codes = parseItemCodes(b.item_codes);
+  for (const k of ["mou_start", "mou_end"]) {
+    if (!partial || b[k] !== void 0) {
+      const raw = String(b[k] ?? "").trim();
+      const iso = raw ? toIsoDate(raw) : null;
+      if (raw && !iso) return { error: `${k === "mou_start" ? "Current MOU start" : "Current MOU end"} is not a valid date` };
+      f[k] = iso;
+    }
+  }
+  return { fields: f };
+}
+function buildItemsForPrincipal(p, pd, mouRows) {
+  const pname = String(p.name).trim().toLowerCase();
+  const tagged = new Set(parseItemCodes(p.item_codes));
+  for (const t of pd.tagging) if (t.principal.trim().toLowerCase() === pname) tagged.add(t.code);
+  const sku = new Map(pd.skus.map((x) => [x.code, x]));
+  const byCode = /* @__PURE__ */ new Map();
+  const source = {};
+  const blank = (code, name) => ({
+    erp_code: code,
+    item_name: name,
+    brand: "",
+    catalog_no: "",
+    item_status: "Active",
+    remarks: null,
+    mou_qty: null,
+    mou_hna: null,
+    mou_disc: null,
+    formulary_hna: null,
+    po_unit_text: "",
+    po_qty_12m: 0,
+    po_value_12m: 0,
+    last_po_price: null
+  });
+  for (const m of mouRows) {
+    const code = pick(m, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
+    if (!code) continue;
+    const it = blank(code, pick(m, "Item Name", "Nama Barang", "Item Description"));
+    it.brand = pick(m, "Brand", "Brand / Manufacturer", "Merk");
+    it.catalog_no = pick(m, "Catalog No. (REF)", "Catalog No", "REF");
+    it.mou_qty = toNumber(pick(m, "MOU_Qty/PO Unit", "MOU Qty/PO Unit", "Qty/PO Unit")) || 1;
+    it.mou_hna = toNumber(pick(m, "MOU_HNA/PO Unit (excl. PPN)", "MOU HNA/PO Unit", "HNA/PO Unit"));
+    it.mou_disc = toNumber(pick(m, "MOU_Disc%", "MOU Disc%", "Disc%")) ?? 0;
+    if (it.mou_disc > 1) it.mou_disc = it.mou_disc / 100;
+    byCode.set(code, it);
+    source[code] = "mou";
+  }
+  for (const f of pd.formulary) {
+    const mine = f.principal.trim().toLowerCase() === pname || tagged.has(f.code);
+    if (!mine) continue;
+    let it = byCode.get(f.code);
+    if (!it) {
+      it = blank(f.code, f.name);
+      byCode.set(f.code, it);
+      source[f.code] = "formulary";
+    }
+    if (!it.item_name) it.item_name = f.name;
+    if (!it.brand) it.brand = f.brand;
+    if (source[f.code] === "formulary" && f.status.toLowerCase() === "inactive") it.item_status = "Discontinue";
+    if (f.uom) it.po_unit_text = f.uom;
+    if (f.hna != null) it.formulary_hna = f.hna;
+    if (it.mou_qty == null) it.mou_qty = matchUoMQty(f.uom) || null;
+  }
+  let used = 0;
+  const poUnits = /* @__PURE__ */ new Map();
+  let from = "", to = "";
+  for (const r of pd.po) {
+    const mine = r.vendor.trim().toLowerCase() === pname || tagged.has(r.code);
+    if (!mine || !r.code) continue;
+    used++;
+    if (r.date && (!from || r.date < from)) from = r.date;
+    if (r.date && (!to || r.date > to)) to = r.date;
+    let it = byCode.get(r.code);
+    if (!it) {
+      it = blank(r.code, r.desc);
+      byCode.set(r.code, it);
+      source[r.code] = "po";
+    }
+    it.po_qty_12m += r.qty;
+    it.po_value_12m += r.amount;
+    if (r.price > 0) it.last_po_price = r.price;
+    if (r.unit) {
+      it.po_unit_text = r.unit;
+      if (!poUnits.has(r.code)) poUnits.set(r.code, /* @__PURE__ */ new Set());
+      poUnits.get(r.code).add(r.unit);
+    }
+  }
+  for (const it of byCode.values()) {
+    const m = sku.get(it.erp_code);
+    if (m) {
+      if (!it.item_name) it.item_name = m.name;
+      if (!it.brand) it.brand = m.brand;
+      if (!it.catalog_no) it.catalog_no = m.catalog_no;
+      if (!it.po_unit_text) it.po_unit_text = m.uom;
+    }
+    if (it.mou_qty == null) it.mou_qty = matchUoMQty(it.po_unit_text);
+    if (!it.po_unit_text) it.po_unit_text = it.mou_qty ? `BOX@${it.mou_qty}` : "";
+  }
+  const items = [...byCode.values()].sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
+  const by_source = { po: 0, formulary: 0, mou: 0 };
+  for (const c of byCode.keys()) by_source[source[c]]++;
+  return {
+    items,
+    summary: {
+      items: items.length,
+      by_source,
+      po: { period_from: from || null, period_to: to || null, po_lines_used: used, po_lines: pd.po.length },
+      several_po_units: [...poUnits.entries()].filter(([, u]) => u.size > 1).map(([c]) => c)
+    }
+  };
+}
+function loadSamplePeriodData() {
+  const pd = periodDataFor(1);
+  pd.po = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "po_export.csv")).map((r) => normalizePoRow(r)).filter((x) => !!x);
+  pd.formulary = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "formulary.csv")).map((r) => normalizeFormularyRow(r)).filter((x) => !!x);
+  pd.tagging = pd.formulary.filter((f) => f.principal).map((f) => ({ code: f.code, principal: f.principal }));
+  const stamp = { at: nowIso(), by: "sample data" };
+  pd.files = {
+    po_export: { name: "po_export.csv", rows: pd.po.length, ...stamp },
+    formulary: { name: "formulary.csv", rows: pd.formulary.length, ...stamp },
+    sku_tagging: { name: "formulary.csv (Principal column)", rows: pd.tagging.length, ...stamp }
+  };
+  syncPeriodCounts(periodsList[0]);
+  mouStore.clear();
+  for (const m of readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "mou_tracker.csv"))) {
+    const key = String(m.Principal || "").trim().toLowerCase();
+    if (!key) continue;
+    mouStore.set(key, [...mouStore.get(key) || [], m]);
+  }
+}
+function normalizePoRow(r) {
+  const code = pick(r, "Item Number", "ERP Code", "Kode Barang", "Item Code").toUpperCase();
+  const vendor = pick(r, "Vendor Name", "Vendor", "Principal", "Supplier");
+  if (!code) return null;
+  const qty = toNumber(pick(r, "Quantity", "Qty")) ?? 0;
+  const price = toNumber(pick(r, "Unit Price", "Harga Satuan", "Price")) ?? 0;
+  const amount = toNumber(pick(r, "Line Amount", "Amount", "Nilai", "Total")) ?? qty * price;
+  return {
+    date: toIsoDate(pick(r, "PO Date", "Date", "Tanggal")) || "",
+    hospital: pick(r, "Hospital", "Rumah Sakit", "Unit"),
+    vendor,
+    code,
+    desc: pick(r, "Item Description", "Item Name", "Nama Barang"),
+    unit: pick(r, "Purch Unit", "Purchase Unit", "UOM", "Satuan"),
+    qty,
+    price,
+    amount
+  };
+}
+function normalizeFormularyRow(r) {
+  const code = pick(r, "Kode Barang", "ERP Code", "Item Number", "Item Code").toUpperCase();
+  if (!code) return null;
+  return {
+    code,
+    name: pick(r, "Nama Barang", "Item Name", "Item Description"),
+    principal: pick(r, "Principal", "Vendor", "Vendor Name"),
+    brand: pick(r, "Merk", "Brand"),
+    status: pick(r, "Status") || "Active",
+    uom: pick(r, "Satuan", "UOM", "Purch Unit"),
+    hna: toNumber(pick(r, "HNA", "Formulary HNA", "HNA Formularium", "Harga"))
+  };
+}
 function seedNegoSample() {
   const pRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "principals.csv"));
-  const mouRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "mou_tracker.csv"));
-  const formRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "formulary.csv"));
-  const poRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "po_export.csv"));
+  loadSamplePeriodData();
   principalsList.length = 0;
   cyclesList.length = 0;
   cycleItemsMap.clear();
@@ -1151,7 +1833,9 @@ function seedNegoSample() {
       id: pid++,
       name,
       distributor: r.Distributor || r.distributor || "",
-      category: r.Category || r.category || "Consumables",
+      category: normalizeCategory(r.Category || r.category) || "CnC",
+      nego_type: "Renewal",
+      item_codes: [],
       binding: r.Binding || r.binding || "Nett",
       mou_start: r["MOU Start"] || r.mou_start || "2024-01-31",
       mou_end: r["MOU End"] || r.mou_end || "2027-01-30",
@@ -1178,75 +1862,20 @@ function seedNegoSample() {
       binding: p.binding,
       delivery_fee: "Free for all Siloam Hospitals units",
       status: "open",
+      period_id: 1,
+      months_elapsed: 12,
+      nego_type: "Renewal",
       current_step: isFirst ? "counter_offer" : "prepare",
       step_due: null,
       prepared_at: nowIso(),
-      submitted_steps: isFirst ? { rfq: nowIso() } : {},
+      submitted_steps: isFirst ? { rfq: { at: nowIso() } } : {},
       meeting_at: null,
       meeting_notes: null,
       created_at: nowIso(),
       created_by: "admin@siloamhospitals.com"
     };
     cyclesList.push(cycleObj);
-    const pMou = mouRows.filter((r) => (r.Principal || "").toLowerCase() === name.toLowerCase());
-    const pForm = formRows.filter((r) => (r.Principal || "").toLowerCase() === name.toLowerCase());
-    const pPo = poRows.filter((r) => (r["Vendor Name"] || "").toLowerCase() === name.toLowerCase());
-    const byCode = /* @__PURE__ */ new Map();
-    for (const m of pMou) {
-      const code = m["ERP Code"];
-      if (!code) continue;
-      byCode.set(code, {
-        erp_code: code,
-        item_name: m["Item Name"],
-        brand: m.Brand || "OneMed",
-        catalog_no: m["Catalog No. (REF)"] || "",
-        item_status: "Active",
-        remarks: null,
-        mou_qty: parseFloat(m["MOU_Qty/PO Unit"] || "1") || 1,
-        mou_hna: parseFloat(m["MOU_HNA/PO Unit (excl. PPN)"] || "0") || 0,
-        mou_disc: parseFloat(m["MOU_Disc%"] || "0") || 0,
-        po_unit_text: `BOX@${m["MOU_Qty/PO Unit"] || 1}`,
-        po_qty_12m: 0,
-        po_value_12m: 0,
-        last_po_price: null
-      });
-    }
-    for (const f of pForm) {
-      const code = f["Kode Barang"];
-      if (!code) continue;
-      if (!byCode.has(code)) {
-        byCode.set(code, {
-          erp_code: code,
-          item_name: f["Nama Barang"],
-          brand: f.Merk || "OneMed",
-          catalog_no: "",
-          item_status: f.Status === "Inactive" ? "Discontinue" : "Active",
-          remarks: null,
-          mou_qty: parseUoMQty(f.Satuan),
-          mou_hna: null,
-          mou_disc: null,
-          po_unit_text: f.Satuan || "BOX@50",
-          po_qty_12m: 0,
-          po_value_12m: 0,
-          last_po_price: null
-        });
-      } else {
-        byCode.get(code).po_unit_text = f.Satuan || byCode.get(code).po_unit_text;
-      }
-    }
-    for (const po of pPo) {
-      const code = po["Item Number"];
-      if (!code || !byCode.has(code)) continue;
-      const it = byCode.get(code);
-      const q = parseFloat(po.Quantity || "0") || 0;
-      const amt = parseFloat(po["Line Amount"] || "0") || 0;
-      const up = parseFloat(po["Unit Price"] || "0") || 0;
-      it.po_qty_12m += q;
-      it.po_value_12m += amt;
-      if (up > 0) it.last_po_price = up;
-      if (po["Purch Unit"]) it.po_unit_text = po["Purch Unit"];
-    }
-    const sortedItems = [...byCode.values()].sort((a, b) => a.item_name.localeCompare(b.item_name));
+    const sortedItems = buildItemsForPrincipal(p, periodDataFor(1), mouStore.get(name.toLowerCase()) || []).items;
     const finalItems = sortedItems.map((it, idx) => {
       const itemObj = {
         id: idx + 1,
@@ -1363,7 +1992,7 @@ function seedNegoSample() {
 }
 seedNegoSample();
 for (const c of cyclesList) {
-  const token = `demo-token-${c.id}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const linkObj = {
     id: 1,
     cycle_id: c.id,
@@ -1378,6 +2007,7 @@ for (const c of cyclesList) {
   };
   cycleLinksMap.set(c.id, [linkObj]);
   tokenToLinkMap.set(token, linkObj);
+  console.log(`Demo vendor link for cycle ${c.id}: /p/${token}`);
 }
 function getPrincipalsPayload() {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
@@ -1386,16 +2016,32 @@ function getPrincipalsPayload() {
     const cyc = cyclesList.find((c) => c.principal_id === p.id);
     const daysLeft = p.mou_end ? daysBetween(today, p.mou_end) : null;
     const openCycle = cyc && cyc.status === "open";
-    const mouAlert = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths && !openCycle);
+    const within6m = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths);
+    const mouAlert = Boolean(within6m && !openCycle);
     return {
       ...p,
       mou_days_left: daysLeft,
+      within_6m: within6m,
       mou_alert: mouAlert,
       overdue_days: null,
       cycle: cyc ? getCycleSummaryCard(cyc) : null
     };
   });
-  return { principals: rows, alert_months: alertMonths, steps: STEPS };
+  const expiringWithin6m = rows.filter((p) => p.within_6m);
+  const expiringOpen = expiringWithin6m.filter((p) => p.cycle && p.cycle.status === "open").length;
+  const expiringUnopened = expiringWithin6m.length - expiringOpen;
+  const openWithFindings = rows.filter((p) => p.cycle && p.cycle.status === "open" && p.cycle.open_anomalies > 0).length;
+  return {
+    principals: rows,
+    alert_months: alertMonths,
+    steps: STEPS,
+    kpi_mou_6m: {
+      total: expiringWithin6m.length,
+      open: expiringOpen,
+      unopened: expiringUnopened
+    },
+    principals_with_findings: openWithFindings
+  };
 }
 var INTENT_RULES = [
   ["help", ["help", "what can you do", "how do i use", "how does this work", "what do you do"]],
@@ -1480,8 +2126,42 @@ function parseChatText(rawText) {
   };
 }
 var app = express();
+app.disable("x-powered-by");
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  const sid = parseCookies(req)["nego_session"];
+  const uid = sid ? sessions.get(sid) : void 0;
+  const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
+  req.user = user;
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  requestUser.run({ user }, next);
+});
+var NEGOTIATOR_ADMIN_PATHS = /^\/admin\/(master|documents)(\/|\.|$)|^\/admin\/nego\/(cycles|benchmarks|notify|assist)(\/|\.|$)/;
+app.use("/api", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  const p = req.path;
+  if (p.startsWith("/auth/")) return next();
+  const isRead = req.method === "GET" || req.method === "HEAD";
+  if (!isRead && req.headers["x-requested-with"] !== "nego") {
+    return res.status(403).json({ error: "Missing app header" });
+  }
+  if (p.startsWith("/p/")) return next();
+  const user = req.user;
+  if (!user) return res.status(401).json({ error: "Sign in required" });
+  if (user.role === "admin") return next();
+  if (p.startsWith("/admin/") || p === "/admin") {
+    if (user.role === "negotiator" && NEGOTIATOR_ADMIN_PATHS.test(p)) return next();
+    return res.status(403).json({ error: "Administrator access required" });
+  }
+  if (user.role === "viewer" && !isRead && p !== "/chat" && p !== "/ai/chat") {
+    return res.status(403).json({ error: "Viewers have read-only access" });
+  }
+  next();
+});
+var fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 4 } });
+var withFiles = (mw) => (req, res, next) => mw(req, res, (err) => err ? res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "File is larger than 30 MB" : String(err.message || err) }) : next());
 app.use("/static", express.static(STATIC_DIR));
 app.get("/", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "index.html"));
@@ -1489,68 +2169,93 @@ app.get("/", (_req, res) => {
 app.get("/analytics", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "analytics.html"));
 });
+function setPrincipalCookie(req, res, token) {
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+}
+function validLink(token) {
+  if (!token) return null;
+  const link = tokenToLinkMap.get(token);
+  if (!link || link.revoked_at) return null;
+  if (link.expires_at && new Date(link.expires_at).getTime() < Date.now()) return null;
+  return link;
+}
 app.get("/p", (req, res) => {
   const token = req.query.token || req.query.t;
-  if (token) {
-    res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
-  }
+  if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
 app.get("/p/:token", (req, res) => {
   const token = String(req.params.token || "");
-  const link = tokenToLinkMap.get(token);
-  if (!link || link.revoked_at) {
-    const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-    if (!match) {
-      return res.redirect(303, "/p?invalid=1");
-    }
+  const link = validLink(token);
+  if (!link) return res.redirect(303, "/p?invalid=1");
+  link.last_used_at = nowIso();
+  const c = cyclesList.find((x) => x.id === link.cycle_id);
+  if (c) {
+    const evs = cycleEventsMap.get(c.id) || [];
+    evs.unshift({
+      id: evs.length + 1,
+      cycle_id: c.id,
+      at: nowIso(),
+      user_email: `principal:${c.principal.name}`,
+      action: "link.open",
+      detail: { link_id: link.id }
+    });
+    cycleEventsMap.set(c.id, evs);
   }
-  if (link) {
-    link.last_used_at = nowIso();
-    const c = cyclesList.find((x) => x.id === link.cycle_id);
-    if (c) {
-      const evs = cycleEventsMap.get(c.id) || [];
-      evs.unshift({
-        id: evs.length + 1,
-        cycle_id: c.id,
-        at: nowIso(),
-        user_email: `principal:${c.principal.name}`,
-        action: "link.open",
-        detail: { link_id: link.id }
-      });
-      cycleEventsMap.set(c.id, evs);
-    }
-  }
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}`);
+  setPrincipalCookie(req, res, token);
   res.redirect(303, `/p?token=${encodeURIComponent(token)}`);
 });
-app.get("/api/auth/me", (_req, res) => {
+var ADMIN_PASSWORD = process.env.NEGO_ADMIN_PASSWORD || "";
+var SESSION_HOURS = 12;
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+app.get("/api/auth/me", (req, res) => {
   res.json({
-    user: currentSessionUser,
+    user: req.user || null,
     provider: {
-      name: "development",
+      name: "beta",
       password_required: false,
-      notice: "Development sign-in enabled: enter any registered Siloam email (e.g. admin@siloamhospitals.com)."
+      password_required_for: ADMIN_PASSWORD ? usersList.filter((u) => u.role === "admin").map((u) => u.email) : [],
+      notice: "Beta sign-in: enter your Siloam email. Access follows your role."
     }
   });
 });
 app.post("/api/auth/signin", (req, res) => {
-  const email = String(req.body?.email || "admin@siloamhospitals.com").trim().toLowerCase();
-  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active) || usersList[0];
-  currentSessionUser = found;
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const found = usersList.find((u) => u.email.toLowerCase() === email && u.active);
+  if (!found) {
+    logAudit(email || "unknown", "signin.failed", { reason: "no active account" });
+    return res.status(401).json({ error: "No active account for that email" });
+  }
+  if (found.role === "admin" && ADMIN_PASSWORD && !safeEqual(String(req.body?.password || ""), ADMIN_PASSWORD)) {
+    logAudit(found.email, "signin.failed", { reason: "bad password" });
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  const old = parseCookies(req)["nego_session"];
+  if (old) sessions.delete(old);
+  const sid = crypto.randomBytes(24).toString("base64url");
+  sessions.set(sid, found.id);
+  found.last_login = nowIso();
+  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
   logAudit(found.email, "signin");
   res.json({ user: found });
 });
-app.post("/api/auth/signout", (_req, res) => {
-  currentSessionUser = null;
+app.post("/api/auth/signout", (req, res) => {
+  const sid = parseCookies(req)["nego_session"];
+  if (sid) sessions.delete(sid);
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   res.json({ ok: true });
 });
 app.get("/api/auth/setup", (_req, res) => {
-  res.json({ email: usersList[0].email, name: usersList[0].name, min_length: 10 });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 app.post("/api/auth/setup", (_req, res) => {
-  currentSessionUser = usersList[0];
-  res.json({ user: currentSessionUser });
+  res.status(404).json({ error: "Password setup is not enabled in the beta" });
 });
 app.get("/api/status", (_req, res) => {
   const bySource = {};
@@ -1609,8 +2314,8 @@ app.get("/api/catalog", (_req, res) => {
     currency: "IDR"
   });
 });
-app.get("/api/home", (_req, res) => {
-  const user = currentSessionUser || usersList[0];
+app.get("/api/home", (req, res) => {
+  const user = req.user;
   const cal = computeCalendar(0, 3650);
   const dueSoon = cal.renewals.filter((r) => r.days_left <= 30 && !["agreed", "lost"].includes(r.progress?.stage));
   const highAlerts = computeAlerts().filter((a) => a.severity === "high");
@@ -1623,8 +2328,128 @@ app.get("/api/home", (_req, res) => {
   });
 });
 app.post("/api/chat", (req, res) => {
-  const text = String(req.body?.text || "").slice(0, 500);
-  res.json(parseChatText(text));
+  const text2 = String(req.body?.text || "").slice(0, 500);
+  res.json(parseChatText(text2));
+});
+app.post("/api/ai/chat", async (req, res) => {
+  const message = String(req.body?.message || "").trim();
+  const role = req.user?.role === "admin" ? "admin" : "negotiator";
+  const cycleId = req.body?.cycleId ? Number(req.body.cycleId) : null;
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  if (!message) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+  const normMsg = message.toLowerCase().trim();
+  if (normMsg.includes("margin") || normMsg.includes("hitung margin") || normMsg.includes("bisa hitung margin")) {
+    let cycleMarginDetail = "";
+    if (cycleId) {
+      const cyc = cyclesList.find((c) => c.id === cycleId);
+      if (cyc) {
+        const items = cycleItemsMap.get(cyc.id) || [];
+        const ppn = Number(settingsValues.ppn_rate) || 0.11;
+        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
+        const summary = summarizeCycleItems(enriched);
+        cycleMarginDetail = `
+
+\u{1F4CC} **Data Negosiasi Saat Ini (${cyc.principal.name})**:
+\u2022 Total Margin Impact vs Formularium: **${rp(summary.margin_impact_vs_formulary)}**
+\u2022 Total Margin Impact vs PO: **${rp(summary.margin_impact_vs_po)}**
+(Buka drawer item untuk melihat tabel Margin/pc di setiap step negosiasi).`;
+      }
+    }
+    return res.json({
+      reply: `Fitur **Calculated Margin per Item** sudah aktif di sistem! Berikut cara perhitungannya:
+
+1. **Base Price**: \`HNA/pc \xD7 1,11\` (HNA/pc + PPN 11%)
+2. **Margin/pc per Step**: \`Base Price - Harga/pc\` (tersedia per step: RFQ, Counter Offer, Feedback I, Online Nego)
+3. **Margin Impact**: \`\u03A3 (Qty Annualized \xD7 Margin/pc Step) - Margin Saat Ini\`, disajikan dalam 2 versi:
+   \u2022 **Versi vs Formularium**: Membandingkan margin step terhadap harga acuan Formularium/MOU
+   \u2022 **Versi vs PO**: Membandingkan margin step terhadap harga PO riil 12 bulan terakhir${cycleMarginDetail}`,
+      role
+    });
+  }
+  if (normMsg.includes("cost impact") || normMsg.includes("rumus cost") || normMsg.includes("rumus") && normMsg.includes("impact") && !normMsg.includes("margin")) {
+    return res.json({
+      reply: "Rumus **Cost Impact** penawaran:\n\n**Cost Impact = \u03A3 ((Harga Satuan Step \xD7 Qty Tahunan) - Total Nilai PO Tahunan)**\n\n\u2022 **Nilai Negatif (-)**: **Saving** (Penghematan belanja bagi RS).\n\u2022 **Nilai Positif (+)**: **Cost Increase** (Beban biaya naik yang perlu dinegosiasikan ulang).\n\n\u{1F4A1} *Tips*: Pastikan satuan kemasan (UOM/pack size) telah cocok dengan Master Formulary sebelum menyetujui harga satuan.",
+      role
+    });
+  }
+  if (normMsg === "halo" || normMsg === "hai" || normMsg === "hi" || normMsg === "hello") {
+    return res.json({
+      reply: "Halo! Saya asisten **AI Negotiation Intelligence**. Ada yang bisa saya bantu terkait analisa harga, verifikasi penawaran, aturan diskon, atau persiapan counter offer?",
+      role
+    });
+  }
+  let systemInstruction = "";
+  if (role === "principal") {
+    systemInstruction = `You are the Vendor & Principal Assistant for healthcare procurement negotiations.
+Communicate professionally and politely in Indonesian.
+Assist vendors and principals with: RFQ submissions (Qty, HNA, Discount, Catalog Number, Brand), packaging conversions, UOM, and portal guidance.
+CRITICAL CONFIDENTIALITY: NEVER disclose hospital internal benchmarks, PO history, or target prices.
+Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+  } else if (role === "admin") {
+    systemInstruction = `You are the Procurement Admin Intelligence Assistant for hospital procurement.
+Assist Procurement Administrators with: Period data management, PO exports, Master Formulary, Master SKU, and engine financial settings.
+Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+  } else {
+    let cycleInfo = "";
+    if (cycleId) {
+      const cyc = cyclesList.find((c) => c.id === cycleId);
+      if (cyc) {
+        const items = cycleItemsMap.get(cyc.id) || [];
+        const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
+        const ppn = Number(settingsValues.ppn_rate) || 0.11;
+        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
+        const summary = summarizeCycleItems(enriched);
+        cycleInfo = `Current Cycle: ${cyc.principal.name} (${cyc.principal.category}), Step: ${cyc.current_step}, Active Items: ${summary.active}, Open Findings: ${anoms.length}, Total Spend: ${rp(summary.po_value_12m)}`;
+      }
+    }
+    systemInstruction = `You are the Negotiation Intelligence Strategist for hospital procurement negotiators.
+Help negotiators analyze price increases, counter-offers, binding contracts, and cost impact.
+Cost impact formula: SUM per item ((harga step x qty) - nilai PO). Negative is savings!
+Margin formula: (HNA x 1.11) - step price.
+Keep answers crisp, direct, and under 3-4 sentences in Indonesian. Use bold formatting (**bold**) for key numbers or terms.
+${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
+  }
+  try {
+    const contents = [];
+    for (const h of history.slice(-4)) {
+      if (h.role && h.text) {
+        contents.push({
+          role: h.role === "assistant" || h.role === "model" ? "model" : "user",
+          parts: [{ text: String(h.text) }]
+        });
+      }
+    }
+    contents.push({
+      role: "user",
+      parts: [{ text: message }]
+    });
+    const callPromise = ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents,
+      config: {
+        systemInstruction,
+        temperature: 0.3,
+        maxOutputTokens: 300
+      }
+    });
+    const timeoutPromise = new Promise(
+      (_, reject) => setTimeout(() => reject(new Error("AI response timeout")), 3500)
+    );
+    const response = await Promise.race([callPromise, timeoutPromise]);
+    const reply = response.text || "Saya siap membantu proses negosiasi dan verifikasi penawaran harga.";
+    res.json({ reply, role });
+  } catch (err) {
+    console.error("Gemini AI chat notice:", err?.message || err);
+    let fallbackText = "";
+    if (role === "principal") {
+      fallbackText = "Untuk penawaran RFQ, pastikan format diskon dimasukkan antara 0 dan 1 (contoh: 0.15 untuk 15%) dan cek kesesuaian kemasan (UOM) dengan katalog resmi.";
+    } else {
+      fallbackText = `Terkait pertanyaan Anda: Silakan tinjau rincian item aktif, perbandingan harga step terhadap nilai PO tahunan, dan selesaikan temuan (findings) pada tabel negosiasi di atas.`;
+    }
+    res.json({ reply: fallbackText, role, fallback: true });
+  }
 });
 app.get("/api/options", (req, res) => {
   const sku = String(req.query.sku || "");
@@ -1773,11 +2598,11 @@ app.get("/api/vendor/:name", (req, res) => {
   res.json({ vendor, spend, products, alerts, currency: "IDR", is_sample: true });
 });
 app.get("/api/lookup", (req, res) => {
-  const text = String(req.query.text || "").toLowerCase();
+  const text2 = String(req.query.text || "").toLowerCase();
   const vendor = String(req.query.vendor || "").toLowerCase();
   const hospital = String(req.query.hospital || "").toLowerCase();
   const filtered = observations.filter((o) => {
-    if (text && !o.sku_name.toLowerCase().includes(text) && !o.sku.toLowerCase().includes(text)) return false;
+    if (text2 && !o.sku_name.toLowerCase().includes(text2) && !o.sku.toLowerCase().includes(text2)) return false;
     if (vendor && !o.vendor.toLowerCase().includes(vendor)) return false;
     if (hospital && !o.hospital.toLowerCase().includes(hospital)) return false;
     return true;
@@ -1831,7 +2656,7 @@ app.patch("/api/renewals/progress", (req, res) => {
   const { key, ...changes } = req.body || {};
   if (!key) return res.status(400).json({ error: "Unknown renewal" });
   const prev = renewalProgressMap.get(key) || { key, stage: "not_started" };
-  const updated = { ...prev, ...changes, updated_by: (currentSessionUser || usersList[0]).email, updated_at: nowIso() };
+  const updated = { ...prev, ...changes, updated_by: actingUser().email, updated_at: nowIso() };
   renewalProgressMap.set(key, updated);
   const evs = renewalEventsMap.get(key) || [];
   for (const [k, v] of Object.entries(changes)) {
@@ -1840,7 +2665,7 @@ app.patch("/api/renewals/progress", (req, res) => {
         id: evs.length + 1,
         key,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         field: k,
         old: prev[k] == null ? null : String(prev[k]),
         new: v == null ? null : String(v)
@@ -1930,7 +2755,7 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
   if (!c) return res.status(404).json({ error: "No such negotiation" });
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const rawItems = cycleItemsMap.get(cid) || [];
-  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn));
+  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn, cycleOf(cid)));
   const counts = scanCycleAnomalies(cid);
   res.json({
     cycle: getCycleSummaryCard(c),
@@ -1938,6 +2763,11 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
     kpis: summarizeCycleItems(enriched),
     anomalies: counts,
     events: cycleEventsMap.get(cid) || [],
+    period: (() => {
+      const per = periodsList.find((x) => x.id === (c.period_id || 1));
+      return per ? { id: per.id, name: per.name, months_elapsed: per.months_elapsed, po_rows: per.po_rows_count, formulary: per.formulary_count, sku_master: per.sku_master_count, sku_tagging: per.sku_tagging_count } : null;
+    })(),
+    has_mou_file: mouStore.has(String(c.principal?.name || "").trim().toLowerCase()),
     ppn,
     columns: COLUMNS,
     sections: SECTION_TITLES,
@@ -1948,8 +2778,13 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
 });
 app.get("/api/nego/cycles/:cid/items", (req, res) => {
   const cid = Number(req.params.cid);
-  const q = String(req.query.q || "").toLowerCase();
+  const q = String(req.query.q || "").toLowerCase().trim();
   const filter = String(req.query.filter || "all");
+  const sort = String(req.query.sort || "sort");
+  const sortCol = String(req.query.sort_col || "");
+  const sortDir = String(req.query.sort_dir || "asc").toLowerCase();
+  const statusFilter = String(req.query.status || "all");
+  const brandFilter = String(req.query.brand || "all");
   const offset = Math.max(0, Number(req.query.offset || 0));
   const limit = Math.max(1, Math.min(500, Number(req.query.limit || 50)));
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
@@ -1969,22 +2804,89 @@ app.get("/api/nego/cycles/:cid/items", (req, res) => {
   let rows = rawItems.map((i) => {
     const bm = bestBmByItem.get(i.id);
     return {
-      ...enrichCycleItem(i, ppn),
+      ...enrichCycleItem(i, ppn, cycleOf(cid)),
       bench_pp: bm ? bm.price_pp : null,
       bench_source: bm ? `${bm.source}: ${bm.bm_name}` : null,
       flags: openByItem.get(i.id) || []
     };
   });
+  const allBrands = [...new Set(rawItems.map((i) => i.brand).filter(Boolean))].sort();
+  const allStatuses = [...new Set(rawItems.map((i) => i.item_status || "Active").filter(Boolean))].sort();
   if (q) {
-    rows = rows.filter((r) => `${r.erp_code || ""} ${r.item_name || ""} ${r.brand || ""} ${r.catalog_no || ""}`.toLowerCase().includes(q));
+    rows = rows.filter(
+      (r) => `${r.erp_code || ""} ${r.item_name || ""} ${r.brand || ""} ${r.catalog_no || ""} ${r.remarks || ""}`.toLowerCase().includes(q)
+    );
+  }
+  if (statusFilter && statusFilter !== "all") {
+    rows = rows.filter((r) => (r.item_status || "Active").toLowerCase() === statusFilter.toLowerCase());
+  }
+  if (brandFilter && brandFilter !== "all") {
+    rows = rows.filter((r) => (r.brand || "").toLowerCase() === brandFilter.toLowerCase());
   }
   if (filter === "anomalies") rows = rows.filter((r) => r.flags.length > 0);
   else if (filter === "increase") rows = rows.filter((r) => (r.change_pct || 0) > 5e-4);
   else if (filter === "decrease") rows = rows.filter((r) => (r.change_pct || 0) < -5e-4);
   else if (filter === "no_mou") rows = rows.filter((r) => !r.mou_unit_price);
   else if (filter === "no_rfq") rows = rows.filter((r) => r.rfq_hna == null && r.item_status !== "Discontinue");
+  else if (filter === "has_rfq") rows = rows.filter((r) => r.rfq_hna != null);
   else if (filter === "discontinued") rows = rows.filter((r) => r.item_status === "Discontinue");
-  res.json({ total: rows.length, offset, items: rows.slice(offset, offset + limit) });
+  else if (filter === "active") rows = rows.filter((r) => r.item_status !== "Discontinue");
+  else if (filter === "has_co") rows = rows.filter((r) => r.co_disc != null);
+  else if (filter === "has_fb1") rows = rows.filter((r) => r.fb1_disc != null);
+  else if (filter === "has_on") rows = rows.filter((r) => r.on_disc != null);
+  if (sortCol) {
+    const dir = sortDir === "desc" ? -1 : 1;
+    rows.sort((a, b) => {
+      let va = a[sortCol];
+      let vb = b[sortCol];
+      if (sortCol === "flags" || sortCol === "findings") {
+        va = a.flags.length;
+        vb = b.flags.length;
+      }
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === "string" || typeof vb === "string") {
+        return String(va).localeCompare(String(vb), void 0, { numeric: true, sensitivity: "base" }) * dir;
+      }
+      return (Number(va) - Number(vb)) * dir;
+    });
+  } else if (sort) {
+    if (sort === "name_asc") rows.sort((a, b) => (a.item_name || "").localeCompare(b.item_name || ""));
+    else if (sort === "name_desc") rows.sort((a, b) => (b.item_name || "").localeCompare(a.item_name || ""));
+    else if (sort === "erp_asc") rows.sort((a, b) => (a.erp_code || "").localeCompare(b.erp_code || "", void 0, { numeric: true }));
+    else if (sort === "erp_desc") rows.sort((a, b) => (b.erp_code || "").localeCompare(a.erp_code || "", void 0, { numeric: true }));
+    else if (sort === "impact") rows.sort((a, b) => Math.abs(b.impact || 0) - Math.abs(a.impact || 0));
+    else if (sort === "change") rows.sort((a, b) => (b.change_pct || -Infinity) - (a.change_pct || -Infinity));
+    else if (sort === "change_down") rows.sort((a, b) => (a.change_pct || Infinity) - (b.change_pct || Infinity));
+    else if (sort === "spend") rows.sort((a, b) => (b.po_value_12m || 0) - (a.po_value_12m || 0));
+    else if (sort === "rfq_price_desc") rows.sort((a, b) => (b.rfq_unit_price || 0) - (a.rfq_unit_price || 0));
+    else if (sort === "rfq_price_asc") rows.sort((a, b) => (a.rfq_unit_price ?? Infinity) - (b.rfq_unit_price ?? Infinity));
+    else if (sort === "mou_price_desc") rows.sort((a, b) => (b.mou_unit_price || 0) - (a.mou_unit_price || 0));
+    else if (sort === "mou_price_asc") rows.sort((a, b) => (a.mou_unit_price ?? Infinity) - (b.mou_unit_price ?? Infinity));
+    else if (sort === "co_disc_desc") rows.sort((a, b) => (b.co_disc || 0) - (a.co_disc || 0));
+    else if (sort === "fb1_disc_desc") rows.sort((a, b) => (b.fb1_disc || 0) - (a.fb1_disc || 0));
+    else if (sort === "on_disc_desc") rows.sort((a, b) => (b.on_disc || 0) - (a.on_disc || 0));
+    else if (sort === "margin_pc_desc") rows.sort((a, b) => (b.margin_pc || 0) - (a.margin_pc || 0));
+    else if (sort === "margin_pc_asc") rows.sort((a, b) => (a.margin_pc ?? Infinity) - (b.margin_pc ?? Infinity));
+    else if (sort === "margin_form_desc") rows.sort((a, b) => (b.margin_impact_vs_formulary || 0) - (a.margin_impact_vs_formulary || 0));
+    else if (sort === "margin_po_desc") rows.sort((a, b) => (b.margin_impact_vs_po || 0) - (a.margin_impact_vs_po || 0));
+    else if (sort === "findings") rows.sort((a, b) => b.flags.length - a.flags.length);
+    else if (sort === "sort") {
+      rows.sort((a, b) => (a.sort_order ?? a.id) - (b.sort_order ?? b.id));
+    }
+  }
+  res.json({
+    total: rows.length,
+    offset,
+    items: rows.slice(offset, offset + limit),
+    brands: allBrands,
+    statuses: allStatuses,
+    counts: {
+      total: rawItems.length,
+      filtered: rows.length
+    }
+  });
 });
 app.get("/api/nego/cycles/:cid/items/:iid", (req, res) => {
   const cid = Number(req.params.cid);
@@ -1993,7 +2895,7 @@ app.get("/api/nego/cycles/:cid/items/:iid", (req, res) => {
   const it = items.find((x) => x.id === iid);
   if (!it) return res.status(404).json({ error: "No such item in this negotiation" });
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const out = enrichCycleItem(it, ppn);
+  const out = enrichCycleItem(it, ppn, cycleOf(cid));
   out.anomalies = (cycleAnomaliesMap.get(cid) || []).filter((a) => a.item_id === iid);
   out.history = it.history || [];
   out.benchmarks = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.item_id === iid);
@@ -2016,7 +2918,7 @@ app.get("/api/nego/cycles/:cid/groups", (req, res) => {
   const cid = Number(req.params.cid);
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const rawItems = cycleItemsMap.get(cid) || [];
-  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn));
+  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn, cycleOf(cid)));
   const byGroup = /* @__PURE__ */ new Map();
   let groupedCount = 0;
   let ungroupedCount = 0;
@@ -2031,9 +2933,9 @@ app.get("/api/nego/cycles/:cid/groups", (req, res) => {
     groupedCount++;
     const price = it.latest_price || it.mou_unit_price || it.po_unit_price;
     if (!price) continue;
-    const norm = gKey.toLowerCase();
-    if (!byGroup.has(norm)) byGroup.set(norm, []);
-    byGroup.get(norm).push({
+    const norm2 = gKey.toLowerCase();
+    if (!byGroup.has(norm2)) byGroup.set(norm2, []);
+    byGroup.get(norm2).push({
       item_id: it.id,
       erp_code: it.erp_code,
       item_name: it.item_name,
@@ -2105,8 +3007,8 @@ app.post("/api/admin/nego/cycles/:cid/benchmarks/:mid", (req, res) => {
 app.get("/api/nego/benchmarks", (_req, res) => {
   res.json({ sources: [{ source: "INAPROC e-Katalog", count: 116, latest: "2026-08-15" }] });
 });
-app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
-  const cid = Number(req.params.cid);
+function computeCoPlan(cid) {
+  const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
   const bestBmByItem = /* @__PURE__ */ new Map();
@@ -2115,8 +3017,9 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
     if (!prev || b.price_pp < prev.price_pp) bestBmByItem.set(b.item_id, b);
   }
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const suggestions = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").slice(0, 50).map((i) => {
-    const en = enrichCycleItem(i, ppn);
+  let coImpactVsRfq = 0;
+  const all = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").map((i) => {
+    const en = enrichCycleItem(i, ppn, c);
     const bm = bestBmByItem.get(i.id);
     const candidates = [
       en.mou_unit_price ? { price: en.mou_unit_price, label: "MOU" } : null,
@@ -2127,30 +3030,55 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
     const best = candidates[0] || { price: en.rfq_unit_price || 0, label: "RFQ" };
     const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
     const co = best.price && gross ? Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - best.price / gross)) : i.rfq_disc || 0;
+    const coDiscRounded = Number(co.toFixed(4));
+    const coUnitPrice = calcUnitPrice(i.rfq_hna, i.rfq_qty, coDiscRounded, ppn, c?.binding, i.formulary_hna, i.last_po_price);
+    const isDiff = Math.abs(coDiscRounded - (i.rfq_disc || 0)) > 1e-4;
+    if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coUnitPrice != null) {
+      coImpactVsRfq += (coUnitPrice - en.rfq_unit_price) * en.annual_pcs;
+    }
     return {
       item_id: i.id,
-      co_disc: Number(co.toFixed(4)),
+      co_disc: coDiscRounded,
+      co_unit_price: coUnitPrice,
       note: `Match ${best.label} reference (${rp(best.price || 0)}/pc).`,
-      before: i.co_disc
+      before: i.co_disc,
+      diff_from_rfq: isDiff
     };
   });
-  res.json({ suggestions, count: suggestions.length, co_impact: 0, co_increases: 0 });
+  const fresh = all.filter((x) => x.diff_from_rfq);
+  return { all, fresh, same_as_rfq: all.length - fresh.length, co_impact_vs_rfq: coImpactVsRfq };
+}
+app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
+  const plan = computeCoPlan(Number(req.params.cid));
+  res.json({
+    suggestions: plan.fresh,
+    count: plan.fresh.length,
+    same_as_rfq: plan.same_as_rfq,
+    diff_count: plan.fresh.length,
+    co_impact_vs_rfq: plan.co_impact_vs_rfq,
+    co_impact: plan.co_impact_vs_rfq,
+    co_increases: 0
+  });
 });
 app.post("/api/admin/nego/cycles/:cid/co", (req, res) => {
   const cid = Number(req.params.cid);
   const items = cycleItemsMap.get(cid) || [];
-  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const overwrite = !!req.body?.overwrite;
+  const plan = computeCoPlan(cid);
+  const byItem = new Map(plan.all.map((x) => [x.item_id, x]));
   let applied = 0;
   for (const i of items) {
-    if (i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue") {
-      const en = enrichCycleItem(i, ppn);
-      const target = en.mou_unit_price || en.po_unit_price || en.rfq_unit_price;
-      const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
-      i.co_disc = target && gross ? Number(Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - target / gross)).toFixed(4)) : i.rfq_disc || 0;
-      applied++;
+    const sug = byItem.get(i.id);
+    if (!sug) continue;
+    if (!sug.diff_from_rfq) {
+      if (overwrite) i.co_disc = null;
+      continue;
     }
+    if (!overwrite && i.co_disc != null) continue;
+    i.co_disc = sug.co_disc;
+    applied++;
   }
-  res.json({ applied, co_impact: 0, scan: scanCycleAnomalies(cid) });
+  res.json({ applied, scan: scanCycleAnomalies(cid) });
 });
 app.post("/api/admin/nego/cycles/:cid/on-fill", (req, res) => {
   const cid = Number(req.params.cid);
@@ -2178,31 +3106,262 @@ app.get("/api/nego/cycles/:cid/package", (req, res) => {
     missing_on: items.filter((i) => i.on_disc == null).slice(0, 10).map((i) => i.erp_code)
   });
 });
-app.post("/api/admin/nego/principals", (req, res) => {
+app.get("/api/admin/periods", (_req, res) => {
+  res.json({ periods: periodsList.map((p) => ({ ...p, files: periodDataFor(p.id).files })) });
+});
+app.post("/api/admin/periods", (req, res) => {
   const body = req.body || {};
-  if (!body.name) return res.status(400).json({ error: "Principal name is required" });
+  const category = ["Drugs", "CnC"].includes(body.category) ? body.category : null;
+  const half = ["Mid-Year", "End-Year"].includes(body.half) ? body.half : null;
+  const year = Number(body.year);
+  if (!category) return res.status(400).json({ error: "Category must be Drugs or CnC" });
+  if (!half) return res.status(400).json({ error: "Choose Mid-Year or End-Year" });
+  if (!Number.isInteger(year) || year < 2020 || year > 2100) return res.status(400).json({ error: "Enter a valid year" });
+  const months = Math.round(Number(body.months_elapsed) || 12);
+  if (months < 1 || months > 12) return res.status(400).json({ error: "Running months must be 1 to 12" });
+  const name = `${category} ${year} ${half}`;
+  if (periodsList.some((x) => x.name.toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: `${name} already exists` });
   const p = {
-    id: principalsList.length + 1,
-    name: String(body.name).trim(),
-    distributor: body.distributor || "",
-    category: body.category || "Consumables",
-    binding: body.binding || "Nett",
-    mou_start: body.mou_start || null,
-    mou_end: body.mou_end || null,
-    contact_name: body.contact_name || "",
-    contact_email: body.contact_email || "",
-    contact_phone: body.contact_phone || "",
-    notes: body.notes || "",
+    id: Math.max(0, ...periodsList.map((x) => x.id)) + 1,
+    name,
+    category,
+    half,
+    year,
+    active: false,
+    months_elapsed: months,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email
+    po_rows_count: 0,
+    formulary_count: 0,
+    sku_master_count: 0,
+    sku_tagging_count: 0
   };
+  periodsList.push(p);
+  logAudit(actingUser().email, "period.create", { name });
+  res.json(p);
+});
+app.post("/api/admin/periods/:id/activate", (req, res) => {
+  const pid = Number(req.params.id);
+  if (!periodsList.some((p) => p.id === pid)) return res.status(404).json({ error: "Period not found" });
+  for (const per of periodsList) {
+    per.active = per.id === pid;
+  }
+  const activePeriod = periodsList.find((p) => p.id === pid);
+  res.json({ active_period: activePeriod, periods: periodsList });
+});
+app.patch("/api/admin/periods/:id", (req, res) => {
+  const per = periodsList.find((p) => p.id === Number(req.params.id));
+  if (!per) return res.status(404).json({ error: "Period not found" });
+  const months = Math.round(Number(req.body?.months_elapsed));
+  if (!(months >= 1 && months <= 12)) return res.status(400).json({ error: "Running months must be 1 to 12" });
+  per.months_elapsed = months;
+  logAudit(actingUser().email, "period.months", { period: per.name, months });
+  res.json(per);
+});
+var PERIOD_KINDS = {
+  po_export: { label: "PO export", need: [["Vendor Name", "Vendor", "Principal", "Supplier"], ["Item Number", "ERP Code", "Kode Barang", "Item Code"], ["Quantity", "Qty"]], names: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital" },
+  formulary: { label: "Formulary", need: [["Kode Barang", "ERP Code", "Item Number", "Item Code"], ["Nama Barang", "Item Name", "Item Description"]], names: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA (optional)" },
+  sku_master: { label: "Master SKU", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Item Name", "Nama Barang", "Item Description"]], names: "ERP Code, Item Name, Generic Name, Brand, Catalog No. (REF), UOM" },
+  sku_tagging: { label: "SKU - principal tagging", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Principal", "Vendor", "Vendor Name"]], names: "ERP Code, Principal" }
+};
+app.post("/api/admin/periods/:id/upload", withFiles(fileUpload.single("file")), async (req, res) => {
+  const per = periodsList.find((p) => p.id === Number(req.params.id));
+  if (!per) return res.status(404).json({ error: "Period not found" });
+  const kind = String(req.body?.kind || "");
+  const spec = PERIOD_KINDS[kind];
+  if (!spec) return res.status(400).json({ error: "Unknown data type" });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Choose a file first" });
+  let rows;
+  try {
+    rows = await readTable(file);
+  } catch (e) {
+    return res.status(400).json({ error: `Could not read the file: ${e.message}` });
+  }
+  if (!rows.length) return res.status(400).json({ error: "The file has no data rows" });
+  const missing = spec.need.filter((aliases) => !hasColumn(rows, ...aliases)).map((a) => a[0]);
+  if (missing.length) {
+    return res.status(400).json({ error: `${spec.label}: missing column ${missing.join(", ")}. Expected columns: ${spec.names}. Found: ${Object.keys(rows[0]).join(", ")}` });
+  }
+  const pd = periodDataFor(per.id);
+  let skipped = 0;
+  if (kind === "po_export") {
+    pd.po = rows.map(normalizePoRow).filter((x) => !!x);
+    skipped = rows.length - pd.po.length;
+  } else if (kind === "formulary") {
+    pd.formulary = rows.map(normalizeFormularyRow).filter((x) => !!x);
+    skipped = rows.length - pd.formulary.length;
+  } else if (kind === "sku_master") {
+    pd.skus = [];
+    for (const r of rows) {
+      const code = pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
+      if (!code) {
+        skipped++;
+        continue;
+      }
+      pd.skus.push({ code, name: pick(r, "Item Name", "Nama Barang", "Item Description"), generic: pick(r, "Generic Name", "Generic"), brand: pick(r, "Brand", "Merk"), catalog_no: pick(r, "Catalog No. (REF)", "Catalog No", "REF"), uom: pick(r, "UOM", "Satuan", "Purch Unit") });
+    }
+    for (const x of pd.skus) {
+      if (!itemMasterMap.has(x.code)) {
+        itemMasterMap.set(x.code, { erp_code: x.code, item_name: x.name, generic_name: x.generic || null, group_key: x.generic || null, brand: x.brand, catalog_no: x.catalog_no, uom: x.uom, tags: per.category, status: x.generic ? "reviewed" : "new", source: "sku master", first_seen: nowIso(), updated_at: nowIso(), updated_by: actingUser().email });
+      }
+    }
+  } else if (kind === "sku_tagging") {
+    pd.tagging = [];
+    for (const r of rows) {
+      const code = pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
+      const principal = pick(r, "Principal", "Vendor", "Vendor Name");
+      if (!code || !principal) {
+        skipped++;
+        continue;
+      }
+      pd.tagging.push({ code, principal });
+    }
+  }
+  pd.files[kind] = { name: file.originalname, rows: rows.length - skipped, at: nowIso(), by: actingUser().email };
+  syncPeriodCounts(per);
+  logAudit(actingUser().email, "period.upload", { period: per.name, kind, file: file.originalname, rows: rows.length - skipped, skipped });
+  res.json({ period: per, kind, rows: rows.length - skipped, skipped });
+});
+var PRINCIPAL_COLUMNS = ["Principal", "Distributor", "Category", "Negotiation Type", "Binding", "Items (ERP codes)", "Current MOU Start", "Current MOU End", "PIC", "Email", "WhatsApp", "Notes"];
+var PRINCIPAL_TEMPLATE_ROWS = [
+  ["PT Medika Nusantara", "PT Distributor Sejahtera", "CnC", "Renewal", "Nett to Disc", "MED000100; MED000101", "2024-02-01", "2027-01-31", "Budi Santoso", "budi@medika.com", "08123456789", "Annual renewal"],
+  ["PT Bio Diagnostik", "", "CnC", "New Vendor", "Nett", "", "", "", "Dewi Sartika", "dewi@biodiag.com", "08129876543", "New vendor: no current MOU"],
+  ["PT Farmasi Sejahtera", "PT Anugerah Pharma", "Drugs & CnC", "Addendum", "Disc", "", "2023-06-01", "2026-05-31", "Andi Pratama", "andi@farmasi.com", "08134567890", "Both categories"]
+];
+app.get("/api/admin/nego/principals-template.csv", (_req, res) => {
+  const q = (v) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const csv = [PRINCIPAL_COLUMNS, ...PRINCIPAL_TEMPLATE_ROWS].map((r) => r.map(q).join(",")).join("\r\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=principals_template.csv");
+  res.send("\uFEFF" + csv);
+});
+app.get("/api/admin/nego/principals-template.xlsx", async (_req, res) => {
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Principals");
+  ws.addRow(PRINCIPAL_COLUMNS);
+  PRINCIPAL_TEMPLATE_ROWS.forEach((r) => ws.addRow(r));
+  ws.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F3A93" } };
+  ws.columns.forEach((c, i) => {
+    c.width = [26, 26, 14, 18, 14, 28, 18, 18, 18, 26, 16, 30][i];
+  });
+  const list = (col, values) => {
+    for (let r = 2; r <= 500; r++) ws.getCell(`${col}${r}`).dataValidation = { type: "list", allowBlank: true, formulae: [`"${values.join(",")}"`], showErrorMessage: true, errorTitle: "Pick from the list", error: `Allowed: ${values.join(", ")}` };
+  };
+  list("C", ["Drugs", "CnC", "Drugs & CnC"]);
+  list("D", NEGO_TYPES);
+  list("E", BINDINGS);
+  const notes = wb.addWorksheet("How to fill");
+  [
+    "Principal: required, one row per principal.",
+    "Distributor: optional. It can change and there can be several; the item list does not depend on it.",
+    "Category: Drugs, CnC, or Drugs & CnC.",
+    "Negotiation Type: Renewal, New Vendor, Addendum or Force Majeure.",
+    "Binding: Nett, Disc or Nett to Disc.",
+    "Items (ERP codes): optional, separated by ; or commas. These items are tagged to the principal.",
+    "Current MOU Start / End: yyyy-mm-dd. Required except for New Vendor. The end date drives the 6-month alert.",
+    "The new contract dates are entered when you start the negotiation."
+  ].forEach((t) => notes.addRow([t]));
+  notes.getColumn(1).width = 110;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", "attachment; filename=principals_template.xlsx");
+  await wb.xlsx.write(res);
+  res.end();
+});
+app.post("/api/admin/nego/principals/import", withFiles(fileUpload.single("file")), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Choose a file first" });
+  let rows;
+  try {
+    rows = await readTable(file);
+  } catch (e) {
+    return res.status(400).json({ error: `Could not read the file: ${e.message}` });
+  }
+  if (!rows.length) return res.status(400).json({ error: "The file has no data rows" });
+  const required = [["Principal", "Principal Name", "Name"], ["Category"], ["Negotiation Type", "NegoType", "Nego Type", "Jenis Negosiasi"]];
+  const missing = required.filter((a) => !hasColumn(rows, ...a)).map((a) => a[0]);
+  if (missing.length) return res.status(400).json({ error: `Missing column ${missing.join(", ")}. Use the template: ${PRINCIPAL_COLUMNS.join(", ")}` });
+  let added = 0, updated = 0;
+  const errors = [];
+  rows.forEach((r, i) => {
+    const line = i + 2;
+    const name = pick(r, "Principal", "Principal Name", "Name");
+    if (!name) {
+      errors.push(`Row ${line}: principal name is empty`);
+      return;
+    }
+    const nt = normalizeNegoType(pick(r, "Negotiation Type", "NegoType", "Nego Type", "Jenis Negosiasi"));
+    const clean = cleanPrincipalFields({
+      name,
+      distributor: pick(r, "Distributor"),
+      category: pick(r, "Category", "Kategori"),
+      nego_type: pick(r, "Negotiation Type", "NegoType", "Nego Type", "Jenis Negosiasi"),
+      binding: pick(r, "Binding"),
+      item_codes: pick(r, "Items (ERP codes)", "Items", "ERP Codes"),
+      mou_start: pick(r, "Current MOU Start", "MOU Start"),
+      mou_end: pick(r, "Current MOU End", "MOU End"),
+      contact_name: pick(r, "PIC", "Contact"),
+      contact_email: pick(r, "Email"),
+      contact_phone: pick(r, "WhatsApp", "Phone"),
+      notes: pick(r, "Notes", "Keterangan")
+    });
+    if (clean.error) {
+      errors.push(`Row ${line} (${name}): ${clean.error}`);
+      return;
+    }
+    const f = clean.fields;
+    if (nt !== "New Vendor" && !f.mou_end) {
+      errors.push(`Row ${line} (${name}): Current MOU End is required unless the type is New Vendor`);
+      return;
+    }
+    if (nt === "New Vendor") {
+      f.mou_start = null;
+      f.mou_end = null;
+    }
+    const existing = principalsList.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      Object.assign(existing, f);
+      updated++;
+      return;
+    }
+    principalsList.push({ id: Math.max(0, ...principalsList.map((x) => x.id)) + 1, ...f, created_at: nowIso(), created_by: actingUser().email });
+    added++;
+  });
+  logAudit(actingUser().email, "principals.import", { file: file.originalname, added, updated, errors: errors.length });
+  res.json({ added, updated, errors, total: principalsList.length });
+});
+function principalMouRules(f) {
+  if (f.nego_type === "New Vendor") {
+    f.mou_start = null;
+    f.mou_end = null;
+    return null;
+  }
+  if (!f.mou_end) return "Current MOU end is required (except for New Vendor)";
+  if (f.mou_start && f.mou_end && f.mou_start > f.mou_end) return "Current MOU start must be before the end";
+  return null;
+}
+app.post("/api/admin/nego/principals", (req, res) => {
+  const clean = cleanPrincipalFields(req.body || {});
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  const f = clean.fields;
+  const err = principalMouRules(f);
+  if (err) return res.status(400).json({ error: err });
+  if (principalsList.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) return res.status(409).json({ error: `${f.name} already exists` });
+  const p = { id: Math.max(0, ...principalsList.map((x) => x.id)) + 1, ...f, created_at: nowIso(), created_by: actingUser().email };
   principalsList.push(p);
+  logAudit(actingUser().email, "principal.create", { name: p.name });
   res.json(p);
 });
 app.patch("/api/admin/nego/principals/:pid", (req, res) => {
   const p = principalsList.find((x) => x.id === Number(req.params.pid));
   if (!p) return res.status(404).json({ error: "No such principal" });
-  Object.assign(p, req.body || {});
+  const clean = cleanPrincipalFields(req.body || {}, true);
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  const f = { nego_type: p.nego_type, mou_start: p.mou_start, mou_end: p.mou_end, ...clean.fields };
+  const err = principalMouRules(f);
+  if (err) return res.status(400).json({ error: err });
+  Object.assign(p, clean.fields, { mou_start: f.mou_start, mou_end: f.mou_end });
+  logAudit(actingUser().email, "principal.update", { name: p.name });
   res.json(p);
 });
 app.post("/api/admin/nego/sample", (_req, res) => {
@@ -2216,21 +3375,32 @@ app.post("/api/admin/nego/cycles", (req, res) => {
   const pid = Number(req.body?.principal_id);
   const p = principalsList.find((x) => x.id === pid);
   if (!p) return res.status(404).json({ error: "No such principal" });
+  const cs = toIsoDate(req.body?.contract_start);
+  const ce = toIsoDate(req.body?.contract_end);
+  if (!cs || !ce) return res.status(400).json({ error: "Enter the new contract start and end dates" });
+  if (cs >= ce) return res.status(400).json({ error: "The new contract must end after it starts" });
+  const binding = normalizeBinding(req.body?.binding || p.binding);
+  if (!binding) return res.status(400).json({ error: `Binding must be one of: ${BINDINGS.join(", ")}` });
+  if (cyclesList.some((x) => x.principal_id === p.id && x.status === "open")) return res.status(409).json({ error: `${p.name} already has an open negotiation` });
+  const activePeriod = periodsList.find((per) => per.active) || periodsList[0];
   const c = {
     id: cyclesList.length + 1,
     principal_id: p.id,
     principal: { ...p },
-    contract_start: req.body?.contract_start || "2027-01-01",
-    contract_end: req.body?.contract_end || "2029-12-31",
-    binding: req.body?.binding || p.binding || "Nett",
-    delivery_fee: req.body?.delivery_fee || "Free for all Siloam Hospitals units",
+    nego_type: req.body?.nego_type || p.nego_type || "Renewal",
+    contract_start: cs,
+    contract_end: ce,
+    binding,
+    delivery_fee: req.body?.delivery_fee || "Free for all hospital units",
+    period_id: activePeriod?.id || 1,
+    months_elapsed: activePeriod?.months_elapsed || 12,
     status: "open",
     current_step: "prepare",
     step_due: null,
     prepared_at: null,
     submitted_steps: {},
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email
+    created_by: actingUser().email
   };
   cyclesList.push(c);
   cycleItemsMap.set(c.id, []);
@@ -2242,28 +3412,132 @@ app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   const cid = Number(req.params.cid);
   const c = cyclesList.find((x) => x.id === cid);
   if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const items = cycleItemsMap.get(cid) || [];
+  const nextStep = String(req.body?.step || "");
+  if (c.current_step === "prepare" && nextStep !== "prepare" && items.length === 0) {
+    return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+  }
   if (req.body?.step) {
-    c.current_step = String(req.body.step);
+    if (c.submitted_steps && c.submitted_steps[nextStep]) delete c.submitted_steps[nextStep];
+    c.current_step = nextStep;
     if (c.current_step === "closed") c.status = "closed";
   }
   res.json(getCycleSummaryCard(c));
+});
+app.post("/api/admin/nego/cycles/:cid/prepare", withFiles(fileUpload.any()), async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cyclesList.find((x) => x.id === cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  if (c.status !== "open") return res.status(400).json({ error: "This negotiation is closed" });
+  const pd = periodDataFor(c.period_id || 1);
+  const per = periodsList.find((x) => x.id === (c.period_id || 1));
+  const p = principalsList.find((x) => x.id === c.principal_id) || c.principal;
+  const files = req.files || [];
+  const mouFile = files.find((f) => f.fieldname === "mou");
+  const key = String(p.name).trim().toLowerCase();
+  let columns_used;
+  if (mouFile) {
+    let rows;
+    try {
+      rows = await readTable(mouFile);
+    } catch (e) {
+      return res.status(400).json({ error: `Could not read the MOU file: ${e.message}` });
+    }
+    if (!rows.length) return res.status(400).json({ error: "The MOU file has no data rows" });
+    if (!hasColumn(rows, "ERP Code", "Kode Barang", "Item Number", "Item Code")) {
+      return res.status(400).json({ error: `The MOU file needs an ERP Code column. Found: ${Object.keys(rows[0]).join(", ")}` });
+    }
+    mouStore.set(key, rows);
+    columns_used = { mou: { "ERP Code": "ERP Code", "MOU qty": "MOU_Qty/PO Unit", "MOU HNA": "MOU_HNA/PO Unit (excl. PPN)", "MOU disc": "MOU_Disc%" } };
+  }
+  const mouRows = mouStore.get(key) || [];
+  if (!pd.po.length && !pd.formulary.length && !mouRows.length) {
+    return res.status(400).json({ error: `No data for ${per?.name || "this period"} yet. An admin uploads the PO export and formulary once in Admin \u2192 Negotiation Periods.` });
+  }
+  const built = buildItemsForPrincipal(p, pd, mouRows);
+  if (!built.items.length) {
+    return res.status(400).json({ error: `No items found for ${p.name}. Check that the PO export (Vendor Name) and formulary (Principal) use the same principal name, or tag items to the principal.` });
+  }
+  const items = built.items.map((it, idx) => ({
+    id: idx + 1,
+    cycle_id: cid,
+    sort: idx + 1,
+    ...it,
+    rfq_qty: null,
+    rfq_hna: null,
+    rfq_disc: null,
+    co_disc: null,
+    fb1_disc: null,
+    on_disc: null,
+    price_reason: null,
+    co_note: null
+  }));
+  items.forEach((it, idx) => {
+    if (!itemMasterMap.has(it.erp_code)) {
+      itemMasterMap.set(it.erp_code, { erp_code: it.erp_code, item_name: it.item_name, generic_name: null, group_key: null, brand: it.brand, catalog_no: it.catalog_no, uom: it.po_unit_text, tags: p.category, status: "new", source: "negotiation", first_seen: nowIso(), updated_at: nowIso(), updated_by: actingUser().email });
+    }
+  });
+  cycleItemsMap.set(cid, items);
+  c.prepared_at = nowIso();
+  c.months_elapsed = per?.months_elapsed || c.months_elapsed || 12;
+  const scan = scanCycleAnomalies(cid);
+  const summary = { ...built.summary, columns_used, scan: { found: scan.open } };
+  c.prepare_summary = summary;
+  const evs = cycleEventsMap.get(cid) || [];
+  evs.unshift({ id: evs.length + 1, cycle_id: cid, at: nowIso(), user_email: actingUser().email, action: "cycle.prepare", detail: { items: items.length, period: per?.name } });
+  cycleEventsMap.set(cid, evs);
+  res.json(summary);
 });
 app.post("/api/admin/nego/cycles/:cid/scan", (req, res) => {
   const cid = Number(req.params.cid);
   const counts = scanCycleAnomalies(cid);
   res.json({ ...counts, counts });
 });
+var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note"];
+var ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "mou_disc"];
+var ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
+function cleanItemChanges(input) {
+  const out = {};
+  for (const [k, v] of Object.entries(input || {})) {
+    if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
+    else if (k === "item_status") {
+      if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
+      out[k] = v;
+    } else if (ITEM_DISC_FIELDS.includes(k)) {
+      if (v == null || v === "") {
+        out[k] = null;
+        continue;
+      }
+      const raw = String(v).trim();
+      const n = toNumber(raw);
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid discount` };
+      const frac = raw.includes("%") ? n / 100 : n;
+      if (frac >= 1) return { changes: {}, error: `${k}: a discount must be between 0 and 1 (e.g. 0.15) or written as a percentage (15%)` };
+      out[k] = frac;
+    } else if (ITEM_NUM_FIELDS.includes(k)) {
+      if (v == null || v === "") {
+        out[k] = null;
+        continue;
+      }
+      const n = toNumber(String(v));
+      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid number` };
+      out[k] = k.endsWith("qty") ? Math.round(n) : n;
+    } else return { changes: {}, error: `${k} can't be edited` };
+  }
+  return { changes: out };
+}
 app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req, res) => {
   const cid = Number(req.params.cid);
   const iid = Number(req.params.iid);
   const items = cycleItemsMap.get(cid) || [];
   const it = items.find((x) => x.id === iid);
   if (!it) return res.status(404).json({ error: "No such item" });
-  const changes = req.body?.changes || {};
-  Object.assign(it, changes);
+  const clean = cleanItemChanges(req.body?.changes || {});
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  Object.assign(it, clean.changes);
   const scan = scanCycleAnomalies(cid);
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  res.json({ item: enrichCycleItem(it, ppn), changed: Object.keys(changes), scan });
+  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(clean.changes), scan });
 });
 app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req, res) => {
   const cid = Number(req.params.cid);
@@ -2295,7 +3569,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
   const cid = Number(req.params.cid);
   const days = Math.max(1, Math.min(90, Number(req.body?.days) || 14));
   const links = cycleLinksMap.get(cid) || [];
-  const token = `invite-${cid}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
+  const token = crypto.randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1e3).toISOString();
   const link = {
     id: links.length + 1,
@@ -2304,7 +3578,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
     path: `/p/${token}`,
     url: `/p/${token}`,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     expires_at: expiresAt,
     revoked_at: null,
     last_used_at: null
@@ -2319,7 +3593,7 @@ app.post("/api/admin/nego/cycles/:cid/links", (req, res) => {
       id: evs.length + 1,
       cycle_id: cid,
       at: nowIso(),
-      user_email: (currentSessionUser || usersList[0]).email,
+      user_email: actingUser().email,
       action: "link.create",
       detail: { link_id: link.id, days }
     });
@@ -2342,7 +3616,7 @@ app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req, res) => {
         id: evs.length + 1,
         cycle_id: cid,
         at: nowIso(),
-        user_email: (currentSessionUser || usersList[0]).email,
+        user_email: actingUser().email,
         action: "link.revoke",
         detail: { link_id: link.id }
       });
@@ -2406,15 +3680,18 @@ app.put("/api/admin/settings", (req, res) => {
       changed.push(k);
     }
   }
-  if (changed.length) logAudit((currentSessionUser || usersList[0]).email, "settings.update", changes);
+  if (changed.length) logAudit(actingUser().email, "settings.update", changes);
   res.json({ settings: describeSettings(), changed });
 });
+var ROLES = ["admin", "negotiator", "viewer"];
 app.get("/api/admin/users", (_req, res) => {
   res.json({ users: usersList });
 });
 app.post("/api/admin/users", (req, res) => {
   const { email, name, role } = req.body || {};
   if (!email || !name) return res.status(400).json({ error: "Enter email and name" });
+  if (role && !ROLES.includes(role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  if (usersList.some((x) => x.email === String(email).trim().toLowerCase())) return res.status(409).json({ error: "That email already has an account" });
   const u = {
     id: usersList.length + 1,
     email: String(email).trim().toLowerCase(),
@@ -2422,7 +3699,7 @@ app.post("/api/admin/users", (req, res) => {
     role: role || "viewer",
     active: 1,
     created_at: nowIso(),
-    created_by: (currentSessionUser || usersList[0]).email,
+    created_by: actingUser().email,
     last_login: null,
     has_password: false
   };
@@ -2432,8 +3709,18 @@ app.post("/api/admin/users", (req, res) => {
 app.patch("/api/admin/users/:uid", (req, res) => {
   const u = usersList.find((x) => x.id === Number(req.params.uid));
   if (!u) return res.status(404).json({ error: "No such user" });
-  if (req.body?.role) u.role = req.body.role;
-  if (req.body?.active !== void 0) u.active = req.body.active ? 1 : 0;
+  if (req.body?.role && !ROLES.includes(req.body.role)) return res.status(400).json({ error: "Role must be admin, negotiator or viewer" });
+  const nextRole = req.body?.role || u.role;
+  const nextActive = req.body?.active !== void 0 ? req.body.active ? 1 : 0 : u.active;
+  const otherAdmins = usersList.filter((x) => x.id !== u.id && x.role === "admin" && x.active).length;
+  if (u.role === "admin" && (nextRole !== "admin" || !nextActive) && !otherAdmins) {
+    return res.status(400).json({ error: "Keep at least one active administrator" });
+  }
+  u.role = nextRole;
+  u.active = nextActive;
+  if (!u.active) {
+    for (const [sid, uid] of sessions) if (uid === u.id) sessions.delete(sid);
+  }
   if (req.body?.name) u.name = req.body.name;
   res.json(u);
 });
@@ -2511,36 +3798,27 @@ function resolvePrincipalCycle(req) {
   const token = req.query.token || req.headers["x-principal-token"] || cookies["nego_principal"];
   let foundCycle = null;
   let foundLink = null;
-  if (token) {
-    const link = tokenToLinkMap.get(token);
-    if (link) {
-      if (link.revoked_at) return null;
-      foundLink = link;
-      foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-    } else {
-      const match = token.match(/(?:demo-token-|invite-)(\d+)/);
-      if (match) {
-        const cid2 = Number(match[1]);
-        foundCycle = cyclesList.find((x) => x.id === cid2);
-      }
+  const link = validLink(token);
+  if (link) {
+    foundLink = link;
+    foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
+  } else {
+    const user = req.user;
+    const cid = Number(req.query.cid || req.query.cycle_id);
+    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
+      foundCycle = cyclesList.find((x) => x.id === cid);
     }
-  }
-  const cid = Number(req.query.cid || req.query.cycle_id);
-  if (!foundCycle && cid) {
-    foundCycle = cyclesList.find((x) => x.id === cid);
-  }
-  if (!foundCycle) {
-    foundCycle = cyclesList.find((c) => c.status === "open") || cyclesList[0];
   }
   if (!foundCycle) return null;
   const queryStep = req.query.step;
-  const principalSteps = ["identification", "rfq", "feedback1", "submission"];
-  let step = queryStep;
+  const principalSteps = ["rfq", "feedback1", "submission"];
+  let step = foundLink ? void 0 : queryStep;
   if (!step || !principalSteps.includes(step)) {
     if (principalSteps.includes(foundCycle.current_step)) {
       step = foundCycle.current_step;
     } else {
-      step = "rfq";
+      const sent = foundCycle.submitted_steps || {};
+      step = ["submission", "feedback1", "rfq"].find((k) => sent[k]) || "rfq";
     }
   }
   return { cycle: foundCycle, link: foundLink, step };
@@ -2549,8 +3827,8 @@ function checkItemIssues(it, step) {
   const issues = [];
   const active = it.item_status !== "Discontinue";
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const th = { increase_tolerance: 5e-3, drop: 0.4, high_disc: 0.6 };
-  if (step === "identification") {
+  const th = { increase_tolerance: 5e-3, high_disc: 0.6, hna_jump: 0.5 };
+  if (step === "rfq") {
     if (!it.item_status) {
       issues.push({ level: "missing", code: "status_missing", field: "item_status", id: "Pilih status: Aktif atau Tidak dijual lagi.", en: "Choose status: Active or Discontinued." });
     }
@@ -2560,7 +3838,6 @@ function checkItemIssues(it, step) {
     if (active && !it.catalog_no) {
       issues.push({ level: "missing", code: "ref_missing", field: "catalog_no", id: "Isi nomor katalog (REF).", en: "Fill in catalogue number (REF)." });
     }
-  } else if (step === "rfq") {
     if (active) {
       const hna = it.rfq_hna;
       const qty = it.rfq_qty;
@@ -2579,34 +3856,23 @@ function checkItemIssues(it, step) {
           issues.push({ level: "error", code: "qty_whole", field: "rfq_qty", id: "Isi per kemasan harus minimal 1.", en: "Pieces per pack must be at least 1." });
         }
         if (disc != null && (disc < 0 || disc >= 1)) {
-          issues.push({ level: "error", code: "disc_range", field: "rfq_disc", id: `Diskon ${(disc * 100).toFixed(0)}% tidak mungkin.`, en: "Discount out of range." });
+          issues.push({ level: "error", code: "disc_range", field: "rfq_disc", id: "Format diskon salah. Isi dalam persen antara 0% dan 100% (contoh: 15%).", en: "Discount format is wrong. Enter a percentage between 0% and 100% (e.g. 15%)." });
         }
-        if (disc != null && disc > th.high_disc) {
+        if (disc != null && disc >= 0 && disc < 1 && disc > th.high_disc) {
           issues.push({ level: "confirm", code: "disc_high", field: "rfq_disc", id: `Diskon ${(disc * 100).toFixed(0)}% sangat besar. Apakah benar?`, en: `Discount of ${(disc * 100).toFixed(0)}% is very high. Is this correct?` });
+        }
+        const baseHnaPc = dbHnaPerPc(it);
+        if (hna != null && hna > 0 && qty && baseHnaPc && hna / qty > baseHnaPc * (1 + th.hna_jump)) {
+          issues.push({ level: "confirm", code: "hna_anomaly", field: "rfq_hna", id: "HNA yang Anda isi tampak berbeda jauh dari data kami. Mohon periksa kembali harga dan isi per kemasan.", en: "The HNA you entered looks very different from our records. Please re-check the price and the pieces per pack." });
+        }
+        const dbQty = dbPackQty(it);
+        if (qty && dbQty && qty !== dbQty) {
+          issues.push({ level: "confirm", code: "uom_diff", field: "rfq_qty", id: "Isi per kemasan (UOM) berbeda dengan data kami. Mohon periksa kembali.", en: "The pack size (UOM) differs from our records. Please re-check." });
         }
         const newUp = calcUnitPrice(hna, qty, disc, ppn);
         const mouUp = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn);
-        if (newUp != null && mouUp != null && mouUp > 0) {
-          const ratio = newUp / mouUp;
-          if (ratio > 1 + th.increase_tolerance) {
-            if (!it.price_reason) {
-              issues.push({
-                level: "reason",
-                code: "increase",
-                field: "price_reason",
-                id: `Harga per pcs naik dari MOU (Rp ${Math.round(mouUp).toLocaleString("id-ID")} \u2192 Rp ${Math.round(newUp).toLocaleString("id-ID")}). Mohon isi alasan kenaikan.`,
-                en: `Price per piece increased from MOU. Please state the reason.`
-              });
-            }
-          } else if (ratio < 1 - th.drop) {
-            issues.push({
-              level: "confirm",
-              code: "big_drop",
-              field: "rfq_hna",
-              id: `Harga per pcs turun ${((1 - ratio) * 100).toFixed(0)}% dari MOU. Apakah benar?`,
-              en: `Price per piece dropped by ${((1 - ratio) * 100).toFixed(0)}% from MOU. Is this correct?`
-            });
-          }
+        if (newUp != null && mouUp != null && mouUp > 0 && newUp / mouUp > 1 + th.increase_tolerance && !it.price_reason) {
+          issues.push({ level: "reason", code: "increase", field: "price_reason", id: "Harga per pcs naik dibanding kontrak saat ini. Mohon isi alasan kenaikan.", en: "The price per piece is higher than the current contract. Please state the reason." });
         }
       }
     }
@@ -2642,9 +3908,17 @@ function checkItemIssues(it, step) {
   const state = hasMissing ? "missing" : hasCheck ? "check" : "done";
   return { issues, outstanding, state };
 }
+function dbPackQty(it) {
+  return it.mou_qty || matchUoMQty(it.po_unit_text) || null;
+}
+function dbHnaPerPc(it) {
+  const q = dbPackQty(it);
+  if (it.mou_hna && it.mou_qty) return it.mou_hna / it.mou_qty;
+  if (it.formulary_hna && q) return it.formulary_hna / q;
+  return null;
+}
 function formatPrincipalItem(it, step) {
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn);
   const rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn);
   const co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn) : null;
   const fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn) : null;
@@ -2657,19 +3931,12 @@ function formatPrincipalItem(it, step) {
     catalog_no: it.catalog_no || "",
     item_status: it.item_status || "Active",
     remarks: it.remarks || null,
-    po_unit_text: it.po_unit_text || "PCS",
-    mou_qty: it.mou_qty ?? 1,
-    mou_hna: it.mou_hna ?? null,
-    mou_disc: it.mou_disc ?? 0,
     rfq_qty: it.rfq_qty ?? null,
     rfq_hna: it.rfq_hna ?? null,
     rfq_disc: it.rfq_disc ?? null,
     price_reason: it.price_reason || null,
     principal_confirmed: it.principal_confirmed || null,
-    mou_unit_price,
     rfq_unit_price,
-    pack_name: (it.po_unit_text || "PCS").toUpperCase(),
-    piece_name: "PCS",
     co_disc: it.co_disc ?? null,
     fb1_disc: it.fb1_disc ?? null,
     co_unit_price,
@@ -2679,6 +3946,12 @@ function formatPrincipalItem(it, step) {
     state
   };
 }
+function portalLocked(cycle, step) {
+  const sent = cycle.submitted_steps?.[step];
+  if (cycle.current_step !== step) return { locked: true, reason: sent ? "sent" : "not_open" };
+  if (sent) return { locked: true, reason: "sent" };
+  return { locked: false, reason: null };
+}
 app.get("/api/p/me", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
   if (!resolved) {
@@ -2686,24 +3959,25 @@ app.get("/api/p/me", (req, res) => {
   }
   const { cycle, link, step } = resolved;
   const stepNumberMap = {
-    identification: 1,
-    current_mou: 2,
-    rfq: 3,
-    counter_offer: 4,
-    feedback1: 5,
-    online_nego: 6,
-    submission: 7
+    rfq: 1,
+    counter_offer: 2,
+    feedback1: 3,
+    online_nego: 4,
+    submission: 5
   };
+  const lock = portalLocked(cycle, step);
   res.json({
     principal: { name: cycle.principal.name, distributor: cycle.principal.distributor },
     contract: { start: cycle.contract_start, end: cycle.contract_end, binding: cycle.binding },
     step,
     current_step: cycle.current_step,
-    step_no: stepNumberMap[cycle.current_step] || 2,
+    step_no: stepNumberMap[cycle.current_step] || 1,
+    locked: lock.locked,
+    excel_upload: true,
+    lock_reason: lock.reason,
     submitted: cycle.submitted_steps?.[step] || null,
     due: cycle.step_due,
     ppn: Number(settingsValues.ppn_rate) || 0.11,
-    thresholds: { drop: 0.4, high_disc: 0.6, increase_tolerance: 5e-3 },
     reasons: [
       { key: "raw_material", id: "Kenaikan harga bahan baku", en: "Raw material cost increase" },
       { key: "fx", id: "Perubahan nilai tukar (kurs)", en: "Exchange rate movement" },
@@ -2771,6 +4045,10 @@ app.patch("/api/p/items/:iid", (req, res) => {
     return res.status(404).json({ error: "No such item" });
   }
   const { changes, confirm } = req.body || {};
+  if (portalLocked(cycle, step).locked) {
+    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  }
+  let cautionMessage = null;
   if (changes) {
     if (changes.item_status !== void 0) it.item_status = changes.item_status;
     if (changes.brand !== void 0) it.brand = String(changes.brand).trim();
@@ -2778,39 +4056,58 @@ app.patch("/api/p/items/:iid", (req, res) => {
     if (changes.remarks !== void 0) it.remarks = String(changes.remarks).trim();
     if (changes.rfq_qty !== void 0) {
       it.rfq_qty = changes.rfq_qty != null && changes.rfq_qty !== "" ? parseInt(String(changes.rfq_qty).replace(/[^\d]/g, "")) || null : null;
+      if (it.mou_qty && it.rfq_qty && it.rfq_qty !== it.mou_qty) {
+        cautionMessage = "Satuan/jumlah per kemasan berbeda dengan acuan MOU.";
+      }
     }
     if (changes.rfq_hna !== void 0) {
       if (changes.rfq_hna == null || changes.rfq_hna === "") {
         it.rfq_hna = null;
       } else {
         const clean = String(changes.rfq_hna).replace(/\./g, "").replace(",", ".");
-        it.rfq_hna = parseFloat(clean) || null;
+        const val = parseFloat(clean);
+        if (isNaN(val) || val < 0) {
+          return res.status(400).json({ error: "Harga HNA tidak valid. Mohon periksa kembali harga yang dimasukkan." });
+        }
+        it.rfq_hna = val;
+        const refHna = it.mou_hna || it.last_po_price;
+        if (refHna && (val > refHna * 1.5 || val < refHna * 0.2)) {
+          cautionMessage = "Mohon periksa kembali kesesuaian harga yang dimasukkan.";
+        }
       }
     }
     if (changes.rfq_disc !== void 0) {
       if (changes.rfq_disc == null || changes.rfq_disc === "") {
         it.rfq_disc = null;
       } else {
-        let d = parseFloat(String(changes.rfq_disc).replace("%", "").replace(/\./g, "").replace(",", "."));
-        if (!isNaN(d)) {
-          if (d > 1) d = d / 100;
-          it.rfq_disc = d;
-        } else {
-          it.rfq_disc = null;
+        const rawStr = String(changes.rfq_disc).trim();
+        const hasPct = rawStr.includes("%");
+        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
+        const d = parseFloat(clean);
+        if (isNaN(d) || d < 0) {
+          return res.status(400).json({ error: "Diskon tidak valid. Masukkan angka desimal 0 s/d 1 atau persentase (contoh: 0.15 atau 15%)." });
         }
+        if (d > 1 && !hasPct) {
+          return res.status(400).json({ error: `Diskon '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%) atau ketik dengan tanda % (contoh: ${rawStr}%).` });
+        }
+        it.rfq_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
       }
     }
     if (changes.fb1_disc !== void 0) {
       if (changes.fb1_disc == null || changes.fb1_disc === "") {
         it.fb1_disc = null;
       } else {
-        let d = parseFloat(String(changes.fb1_disc).replace("%", "").replace(/\./g, "").replace(",", "."));
-        if (!isNaN(d)) {
-          if (d > 1) d = d / 100;
-          it.fb1_disc = d;
-        } else {
-          it.fb1_disc = null;
+        const rawStr = String(changes.fb1_disc).trim();
+        const hasPct = rawStr.includes("%");
+        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
+        const d = parseFloat(clean);
+        if (isNaN(d) || d < 0) {
+          return res.status(400).json({ error: "Diskon Feedback I tidak valid." });
         }
+        if (d > 1 && !hasPct) {
+          return res.status(400).json({ error: `Diskon Feedback I '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%).` });
+        }
+        it.fb1_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
       }
     }
     if (changes.price_reason !== void 0) {
@@ -2823,7 +4120,8 @@ app.patch("/api/p/items/:iid", (req, res) => {
     it.principal_confirmed = Array.from(set).join(",");
   }
   scanCycleAnomalies(cycle.id);
-  res.json(formatPrincipalItem(it, step));
+  const formatted = formatPrincipalItem(it, step);
+  res.json({ ...formatted, caution: cautionMessage });
 });
 app.post("/api/p/fill", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
@@ -2831,25 +4129,21 @@ app.post("/api/p/fill", (req, res) => {
     return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   }
   const { cycle, step } = resolved;
+  if (step !== "feedback1") {
+    return res.status(403).json({ error: "Isi otomatis hanya tersedia untuk menerima counter offer / Auto-fill is only available for accepting counter offers." });
+  }
+  if (portalLocked(cycle, step).locked) {
+    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  }
   const items = cycleItemsMap.get(cycle.id) || [];
   let count = 0;
   const ids = Array.isArray(req.body?.ids) ? new Set(req.body.ids) : null;
   for (const it of items) {
     if (ids && !ids.has(it.id)) continue;
     if (it.item_status === "Discontinue") continue;
-    if (step === "rfq") {
-      if (it.mou_hna != null) {
-        it.rfq_qty = it.mou_qty || 1;
-        it.rfq_hna = it.mou_hna;
-        it.rfq_disc = it.mou_disc || 0;
-        if (!it.item_status) it.item_status = "Active";
-        count++;
-      }
-    } else if (step === "feedback1") {
-      if (it.co_disc != null) {
-        it.fb1_disc = it.co_disc;
-        count++;
-      }
+    if (it.co_disc != null) {
+      it.fb1_disc = it.co_disc;
+      count++;
     }
   }
   scanCycleAnomalies(cycle.id);
@@ -2873,8 +4167,6 @@ app.get("/api/p/summary", (req, res) => {
     id: i.id,
     erp_code: i.erp_code,
     item_name: i.item_name,
-    mou_unit_price: i.mou_unit_price,
-    rfq_unit_price: i.rfq_unit_price,
     reason: i.price_reason
   }));
   res.json({
@@ -2898,10 +4190,18 @@ app.post("/api/p/submit", (req, res) => {
     return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   }
   const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) {
+    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  }
+  if (step !== "submission") {
+    const left = (cycleItemsMap.get(cycle.id) || []).filter((it) => formatPrincipalItem(it, step).outstanding.length > 0).length;
+    if (left > 0) {
+      return res.status(400).json({ error: `Masih ada ${left} SKU yang perlu dilengkapi atau diperbaiki / ${left} SKUs still need to be completed or fixed.` });
+    }
+  }
   if (!cycle.submitted_steps) cycle.submitted_steps = {};
   cycle.submitted_steps[step] = { at: nowIso() };
   const nextStepMap = {
-    identification: "current_mou",
     rfq: "counter_offer",
     feedback1: "online_nego",
     submission: "done"
@@ -2919,6 +4219,179 @@ app.post("/api/p/submit", (req, res) => {
   });
   cycleEventsMap.set(cycle.id, evs);
   res.json({ ok: true, step: nextStep, submitted_at: nowIso() });
+});
+var TEMPLATE_PATH = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
+var STAFF_COLUMNS = ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "coDisc", "fb1Disc", "onDisc"];
+function templateOptions(c, forPrincipal) {
+  return {
+    forPrincipal,
+    showCounterOffer: !["prepare", "rfq"].includes(c.current_step) || !!c.submitted_steps?.rfq,
+    principal: c.principal?.name || "",
+    distributor: c.principal?.distributor || "",
+    contractStart: c.contract_start,
+    contractEnd: c.contract_end,
+    binding: c.binding,
+    deliveryFee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, "")
+  };
+}
+async function sendWorkbook(res, wb, filename) {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^\w.\- ]/g, "_")}"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+app.get("/api/nego/cycles/:cid/export.xlsx", async (req, res) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const items = cycleItemsMap.get(c.id) || [];
+  const wb = await buildTemplate(TEMPLATE_PATH, items, templateOptions(c, false));
+  await sendWorkbook(res, wb, `Template_Nego_${c.principal.name}.xlsx`);
+});
+app.get("/api/p/template.xlsx", async (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle } = resolved;
+  const wb = await buildTemplate(TEMPLATE_PATH, cycleItemsMap.get(cycle.id) || [], templateOptions(cycle, true));
+  await sendWorkbook(res, wb, `Template_Nego_${cycle.principal.name}.xlsx`);
+});
+function fieldNow(it, field) {
+  return it[field] ?? null;
+}
+app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file")), async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Choose the file first" });
+  let rows;
+  try {
+    rows = await readTemplate(file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const items = cycleItemsMap.get(cid) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const byName = new Map(items.map((i) => [String(i.item_name).trim().toLowerCase(), i]));
+  const changes = [], errors = [], unmatched = [];
+  const seen = /* @__PURE__ */ new Set();
+  const perItem = /* @__PURE__ */ new Map();
+  let matched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code) || byName.get(r.item_name.trim().toLowerCase());
+    if (!it) {
+      unmatched.push({ erp_code: r.erp_code, item_name: r.item_name });
+      continue;
+    }
+    matched++;
+    seen.add(it.id);
+    const chk = checkRow(r.cells, STAFF_COLUMNS);
+    chk.errors.forEach((m) => errors.push({ row: r.row, message: m }));
+    if (chk.errors.length) continue;
+    for (const ch of chk.changes) {
+      const old = fieldNow(it, ch.field);
+      const same = typeof ch.value === "number" && old != null ? Math.abs(Number(old) - ch.value) < 1e-9 : String(old ?? "") === String(ch.value);
+      if (same) continue;
+      changes.push({ item_id: it.id, erp_code: it.erp_code, item_name: it.item_name, field: ch.field, header: ch.header, old, new: ch.value });
+      perItem.set(it.id, { ...perItem.get(it.id) || {}, [ch.field]: ch.value });
+    }
+  }
+  const byCol = {};
+  changes.forEach((x) => {
+    byCol[x.header] = (byCol[x.header] || 0) + 1;
+  });
+  const warning = matched === 0 ? "None of the rows match this negotiation's items. Is this the right principal's workbook?" : null;
+  if (String(req.body?.apply) === "1") {
+    if (warning) return res.status(400).json({ error: warning });
+    for (const [id, ch] of perItem) Object.assign(items.find((i) => i.id === id), ch);
+    const scan = scanCycleAnomalies(cid);
+    logAudit(actingUser().email, "cycle.import", { cycle_id: cid, items: perItem.size, changes: changes.length, file: file.originalname });
+    return res.json({ applied_items: perItem.size, applied_changes: changes.length, scan: { found: scan.open } });
+  }
+  res.json({
+    rows_in_file: rows.length,
+    matched,
+    unmatched_count: unmatched.length,
+    unmatched: unmatched.slice(0, 50),
+    not_in_file: items.length - seen.size,
+    items_changed: perItem.size,
+    changes,
+    changes_by_column: byCol,
+    errors,
+    warning
+  });
+});
+app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Pilih file / Choose a file" });
+  let rows;
+  try {
+    rows = await readTemplate(file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: `${e.message}` });
+  }
+  const allowed = step === "rfq" ? ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc"] : step === "feedback1" ? ["fb1Disc"] : [];
+  const items = cycleItemsMap.get(cycle.id) || [];
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const rejected = [], ready = [];
+  let unmatched = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code);
+    if (!it) {
+      unmatched++;
+      continue;
+    }
+    const chk = checkRow(r.cells, allowed);
+    if (chk.errors.length) {
+      rejected.push({ row: r.row, item_name: it.item_name, messages: chk.errors.map((m) => ({ id: m, en: m })) });
+      continue;
+    }
+    if (chk.changes.length) ready.push({ item: it, changes: chk.changes });
+  }
+  if (String(req.body?.apply) === "1") {
+    for (const { item, changes } of ready) for (const ch of changes) item[ch.field] = ch.value;
+    scanCycleAnomalies(cycle.id);
+    return res.json({ applied: ready.length });
+  }
+  res.json({ accepted: ready.length, rejected, read_errors: [], unmatched_count: unmatched, notes: [] });
+});
+app.get("/api/admin/master/items.xlsx", async (_req, res) => {
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Master items");
+  ws.addRow(["ERP Code", "Item Name", "Generic Name", "Group", "Brand", "Catalog No. (REF)", "UOM", "Tags", "Status", "Source"]);
+  ws.getRow(1).font = { bold: true };
+  for (const m of itemMasterMap.values()) ws.addRow([m.erp_code, m.item_name, m.generic_name || "", m.group_key || "", m.brand || "", m.catalog_no || "", m.uom || "", m.tags || "", m.status || "", m.source || ""]);
+  ws.columns.forEach((c, i) => {
+    c.width = [14, 42, 22, 22, 18, 18, 14, 16, 12, 14][i];
+  });
+  await sendWorkbook(res, wb, "master_items.xlsx");
+});
+app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req, res) => {
+  const c = cycleOf(Number(req.params.cid));
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const items = (cycleItemsMap.get(c.id) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c)).sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
+  const seen = /* @__PURE__ */ new Set();
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Confirmation");
+  ws.addRow([`Agreed prices: ${c.principal.name}`]);
+  ws.addRow([`Contract ${c.contract_start} to ${c.contract_end} \xB7 Binding ${c.binding}`]);
+  ws.addRow([]);
+  ws.addRow(["ERP Code", "Item Name", "Brand", "Catalog No. (REF)", "Qty/PO Unit", "HNA/PO Unit (excl. PPN)", "Agreed Disc%", "Agreed Price/pc (incl. PPN)"]);
+  ws.getRow(4).font = { bold: true };
+  for (const i of items) {
+    if (seen.has(i.erp_code) || i.on_disc == null) continue;
+    seen.add(i.erp_code);
+    ws.addRow([i.erp_code, i.item_name, i.brand, i.catalog_no, i.rfq_qty, i.rfq_hna, i.on_disc, i.on_unit_price]);
+  }
+  ws.columns.forEach((col, k) => {
+    col.width = [14, 42, 18, 18, 12, 22, 14, 24][k];
+  });
+  logAudit(actingUser().email, "cycle.package", { cycle_id: c.id, rows: seen.size });
+  await sendWorkbook(res, wb, `Confirmation_${c.principal.name}.xlsx`);
 });
 app.get("/api/p/documents", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
@@ -3000,38 +4473,49 @@ app.delete("/api/p/documents/:did", (req, res) => {
     missing_required: requiredKeys.filter((k) => !have.has(k))
   });
 });
-app.get("/api/p/template.xlsx", (_req, res) => {
-  const templatePath = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
-  if (fs.existsSync(templatePath)) {
-    res.download(templatePath, "Template_Nego.xlsx");
-  } else {
-    res.status(404).send("Template not found");
-  }
-});
-app.post("/api/p/template", (req, res) => {
+var VENDOR_BLOCKED = /benchmark|target|baseline|margin|kompetitor|competitor|pesaing|formularium|formulary|harga\s+(acuan|kami|siloam|mou|po)\b|(our|siloam'?s?)\s+(price|mou|po)\b|principal\s+lain|vendor\s+lain|other\s+(principals?|vendors?|suppliers?)|ambang|threshold|findings?|temuan|cost\s*impact|saran\s+counter|counter.?offer\s+suggest|system\s*prompt|abaikan\s+instruksi|ignore\s+(all\s+)?(previous\s+)?instructions/i;
+function vendorChatFallback(msg, id, ctx) {
+  const m = msg.toLowerCase();
+  const pick2 = (a, b) => id ? a : b;
+  if (/(diskon|disc)/.test(m)) return pick2("Isi diskon dalam persen, misalnya 15%, atau desimal 0 sampai 1 (0,15). Angka 15 tanpa tanda % tidak diterima karena dianggap 1500%.", "Enter the discount as a percentage, e.g. 15%, or a decimal between 0 and 1 (0.15). A bare 15 without % is rejected because it reads as 1500%.");
+  if (/(hna|harga)/.test(m)) return pick2("Isi HNA per kemasan sebelum PPN, lalu isi per kemasan (pcs). Jika HNA tampak berbeda jauh dari data kami, Anda akan diminta memeriksa kembali dan mengonfirmasi.", "Enter the HNA per pack before PPN, then the pieces per pack. If the HNA looks very different from our records you'll be asked to re-check and confirm.");
+  if (/(uom|kemasan|satuan|pack|isi)/.test(m)) return pick2("Isi per kemasan adalah jumlah pcs dalam satu kemasan yang Anda tawarkan. Jika berbeda dengan data kami, muncul peringatan agar Anda memeriksa ulang.", "Pieces per pack is how many pieces are in the pack you quote. If it differs from our records a warning asks you to re-check.");
+  if (/(kunci|lock|ubah|edit|revisi|change)/.test(m)) return ctx.locked ? pick2("Isian ini sudah terkirim dan dikunci. Hubungi tim pengadaan jika ada yang perlu diubah.", "This form was sent and is locked. Contact the procurement team if something must change.") : pick2("Isian bisa diubah sampai Anda menekan Kirim. Setelah terkirim, formulir dikunci.", "You can edit until you press Send. After that the form is locked.");
+  if (/(kirim|submit|send)/.test(m)) return ctx.left > 0 ? pick2(`Masih ada ${ctx.left} SKU yang perlu dilengkapi atau diperbaiki sebelum bisa dikirim.`, `${ctx.left} SKUs still need to be completed or fixed before you can send.`) : pick2("Jika semua SKU sudah lengkap, tekan Kirim Tanggapan, periksa ringkasan, lalu kirim.", "When every SKU is complete, press Send Response, review the summary, then send.");
+  if (/(brand|ref|katalog|catalog|status|aktif|active)/.test(m)) return pick2("Pilih status Aktif atau Tidak dijual lagi, lalu isi brand dan nomor katalog (REF). Semuanya ada di satu formulir RFQ.", "Choose Active or Discontinued, then fill in the brand and catalogue number (REF). It is all in the one RFQ form.");
+  return pick2("Saya bisa membantu mengisi RFQ: format diskon, HNA, isi per kemasan, status item, dan cara mengirim. Saya tidak dapat membahas data internal Siloam.", "I can help with the RFQ: discount format, HNA, pieces per pack, item status and how to send. I can't discuss Siloam's internal data.");
+}
+app.post("/api/p/chat", async (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  const message = String(req.body?.message || "").trim().slice(0, 500);
+  const id = req.body?.lang !== "en";
+  if (!message) return res.status(400).json({ error: "Message is required" });
+  const lock = portalLocked(cycle, step);
+  const left = (cycleItemsMap.get(cycle.id) || []).filter((it) => formatPrincipalItem(it, step).outstanding.length > 0).length;
+  if (VENDOR_BLOCKED.test(message)) {
+    return res.json({ reply: id ? "Maaf, informasi itu bersifat internal Siloam dan tidak dapat saya bagikan. Saya bisa membantu cara mengisi RFQ Anda." : "Sorry, that is internal Siloam information and I can't share it. I can help you fill in your RFQ.", refused: true });
   }
-  const { cycle } = resolved;
-  const items = cycleItemsMap.get(cycle.id) || [];
-  let applied = 0;
-  for (const it of items) {
-    if (it.mou_hna != null && it.item_status !== "Discontinue") {
-      it.rfq_qty = it.mou_qty || 1;
-      it.rfq_hna = it.mou_hna;
-      it.rfq_disc = it.mou_disc || 0;
-      applied++;
-    }
+  const ctx = { locked: lock.locked, step, left };
+  if (!process.env.GEMINI_API_KEY) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
+  try {
+    const history = Array.isArray(req.body?.history) ? req.body.history.slice(-4) : [];
+    const contents = history.filter((h) => h?.role && h?.text).map((h) => ({ role: h.role === "assistant" || h.role === "model" ? "model" : "user", parts: [{ text: String(h.text).slice(0, 500) }] }));
+    contents.push({ role: "user", parts: [{ text: message }] });
+    const systemInstruction = `You are the assistant inside the Siloam vendor portal. Reply in ${id ? "Indonesian" : "English"}, politely, in at most 3 short sentences.
+Help the vendor fill in the RFQ form: status (Active/Discontinued), brand, catalogue number (REF), HNA per pack before PPN, pieces per pack, discount as a percentage such as 15% or a decimal 0 to 1 (a bare 15 is invalid), the reason for a price increase, and how to send. Sending is always done by the vendor.
+You know nothing about Siloam's internal prices, contracts, benchmarks, margins, targets or other vendors. If asked, say it is internal and cannot be shared. Never guess such figures.
+Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)" : "open"}; ${left} SKUs still need attention.`;
+    const call = ai.models.generateContent({ model: "gemini-3.1-flash-lite", contents, config: { systemInstruction, temperature: 0.2, maxOutputTokens: 250 } });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4e3));
+    const r = await Promise.race([call, timeout]);
+    const reply = String(r.text || "").trim();
+    if (!reply || VENDOR_BLOCKED.test(reply)) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
+    res.json({ reply });
+  } catch (_e) {
+    res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
   }
-  res.json({
-    accepted: applied,
-    applied,
-    rejected: [],
-    read_errors: [],
-    unmatched_count: 0,
-    notes: []
-  });
 });
 var COMMON_PHARMA_TERMS = [
   "ceftriaxone",
@@ -3300,7 +4784,7 @@ async function generateWithSearchGrounding(prompt) {
           tools: [{ googleSearch: {} }]
         }
       });
-      const text = response.text || "";
+      const text2 = response.text || "";
       const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
       const groundingLinks = [];
       const seenUris = /* @__PURE__ */ new Set();
@@ -3312,7 +4796,7 @@ async function generateWithSearchGrounding(prompt) {
           groundingLinks.push({ uri, title });
         }
       }
-      return { text, groundingLinks, modelUsed: modelName };
+      return { text: text2, groundingLinks, modelUsed: modelName };
     } catch (err) {
       lastError = err;
       const msg = String(err?.message || err);
@@ -3324,10 +4808,10 @@ async function generateWithSearchGrounding(prompt) {
   }
   throw lastError || new Error("Gemini Search Grounding call failed");
 }
-function extractJsonBlock(text) {
-  if (!text) return null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1].trim() : text.trim();
+function extractJsonBlock(text2) {
+  if (!text2) return null;
+  const fenced = text2.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : text2.trim();
   const firstBrace = candidate.indexOf("{");
   const lastBrace = candidate.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -3404,7 +4888,7 @@ Return ONLY a JSON object in a \`\`\`json code block with the following fields:
 });
 app.post("/api/science/uom-standardize/apply", (req, res) => {
   const { cycle_id, item_id, erp_code, pcs_per_po_unit, standardized_po_unit_text, generic_name, group_key, clinical_unit } = req.body || {};
-  const userEmail = (currentSessionUser || usersList[0]).email;
+  const userEmail = actingUser().email;
   let updatedMaster = null;
   let updatedCycleItem = null;
   if (erp_code && itemMasterMap.has(String(erp_code))) {
@@ -3434,7 +4918,7 @@ app.post("/api/science/uom-standardize/apply", (req, res) => {
       if (clinical_unit) it.clinical_unit = String(clinical_unit).trim();
       scanCycleAnomalies(cid);
       const ppn = Number(settingsValues.ppn_rate) || 0.11;
-      updatedCycleItem = enrichCycleItem(it, ppn);
+      updatedCycleItem = enrichCycleItem(it, ppn, cycleOf(cid));
     }
   }
   logAudit(userEmail, "science.uom_apply", { erp_code, item_id, pcs_per_po_unit, generic_name, group_key });
@@ -3490,7 +4974,7 @@ app.post("/api/science/sku-benchmark", async (req, res) => {
       const found = items.find((x) => x.id === Number(item_id));
       if (found) {
         const ppn = Number(settingsValues.ppn_rate) || 0.11;
-        const en = enrichCycleItem(found, ppn);
+        const en = enrichCycleItem(found, ppn, cycleOf(Number(cycle_id)));
         targetName = found.item_name || targetName;
         targetBrand = found.brand || targetBrand;
         targetUomText = found.po_unit_text || targetUomText;
@@ -3669,7 +5153,7 @@ app.post("/api/science/sku-benchmark/apply", (req, res) => {
       m.status = "reviewed";
     }
   }
-  logAudit((currentSessionUser || usersList[0]).email, "benchmark.grounded_apply", {
+  logAudit(actingUser().email, "benchmark.grounded_apply", {
     cycle_id: cid,
     item_id: iid,
     erp_code: it.erp_code,
@@ -3677,7 +5161,7 @@ app.post("/api/science/sku-benchmark/apply", (req, res) => {
     source: newBm.source
   });
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  res.json({ ok: true, benchmark: newBm, item: enrichCycleItem(it, ppn) });
+  res.json({ ok: true, benchmark: newBm, item: enrichCycleItem(it, ppn, cycleOf(cid)) });
 });
 var PORT = Number(process.env.PORT) || 3e3;
 app.listen(PORT, "0.0.0.0", () => {

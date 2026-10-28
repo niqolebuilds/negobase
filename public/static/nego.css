@@ -204,3 +204,14 @@ table.items thead th.sortable.sorted .th-sort-icon { opacity: 1; color: var(--ac
 .col-filter-item:hover { background: var(--surface-breeze); }
 .col-filter-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--grid); }
 
+
+/* Category: Drugs, CnC or both */
+.progress-form fieldset.cat-field { border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px 10px; margin: 0; min-width: 0; }
+.progress-form fieldset.cat-field legend { font-weight: 600; padding: 0 6px; font-size: 14px; }
+.cat-field .check-row { display: flex; gap: 18px; flex-wrap: wrap; }
+.progress-form .cat-field label.check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
+.progress-form .cat-field label.check input { width: auto; margin: 0; }
+.cat-field .hint { display: block; margin-top: 4px; }
+
+.step-blocked { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.step-blocked button[disabled] { opacity: .5; cursor: not-allowed; }
