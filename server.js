@@ -1577,6 +1577,35 @@ function scanCycleAnomalies(cid) {
     low: findings.filter((f) => f.status === "open" && f.severity === "low").length
   };
 }
+function computeStepGate(c, items) {
+  const active = items.filter((i) => i.item_status !== "Discontinue");
+  const block = (missing, reason) => ({ ready: false, reason, missing });
+  const ok = { ready: true, reason: null, missing: 0 };
+  switch (c.current_step) {
+    case "prepare":
+      return items.length ? ok : block(0, "Build the item list first (Files & prepare). The principal can't start without items.");
+    case "rfq": {
+      const bad = items.filter((i) => checkItemIssues(i, "rfq").state === "missing").length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " is" : "s are"} not filled in yet (status, brand, REF, qty, HNA). Wait for the principal's RFQ or import the filled template.`) : ok;
+    }
+    case "counter_offer": {
+      const withRfq = active.filter((i) => i.rfq_hna != null && i.rfq_qty);
+      const set = withRfq.filter((i) => i.co_disc != null).length;
+      const pending = computeCoPlan(c.id).fresh.filter((x) => items.find((i) => i.id === x.item_id)?.co_disc == null).length;
+      return set === 0 && pending > 0 ? block(pending, `No counter offers yet: ${pending} suggested. Apply them (Negotiate tab) or set them in the Items tab.`) : ok;
+    }
+    case "feedback1": {
+      const bad = active.filter((i) => i.co_disc != null && i.fb1_disc == null).length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " has" : "s have"} no Feedback I from the principal yet.`) : ok;
+    }
+    case "online_nego": {
+      const bad = active.filter((i) => i.rfq_hna != null && i.rfq_qty && i.on_disc == null).length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " has" : "s have"} no agreed (Online Nego) discount yet.`) : ok;
+    }
+    default:
+      return ok;
+  }
+}
 function getCycleSummaryCard(c) {
   const items = cycleItemsMap.get(c.id) || [];
   const anoms = cycleAnomaliesMap.get(c.id) || [];
@@ -2130,7 +2159,11 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const cookieSid = parseCookies(req)["nego_session"];
+  const sid = cookieSid || bearerToken || headerToken;
   const uid = sid ? sessions.get(sid) : void 0;
   const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
   req.user = user;
@@ -2170,8 +2203,7 @@ app.get("/analytics", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "analytics.html"));
 });
 function setPrincipalCookie(req, res, token) {
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${14 * 24 * 3600}`);
 }
 function validLink(token) {
   if (!token) return null;
@@ -2235,20 +2267,25 @@ app.post("/api/auth/signin", (req, res) => {
     logAudit(found.email, "signin.failed", { reason: "bad password" });
     return res.status(401).json({ error: "Wrong password" });
   }
-  const old = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const old = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (old) sessions.delete(old);
   const sid = crypto.randomBytes(24).toString("base64url");
   sessions.set(sid, found.id);
   found.last_login = nowIso();
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${SESSION_HOURS * 3600}`);
   logAudit(found.email, "signin");
-  res.json({ user: found });
+  res.json({ user: found, token: sid });
 });
 app.post("/api/auth/signout", (req, res) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const sid = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (sid) sessions.delete(sid);
-  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0");
   res.json({ ok: true });
 });
 app.get("/api/auth/setup", (_req, res) => {
@@ -2762,6 +2799,7 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
     steps: STEPS,
     kpis: summarizeCycleItems(enriched),
     anomalies: counts,
+    gate: computeStepGate(c, rawItems),
     events: cycleEventsMap.get(cid) || [],
     period: (() => {
       const per = periodsList.find((x) => x.id === (c.period_id || 1));
@@ -3414,8 +3452,10 @@ app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   if (!c) return res.status(404).json({ error: "No such negotiation" });
   const items = cycleItemsMap.get(cid) || [];
   const nextStep = String(req.body?.step || "");
-  if (c.current_step === "prepare" && nextStep !== "prepare" && items.length === 0) {
-    return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+  const order = STEPS.map((x) => x.key);
+  if (order.indexOf(nextStep) > order.indexOf(c.current_step)) {
+    const gate = computeStepGate(c, items);
+    if (!gate.ready) return res.status(400).json({ error: gate.reason });
   }
   if (req.body?.step) {
     if (c.submitted_steps && c.submitted_steps[nextStep]) delete c.submitted_steps[nextStep];
@@ -3825,7 +3865,7 @@ app.post("/api/admin/master/items/bulk", (req, res) => {
 });
 function resolvePrincipalCycle(req) {
   const cookies = parseCookies(req);
-  const token = req.query.token || req.headers["x-principal-token"] || cookies["nego_principal"];
+  const token = req.query.token || req.query.t || req.headers["x-principal-token"] || cookies["nego_principal"];
   let foundCycle = null;
   let foundLink = null;
   const link = validLink(token);

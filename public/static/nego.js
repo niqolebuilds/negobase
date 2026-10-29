@@ -515,12 +515,13 @@ function renderHeaderParts() {
       el("span", { class: "n", text: i < at ? "✓" : String(i) }),
       el("span", { class: "t" }, el("b", { text: s.label }), el("small", { class: `who ${s.who}`, text: WHO[s.who] })))));
   const nextKey = keys[at + 1];
-  const noItems = !k.items;
+  const gate = ng.ov.gate || { ready: true, reason: null };
   const move = canWork() && c.status === "open" ? el("div", { class: "step-actions" },
     el("p", { class: "small", text: STEP_DESC[c.current_step] }),
-    nextKey ? (noItems
-      ? el("span", { class: "step-blocked" }, el("button", { type: "button", class: "act", disabled: "", text: `Move to ${steps[at + 1].label}` }),
-          el("span", { class: "small warn-text", text: "Build the item list first (Files & prepare). The principal can't start without items." }))
+    nextKey ? (!gate.ready
+      // Grey: this step's table isn't filled in yet. Blue (below): it can move on.
+      ? el("span", { class: "step-blocked" }, el("button", { type: "button", class: "act", disabled: "", "aria-disabled": "true", text: `Move to ${steps[at + 1].label}` }),
+          el("span", { class: "small warn-text", text: gate.reason }))
       : act(`Move to ${steps[at + 1].label}`, () => moveStep(nextKey))) : null,
     at > 0 ? act("Back a step", () => moveStep(keys[at - 1]), "ghost") : null) : el("p", { class: "small muted step-actions", text: STEP_DESC[c.current_step] });
   const sent = (c.submitted_steps || {})[c.current_step];

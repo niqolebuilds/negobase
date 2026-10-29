@@ -319,8 +319,7 @@ async function principalEnter(cidParam) {
     const openCycles = (d.principals || []).filter(p => p.cycle && p.cycle.status === "open").map(p => ({
       cycle_id: p.cycle.id,
       name: `${p.name} (${p.category || "Principal"})`,
-      step: p.cycle.step_label,
-      token: p.cycle.active_token || ""
+      step: p.cycle.step_label
     }));
 
     if (!openCycles.length) {
@@ -346,12 +345,6 @@ async function principalEnter(cidParam) {
       // The preview carries its own short-lived token, so it doesn't depend on cookies inside the frame.
       try { iframe.src = (await api(`/api/admin/nego/cycles/${cid}/preview-link`)).url; }
       catch (_) { iframe.src = `/p?cycle_id=${cid}`; }
-    const updateSrc = (cid) => {
-      const cyc = openCycles.find(c => c.cycle_id === cid);
-      const tkn = cyc?.token || "";
-      const query = tkn ? `cycle_id=${cid}&token=${encodeURIComponent(tkn)}` : `cycle_id=${cid}`;
-      iframe.src = `/p?${query}`;
-      openLink.href = `/p?${query}`;
     };
     updateSrc(activeCid);
 

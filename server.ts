@@ -1536,17 +1536,47 @@ function scanCycleAnomalies(cid: number) {
   };
 }
 
+// Can the negotiation move on from its current step? The button is blue only when the table for this step
+// is filled in as it should be; otherwise it is grey and says what is missing. The server enforces it too.
+function computeStepGate(c: any, items: any[]): { ready: boolean; reason: string | null; missing: number } {
+  const active = items.filter((i) => i.item_status !== "Discontinue");
+  const block = (missing: number, reason: string) => ({ ready: false, reason, missing });
+  const ok = { ready: true, reason: null, missing: 0 };
+  switch (c.current_step) {
+    case "prepare":
+      return items.length ? ok : block(0, "Build the item list first (Files & prepare). The principal can't start without items.");
+    case "rfq": {
+      // Identification and the RFQ price are both part of this step.
+      const bad = items.filter((i) => checkItemIssues(i, "rfq").state === "missing").length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " is" : "s are"} not filled in yet (status, brand, REF, qty, HNA). Wait for the principal's RFQ or import the filled template.`) : ok;
+    }
+    case "counter_offer": {
+      const withRfq = active.filter((i) => i.rfq_hna != null && i.rfq_qty);
+      const set = withRfq.filter((i) => i.co_disc != null).length;
+      const pending = computeCoPlan(c.id).fresh.filter((x) => items.find((i) => i.id === x.item_id)?.co_disc == null).length;
+      return set === 0 && pending > 0 ? block(pending, `No counter offers yet: ${pending} suggested. Apply them (Negotiate tab) or set them in the Items tab.`) : ok;
+    }
+    case "feedback1": {
+      const bad = active.filter((i) => i.co_disc != null && i.fb1_disc == null).length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " has" : "s have"} no Feedback I from the principal yet.`) : ok;
+    }
+    case "online_nego": {
+      const bad = active.filter((i) => i.rfq_hna != null && i.rfq_qty && i.on_disc == null).length;
+      return bad ? block(bad, `${bad} item${bad === 1 ? " has" : "s have"} no agreed (Online Nego) discount yet.`) : ok;
+    }
+    default:
+      return ok;
+  }
+}
+
 function getCycleSummaryCard(c: any) {
   const items = cycleItemsMap.get(c.id) || [];
   const anoms = cycleAnomaliesMap.get(c.id) || [];
-  const links = cycleLinksMap.get(c.id) || [];
-  const activeLink = links.find((l) => !l.revoked_at) || null;
   return {
     ...c,
     step_label: STEP_LABEL[c.current_step] || c.current_step,
     items: items.length,
     open_anomalies: anoms.filter((a) => a.status === "open").length,
-    active_token: activeLink?.token || null,
   };
 }
 
@@ -2181,13 +2211,7 @@ function validLink(token: string | undefined): any | null {
 }
 
 app.get("/p", (req: Request, res: Response) => {
-  let token = (req.query.token as string) || (req.query.t as string);
-  const cid = Number(req.query.cycle_id || req.query.cid);
-  if (!token && cid) {
-    const links = cycleLinksMap.get(cid) || [];
-    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
-    if (active) token = active.token;
-  }
+  const token = (req.query.token as string) || (req.query.t as string);
   if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
@@ -2831,6 +2855,7 @@ app.get("/api/nego/cycles/:cid", (req: Request, res: Response) => {
     steps: STEPS,
     kpis: summarizeCycleItems(enriched),
     anomalies: counts,
+    gate: computeStepGate(c, rawItems),
     events: cycleEventsMap.get(cid) || [],
     period: (() => {
       const per = periodsList.find((x) => x.id === (c.period_id || 1));
@@ -3488,9 +3513,11 @@ app.post("/api/admin/nego/cycles/:cid/step", (req: Request, res: Response) => {
   const items = cycleItemsMap.get(cid) || [];
   const nextStep = String(req.body?.step || "");
 
-  // Review 7: Stepper cannot advance to principal step if items list is 0
-  if (c.current_step === "prepare" && nextStep !== "prepare" && items.length === 0) {
-    return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+  // Moving forward needs the table for the current step to be filled in; moving back is always allowed.
+  const order = STEPS.map((x) => x.key);
+  if (order.indexOf(nextStep) > order.indexOf(c.current_step)) {
+    const gate = computeStepGate(c, items);
+    if (!gate.ready) return res.status(400).json({ error: gate.reason });
   }
 
   if (req.body?.step) {
@@ -3917,26 +3944,21 @@ app.post("/api/admin/master/items/bulk", (req: Request, res: Response) => {
 // --------------------------------------------------------------------------
 function resolvePrincipalCycle(req: Request): { cycle: any; link?: any; step: string } | null {
   const cookies = parseCookies(req);
-  let token = (req.query.token as string) || (req.query.t as string) || (req.headers["x-principal-token"] as string) || cookies["nego_principal"];
-  const cid = Number(req.query.cid || req.query.cycle_id);
-  if (!token && cid) {
-    const links = cycleLinksMap.get(cid) || [];
-    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
-    if (active) token = active.token;
-  }
-
+  const token = (req.query.token as string) || (req.query.t as string) || (req.headers["x-principal-token"] as string) || cookies["nego_principal"];
   let foundCycle: any = null;
   let foundLink: any = null;
 
   const link = validLink(token);
   if (link) {
+    // A vendor link is bound to its own cycle; a cycle id in the query is ignored.
     foundLink = link;
     foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-  } else if (cid) {
-    foundCycle = cyclesList.find((x) => x.id === cid);
-    if (foundCycle) {
-      const activeLinks = cycleLinksMap.get(cid) || [];
-      foundLink = activeLinks.find((l) => !l.revoked_at) || null;
+  } else {
+    // Without a valid link only signed-in staff may preview a portal, and they must name the cycle.
+    const user = (req as any).user;
+    const cid = Number(req.query.cid || req.query.cycle_id);
+    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
+      foundCycle = cyclesList.find((x) => x.id === cid);
     }
   }
 

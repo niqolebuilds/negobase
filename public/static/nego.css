@@ -214,4 +214,5 @@ table.items thead th.sortable.sorted .th-sort-icon { opacity: 1; color: var(--ac
 .cat-field .hint { display: block; margin-top: 4px; }
 
 .step-blocked { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.step-blocked button[disabled] { opacity: .5; cursor: not-allowed; }
+.step-blocked button[disabled] { background: #c8ccd8; color: #6b7080; border-color: #c8ccd8; box-shadow: none; opacity: 1; cursor: not-allowed; }
+.step-blocked .warn-text { max-width: 420px; }
