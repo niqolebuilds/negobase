@@ -65,22 +65,31 @@ async function adminPeriods(body) {
 
     // Upload Grid Box: 4 centralized upload cards
     clear(uploadGridBox);
-    const grid = el("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px;" });
+    const grid = el("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; margin-top: 14px; align-items: stretch;" });
     const UPLOAD_CARDS = [
       { kind: "po_export", label: "PO Export (raw PO lines)", desc: "Raw PO lines. Qty, value, average price and annualized figures per item are calculated by the app.", cols: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital", count: activePeriod.po_rows_count },
       { kind: "formulary", label: "Formulary", desc: "Formulary items with pack unit and (optional) formulary HNA.", cols: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA", count: activePeriod.formulary_count },
       { kind: "sku_master", label: "Master SKU", desc: "SKU master: names, generic, brand, REF and unit.", cols: "ERP Code, Item Name, Generic Name, Brand, Catalog No. (REF), UOM", count: activePeriod.sku_master_count },
-      { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Which principal supplies each SKU.", cols: "ERP Code, Principal", count: activePeriod.sku_tagging_count },
+      { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Which principal supplies each SKU. Maps ERP item codes to their principal supplier to drive negotiations.", cols: "ERP Code, Principal", count: activePeriod.sku_tagging_count },
     ];
 
     UPLOAD_CARDS.forEach((c) => {
       const finput = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only" });
       const info = (activePeriod.files || {})[c.kind];
-      const statusSpan = el("div", { class: "small", style: "margin-top: 6px;" },
+      const statusSpan = el("div", { class: "small", style: "min-height: 52px; display: flex; flex-direction: column; justify-content: flex-start; gap: 4px; margin-top: 6px;" },
         c.count ? el("span", { class: "zone good", text: `${num(c.count)} rows loaded ✓` }) : el("span", { class: "zone warn", text: "Not uploaded yet" }),
-        info ? el("div", { class: "muted", text: `${info.name} · ${new Date(info.at).toLocaleString("en-GB")} · ${info.by}` }) : null
+        info ? el("div", { class: "muted", style: "font-size: 11px; line-height: 1.35; color: #64748b; word-break: break-word;", text: `${info.name} · ${new Date(info.at).toLocaleString("en-GB")} · ${info.by}` }) : null
       );
       const zone = dropZone(finput, `Upload ${c.label}`);
+      zone.style.minHeight = "76px";
+      zone.style.display = "flex";
+      zone.style.flexDirection = "column";
+      zone.style.justifyContent = "center";
+      zone.style.alignItems = "center";
+      zone.style.textAlign = "center";
+      zone.style.padding = "16px 12px";
+      zone.style.boxSizing = "border-box";
+
       finput.addEventListener("change", async () => {
         if (!finput.files.length) return;
         const fd = new FormData();
@@ -96,12 +105,24 @@ async function adminPeriods(body) {
           statusSpan.className = "small error";
         }
       });
-      const cCard = el("div", { class: "card", style: "padding: 14px; border: 1px solid var(--border);" },
-        el("b", { text: c.label }),
-        el("p", { class: "small muted", style: "margin: 4px 0 6px 0;", text: c.desc }),
-        el("p", { class: "small muted", style: "margin: 0 0 10px 0;", text: `Columns: ${c.cols}` }),
+
+      const headerSection = el("div", { style: "flex: 1 1 auto; display: flex; flex-direction: column; min-height: 110px; margin-bottom: 24px;" },
+        el("b", { style: "font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 6px; line-height: 1.3;", text: c.label }),
+        el("p", { class: "small muted", style: "margin: 0 0 8px 0; line-height: 1.45; color: #475569;", text: c.desc }),
+        el("p", { class: "small muted", style: "margin: 0; line-height: 1.4; color: #64748b; font-size: 11px;", text: `Columns: ${c.cols}` })
+      );
+
+      const actionSection = el("div", { style: "margin-top: auto; display: flex; flex-direction: column; gap: 8px;" },
         zone,
         statusSpan
+      );
+
+      const cCard = el("div", {
+        class: "card period-hub-card",
+        style: "padding: 20px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; justify-content: space-between; height: 100%; box-sizing: border-box; background: var(--bg-card, #ffffff); box-shadow: 0 1px 3px rgba(0,0,0,0.03);"
+      },
+        headerSection,
+        actionSection
       );
       grid.append(cCard);
     });

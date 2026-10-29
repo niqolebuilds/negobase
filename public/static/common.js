@@ -44,13 +44,21 @@ const pct = (v, d = 1) => (v == null ? "—" : `${num(v * 100, d)}%`);
 // All requests carry the app header (the server refuses writes without it) and send the
 // user back to sign-in when the session has ended.
 async function request(path, { method = "GET", body, form } = {}) {
-  const opts = { method, headers: { "X-Requested-With": "nego" }, credentials: "same-origin" };
+  const token = localStorage.getItem("nego_token") || sessionStorage.getItem("nego_token");
+  const headers = { "X-Requested-With": "nego" };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+    headers["X-Nego-Token"] = token;
+  }
+  const opts = { method, headers, credentials: "same-origin" };
   if (form) opts.body = form;
   else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
   const r = await fetch(path, opts);
   let j = null;
   try { j = await r.json(); } catch (_) { j = {}; }
   if (r.status === 401 && !path.startsWith("/api/auth/")) {
+    localStorage.removeItem("nego_token");
+    sessionStorage.removeItem("nego_token");
     window.dispatchEvent(new CustomEvent("nego:signed-out"));
     if (location.pathname !== "/") location.href = "/#signin";
   }

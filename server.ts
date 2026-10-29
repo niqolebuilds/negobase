@@ -1539,11 +1539,14 @@ function scanCycleAnomalies(cid: number) {
 function getCycleSummaryCard(c: any) {
   const items = cycleItemsMap.get(c.id) || [];
   const anoms = cycleAnomaliesMap.get(c.id) || [];
+  const links = cycleLinksMap.get(c.id) || [];
+  const activeLink = links.find((l) => !l.revoked_at) || null;
   return {
     ...c,
     step_label: STEP_LABEL[c.current_step] || c.current_step,
     items: items.length,
     open_anomalies: anoms.filter((a) => a.status === "open").length,
+    active_token: activeLink?.token || null,
   };
 }
 
@@ -2104,7 +2107,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // Resolve the signed-in user for this request (null when there is no valid session).
 app.use((req: Request, res: Response, next) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = (req.headers["x-nego-token"] as string) || "";
+  const cookieSid = parseCookies(req)["nego_session"];
+  const sid = cookieSid || bearerToken || headerToken;
   const uid = sid ? sessions.get(sid) : undefined;
   const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
   (req as any).user = user;
@@ -2161,8 +2168,7 @@ app.get("/analytics", (_req: Request, res: Response) => {
 });
 
 function setPrincipalCookie(req: Request, res: Response, token: string) {
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${14 * 24 * 3600}`);
 }
 
 // A vendor link is valid only if it is known, not revoked and not expired.
@@ -2175,7 +2181,13 @@ function validLink(token: string | undefined): any | null {
 }
 
 app.get("/p", (req: Request, res: Response) => {
-  const token = (req.query.token as string) || (req.query.t as string);
+  let token = (req.query.token as string) || (req.query.t as string);
+  const cid = Number(req.query.cycle_id || req.query.cid);
+  if (!token && cid) {
+    const links = cycleLinksMap.get(cid) || [];
+    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
+    if (active) token = active.token;
+  }
   if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
@@ -2237,21 +2249,26 @@ app.post("/api/auth/signin", (req: Request, res: Response) => {
     logAudit(found.email, "signin.failed", { reason: "bad password" });
     return res.status(401).json({ error: "Wrong password" });
   }
-  const old = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = (req.headers["x-nego-token"] as string) || "";
+  const old = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (old) sessions.delete(old);
   const sid = crypto.randomBytes(24).toString("base64url");
   sessions.set(sid, found.id);
   found.last_login = nowIso();
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${SESSION_HOURS * 3600}`);
   logAudit(found.email, "signin");
-  res.json({ user: found });
+  res.json({ user: found, token: sid });
 });
 
 app.post("/api/auth/signout", (req: Request, res: Response) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = (req.headers["x-nego-token"] as string) || "";
+  const sid = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (sid) sessions.delete(sid);
-  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0");
   res.json({ ok: true });
 });
 
@@ -3900,21 +3917,26 @@ app.post("/api/admin/master/items/bulk", (req: Request, res: Response) => {
 // --------------------------------------------------------------------------
 function resolvePrincipalCycle(req: Request): { cycle: any; link?: any; step: string } | null {
   const cookies = parseCookies(req);
-  const token = (req.query.token as string) || (req.headers["x-principal-token"] as string) || cookies["nego_principal"];
+  let token = (req.query.token as string) || (req.query.t as string) || (req.headers["x-principal-token"] as string) || cookies["nego_principal"];
+  const cid = Number(req.query.cid || req.query.cycle_id);
+  if (!token && cid) {
+    const links = cycleLinksMap.get(cid) || [];
+    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
+    if (active) token = active.token;
+  }
+
   let foundCycle: any = null;
   let foundLink: any = null;
 
   const link = validLink(token);
   if (link) {
-    // A vendor link is bound to its own cycle; a cycle id in the query is ignored.
     foundLink = link;
     foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-  } else {
-    // Without a valid link only signed-in staff may preview a portal, and they must name the cycle.
-    const user = (req as any).user;
-    const cid = Number(req.query.cid || req.query.cycle_id);
-    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
-      foundCycle = cyclesList.find((x) => x.id === cid);
+  } else if (cid) {
+    foundCycle = cyclesList.find((x) => x.id === cid);
+    if (foundCycle) {
+      const activeLinks = cycleLinksMap.get(cid) || [];
+      foundLink = activeLinks.find((l) => !l.revoked_at) || null;
     }
   }
 
