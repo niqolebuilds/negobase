@@ -3420,6 +3420,8 @@ app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   if (req.body?.step) {
     if (c.submitted_steps && c.submitted_steps[nextStep]) delete c.submitted_steps[nextStep];
     c.current_step = nextStep;
+    const due = toIsoDate(req.body?.due);
+    c.step_due = ["rfq", "feedback1", "submission"].includes(nextStep) ? due : null;
     if (c.current_step === "closed") c.status = "closed";
   }
   res.json(getCycleSummaryCard(c));
@@ -3662,7 +3664,7 @@ app.get("/api/admin/nego/cycles/:cid/documents", (req, res) => {
   res.json({ documents: docs, required: ["nib", "npwp", "pakta_integritas"] });
 });
 app.get("/api/admin/nego/notify", (_req, res) => {
-  res.json({ configured: false, channel: "webhook" });
+  res.json({ enabled: false, configured: false, channel: "webhook", missing: ["NEGO_NOTIFY_WEBHOOK_URL", "NEGO_NOTIFY_SECRET"] });
 });
 app.get("/api/admin/nego/assist", (_req, res) => {
   res.json({ enabled: Boolean(settingsValues.llm_assist), available: false });

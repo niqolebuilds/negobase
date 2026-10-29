@@ -526,7 +526,7 @@ function renderHeaderParts() {
   const sent = (c.submitted_steps || {})[c.current_step];
   const turn = steps[at] && steps[at].who === "principal";
   const banner = sent ? el("p", { class: "sent-banner", text: `The principal sent ${steps[at].label} on ${new Date(sent.at).toLocaleString("en-GB")}. Review the findings, then move to the next step.` })
-    : turn ? el("p", { class: "turn-banner", text: `It's the principal's turn${c.step_due ? `, due ${fmtDate(c.step_due)}` : ""}. Their link and reminders go out automatically (see Activity → Messages); Principal link shares it by hand.` }) : null;
+    : turn ? el("p", { class: "turn-banner", text: `It's the principal's turn${c.step_due ? `, due ${fmtDate(c.step_due)}` : ""}. Send them their link with "Principal link" (automatic sending isn't set up).` }) : null;
   stepsBox.append(el("div", { class: "card stepcard" }, ol, banner, move));
 
   const latest = k.latest_impact;
@@ -623,7 +623,7 @@ async function moveStep(step) {
   const sendBox = el("input", { type: "checkbox", id: "send-link" });
   sendBox.checked = auto.enabled && !!to;
   if (!auto.enabled || !to) sendBox.disabled = true;
-  const why = !auto.enabled ? `Automatic sending is off: set ${auto.missing.join(" and ")} on the server (see deploy/POWER_AUTOMATE.md). You can still share the link by hand.`
+  const why = !auto.enabled ? `Automatic sending is off: set ${(auto.missing || ["the notification settings"]).join(" and ")} on the server (see deploy/POWER_AUTOMATE.md). You can still share the link by hand.`
     : !to ? "The principal has no email or WhatsApp number. Add one with Edit principal, or share the link by hand." : `To: ${to}`;
   const days = (await api("/api/settings").catch(() => ({ settings: [] }))).settings.find((x) => x.key === "step_days");
   const d0 = new Date(); d0.setDate(d0.getDate() + (days ? days.value : 7));

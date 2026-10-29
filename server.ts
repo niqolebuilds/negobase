@@ -3480,6 +3480,9 @@ app.post("/api/admin/nego/cycles/:cid/step", (req: Request, res: Response) => {
     // Moving (back) to a principal step reopens it for the principal.
     if (c.submitted_steps && c.submitted_steps[nextStep]) delete c.submitted_steps[nextStep];
     c.current_step = nextStep;
+    // The deadline the staff set for the principal's turn.
+    const due = toIsoDate(req.body?.due);
+    c.step_due = ["rfq", "feedback1", "submission"].includes(nextStep) ? due : null;
     if (c.current_step === "closed") c.status = "closed";
   }
   res.json(getCycleSummaryCard(c));
@@ -3712,8 +3715,10 @@ app.get("/api/admin/nego/cycles/:cid/documents", (req: Request, res: Response) =
   res.json({ documents: docs, required: ["nib", "npwp", "pakta_integritas"] });
 });
 
+// Automatic sending of the principal link (email / WhatsApp through a webhook) isn't part of this build,
+// so it is reported as off and the link is shared by hand.
 app.get("/api/admin/nego/notify", (_req: Request, res: Response) => {
-  res.json({ configured: false, channel: "webhook" });
+  res.json({ enabled: false, configured: false, channel: "webhook", missing: ["NEGO_NOTIFY_WEBHOOK_URL", "NEGO_NOTIFY_SECRET"] });
 });
 
 app.get("/api/admin/nego/assist", (_req: Request, res: Response) => {
