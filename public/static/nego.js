@@ -617,13 +617,25 @@ async function moveStep(step) {
   }
   // A principal step: offer to send their link automatically (email + WhatsApp via Power Automate).
   let auto = { enabled: false, missing: [] };
-  try { auto = await api("/api/admin/nego/notify"); } catch (_) { /* shown as off */ }
-  const p = ng.ov.cycle.principal;
+  try {
+    const notifyRes = await api("/api/admin/nego/notify");
+    if (notifyRes && typeof notifyRes === "object") {
+      auto = {
+        enabled: Boolean(notifyRes.enabled ?? notifyRes.configured),
+        missing: Array.isArray(notifyRes.missing) ? notifyRes.missing : [],
+        ...notifyRes,
+      };
+    }
+  } catch (_) { /* shown as off */ }
+  const p = ng.ov?.cycle?.principal || {};
   const to = [p.contact_email, p.contact_phone].filter(Boolean).join(" · ");
   const sendBox = el("input", { type: "checkbox", id: "send-link" });
   sendBox.checked = auto.enabled && !!to;
   if (!auto.enabled || !to) sendBox.disabled = true;
-  const why = !auto.enabled ? `Automatic sending is off: set ${auto.missing.join(" and ")} on the server (see deploy/POWER_AUTOMATE.md). You can still share the link by hand.`
+  const missingVars = (Array.isArray(auto.missing) && auto.missing.length > 0)
+    ? auto.missing.join(" and ")
+    : "POWER_AUTOMATE_EMAIL_URL";
+  const why = !auto.enabled ? `Automatic sending is off: set ${missingVars} on the server (see deploy/POWER_AUTOMATE.md). You can still share the link by hand.`
     : !to ? "The principal has no email or WhatsApp number. Add one with Edit principal, or share the link by hand." : `To: ${to}`;
   const days = (await api("/api/settings").catch(() => ({ settings: [] }))).settings.find((x) => x.key === "step_days");
   const d0 = new Date(); d0.setDate(d0.getDate() + (days ? days.value : 7));

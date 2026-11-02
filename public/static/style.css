@@ -93,21 +93,78 @@
   --banner-bg: #3a3c12; --banner-text: #eef08f;
 }
 
+html {
+  zoom: var(--app-zoom, 1);
+}
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--surface-0);
   color: var(--text-primary);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: var(--base-font-size, 13.5px)/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 .top {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px;
-  padding: 12px 24px; background: var(--surface-1); border-bottom: 1px solid var(--border);
+  padding: 10px 20px; background: var(--surface-1); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 5;
 }
 .brand { display: flex; align-items: baseline; gap: 12px; }
-h1 { font-size: 17px; margin: 0; }
+h1 { font-size: 16px; margin: 0; }
+
+/* Header Zoom & Size Controller */
+.zoom-ctrl {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  vertical-align: middle;
+  flex: none;
+}
+.zoom-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  min-height: 28px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.zoom-btn:hover {
+  background: var(--surface-breeze);
+  color: var(--accent);
+}
+.zoom-btn:active {
+  background: var(--border);
+}
+.zoom-val {
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 6px;
+  min-height: 28px;
+  cursor: pointer;
+  min-width: 44px;
+  text-align: center;
+  transition: background 0.15s, color 0.15s;
+}
+.zoom-val:hover {
+  background: var(--surface-breeze);
+  color: var(--accent);
+}
 .asof { color: var(--text-muted); font-size: 12px; }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .tabs a {
@@ -142,10 +199,10 @@ select, input:not([type=checkbox]):not([type=radio]):not([type=file]) {
   border-radius: 6px; padding: 6px 8px; min-width: 200px; max-width: 100%;
 }
 button { font: inherit; cursor: pointer; }
-button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 7px 14px; font-weight: 600; }
-button.link { background: none; border: 0; color: var(--link); padding: 7px 4px; }
+button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 6px 13px; font-size: 13px; font-weight: 600; }
+button.link { background: none; border: 0; color: var(--link); padding: 5px 4px; font-size: 13px; }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.seg button { background: var(--surface-1); color: var(--text-secondary); border: 0; padding: 6px 12px; }
+.seg button { background: var(--surface-1); color: var(--text-secondary); border: 0; padding: 5px 10px; font-size: 12.5px; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button.on { background: var(--surface-0); color: var(--text-primary); font-weight: 600; }
 

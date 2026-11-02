@@ -184,27 +184,88 @@ function showInvalid() {
   put(clear($("app")), el("section", { class: "pcard center" }, el("h1", { text: t("invalid_t") }), el("p", { text: t("invalid_p") })));
 }
 
+// ---------- zoom controller ----------
+function initZoomController() {
+  const ZOOM_LEVELS = [0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25, 1.35];
+  const STORAGE_KEY = "nego_web_zoom_level";
+  const dec = $("zoom-dec");
+  const val = $("zoom-val");
+  const inc = $("zoom-inc");
+  if (!dec || !inc) return;
+
+  let current = 1.0;
+  try {
+    const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+    if (!isNaN(saved) && saved >= 0.7 && saved <= 1.4) current = saved;
+  } catch (_) {}
+
+  const apply = (scale, save = true) => {
+    scale = Math.min(1.4, Math.max(0.7, Math.round(scale * 100) / 100));
+    const pct = Math.round(scale * 100);
+    document.documentElement.style.zoom = String(scale);
+    document.documentElement.style.setProperty("--app-zoom", String(scale));
+    document.documentElement.style.setProperty("--base-font-size", `${14 * scale}px`);
+    if (val) {
+      val.textContent = `${pct}%`;
+      val.title = scale === 1.0 
+        ? (P.lang === "id" ? "Ukuran standar (100%). Klik untuk reset" : "Default size (100%). Click to reset")
+        : (P.lang === "id" ? `Ukuran: ${pct}%. Klik untuk reset 100%` : `Size: ${pct}%. Click to reset 100%`);
+    }
+    if (save) {
+      try { localStorage.setItem(STORAGE_KEY, String(scale)); } catch (_) {}
+    }
+  };
+
+  apply(current, false);
+
+  dec.addEventListener("click", () => {
+    const next = [...ZOOM_LEVELS].reverse().find((z) => z < current - 0.01) || ZOOM_LEVELS[0];
+    current = next;
+    apply(current);
+  });
+
+  inc.addEventListener("click", () => {
+    const next = ZOOM_LEVELS.find((z) => z > current + 0.01) || ZOOM_LEVELS[ZOOM_LEVELS.length - 1];
+    current = next;
+    apply(current);
+  });
+
+  if (val) {
+    val.addEventListener("click", () => {
+      current = 1.0;
+      apply(current);
+    });
+  }
+
+  window.addEventListener("storage", (e) => {
+    if (e.key === STORAGE_KEY && e.newValue) {
+      const v = parseFloat(e.newValue);
+      if (!isNaN(v) && v >= 0.7 && v <= 1.4) {
+        current = v;
+        apply(current, false);
+      }
+    }
+  });
+}
+
 async function boot() {
   document.querySelectorAll(".lang button").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
   $("helpbtn").addEventListener("click", openHelp);
+  initZoomController();
   setLang(P.lang, false);
   aiInit();
   if (new URLSearchParams(location.search).get("invalid")) { showInvalid(); return; }
-  try { P.me = await call("/api/p/me"); } catch (e) {
-    // A 401 already showed "link not valid". Anything else (network, server error) is shown, not hidden behind "Loading".
-    if (e.status !== 401 && !/401/.test(e.message)) {
-      put(clear($("app")), el("section", { class: "pcard center" }, el("h1", { text: t("err") }), el("p", { text: e.message || "" }),
-        el("button", { type: "button", class: "pbtn primary", text: t("retry"), onclick: () => location.reload() })));
-    }
   try {
     P.me = await call("/api/p/me");
   } catch (err) {
-    console.error("Principal portal me error:", err);
-    put(clear($("app")), el("section", { class: "pcard center" },
-      el("h2", { text: P.lang === "id" ? "Gagal memuat portal principal" : "Failed to load principal portal" }),
-      el("p", { class: "muted", text: err.message || "Tautan atau sesi tidak valid" }),
-      el("button", { class: "pbtn primary", onclick: () => location.reload(), text: P.lang === "id" ? "Coba lagi" : "Retry" })
-    ));
+    if (err.status !== 401 && !/401/.test(err.message)) {
+      console.error("Principal portal me error:", err);
+      put(clear($("app")), el("section", { class: "pcard center" },
+        el("h2", { text: P.lang === "id" ? "Gagal memuat portal principal" : "Failed to load principal portal" }),
+        el("p", { class: "muted", text: err.message || (P.lang === "id" ? "Tautan atau sesi tidak valid" : "Invalid link or session") }),
+        el("button", { type: "button", class: "pbtn primary", onclick: () => location.reload(), text: t("retry") })
+      ));
+    }
     return;
   }
   $("who").textContent = P.me.principal.name;

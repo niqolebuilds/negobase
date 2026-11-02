@@ -290,3 +290,72 @@ function alertItem(a) {
     el("span", { class: "d", text: a.detail }));
 }
 
+// ---------- Header Web Zoom Controller ----------
+function initCommonZoomController() {
+  const ZOOM_LEVELS = [0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25, 1.35];
+  const STORAGE_KEY = "nego_web_zoom_level";
+  const dec = document.getElementById("zoom-dec");
+  const val = document.getElementById("zoom-val");
+  const inc = document.getElementById("zoom-inc");
+  if (!dec || !inc) return;
+
+  let current = 1.0;
+  try {
+    const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+    if (!isNaN(saved) && saved >= 0.7 && saved <= 1.4) current = saved;
+  } catch (_) {}
+
+  const apply = (scale, save = true) => {
+    scale = Math.min(1.4, Math.max(0.7, Math.round(scale * 100) / 100));
+    const pct = Math.round(scale * 100);
+    document.documentElement.style.zoom = String(scale);
+    document.documentElement.style.setProperty("--app-zoom", String(scale));
+    document.documentElement.style.setProperty("--base-font-size", `${13.5 * scale}px`);
+    if (val) {
+      val.textContent = `${pct}%`;
+      val.title = scale === 1.0 ? "Reset to default size (100%)" : `Current size: ${pct}%. Click to reset to 100%`;
+    }
+    if (save) {
+      try { localStorage.setItem(STORAGE_KEY, String(scale)); } catch (_) {}
+    }
+  };
+
+  apply(current, false);
+
+  dec.addEventListener("click", () => {
+    const next = [...ZOOM_LEVELS].reverse().find((z) => z < current - 0.01) || ZOOM_LEVELS[0];
+    current = next;
+    apply(current);
+  });
+
+  inc.addEventListener("click", () => {
+    const next = ZOOM_LEVELS.find((z) => z > current + 0.01) || ZOOM_LEVELS[ZOOM_LEVELS.length - 1];
+    current = next;
+    apply(current);
+  });
+
+  if (val) {
+    val.addEventListener("click", () => {
+      current = 1.0;
+      apply(current);
+    });
+  }
+
+  window.addEventListener("storage", (e) => {
+    if (e.key === STORAGE_KEY && e.newValue) {
+      const v = parseFloat(e.newValue);
+      if (!isNaN(v) && v >= 0.7 && v <= 1.4) {
+        current = v;
+        apply(current, false);
+      }
+    }
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initCommonZoomController);
+} else {
+  initCommonZoomController();
+}
+
+

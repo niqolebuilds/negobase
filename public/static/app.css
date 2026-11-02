@@ -6,17 +6,17 @@
 /* header */
 .bar { position: sticky; top: 0; z-index: 20; }
 .apptabs { display: flex; gap: 4px; margin-right: auto; margin-left: 12px; }
-.apptabs a { padding: 7px 14px; border-radius: 999px; color: var(--text-secondary); text-decoration: none; font-weight: 600; }
+.apptabs a { padding: 5px 12px; border-radius: 999px; color: var(--text-secondary); text-decoration: none; font-weight: 600; font-size: 13px; }
 .apptabs a:hover { background: var(--surface-breeze); }
 .apptabs a.on { background: var(--accent); color: var(--accent-ink); }
 .who { display: flex; align-items: center; gap: 8px; }
 .avatar-sm, .owner {
-  display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; flex: none;
-  background: var(--accent-soft); color: var(--text-primary); font-size: 11.5px; font-weight: 700;
+  display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; flex: none;
+  background: var(--accent-soft); color: var(--text-primary); font-size: 11px; font-weight: 700;
 }
-.who-text { display: flex; flex-direction: column; line-height: 1.15; font-size: 13px; }
-.who-text .role { color: var(--text-muted); font-size: 11.5px; }
-.signout { background: none; border: 1px solid var(--border); color: var(--text-secondary); border-radius: 999px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+.who-text { display: flex; flex-direction: column; line-height: 1.15; font-size: 12.5px; }
+.who-text .role { color: var(--text-muted); font-size: 11px; }
+.signout { background: none; border: 1px solid var(--border); color: var(--text-secondary); border-radius: 999px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px; }
 .signout:hover { border-color: var(--accent); color: var(--link); }
 @media (max-width: 760px) {
   .bar { gap: 8px; }

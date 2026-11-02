@@ -3499,6 +3499,9 @@ app.post("/api/admin/nego/cycles/:cid/step", (req: Request, res: Response) => {
     c.current_step = nextStep;
     if (c.current_step === "closed") c.status = "closed";
   }
+  if (req.body?.due) {
+    c.step_due = String(req.body.due);
+  }
   res.json(getCycleSummaryCard(c));
 });
 
@@ -3730,7 +3733,18 @@ app.get("/api/admin/nego/cycles/:cid/documents", (req: Request, res: Response) =
 });
 
 app.get("/api/admin/nego/notify", (_req: Request, res: Response) => {
-  res.json({ configured: false, channel: "webhook" });
+  const emailUrl = process.env.POWER_AUTOMATE_EMAIL_URL || "";
+  const waUrl = process.env.POWER_AUTOMATE_WA_URL || "";
+  const missing: string[] = [];
+  if (!emailUrl) missing.push("POWER_AUTOMATE_EMAIL_URL");
+  if (!waUrl) missing.push("POWER_AUTOMATE_WA_URL");
+  const enabled = Boolean(emailUrl || waUrl);
+  res.json({
+    enabled,
+    configured: enabled,
+    channel: "webhook",
+    missing,
+  });
 });
 
 app.get("/api/admin/nego/assist", (_req: Request, res: Response) => {
