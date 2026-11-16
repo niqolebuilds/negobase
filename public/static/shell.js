@@ -259,9 +259,13 @@ function initFloatingAiAssistant() {
     body.append(typing);
     body.scrollTop = body.scrollHeight;
 
-    const { page } = currentRoute();
+    const { page, rest } = currentRoute();
     const role = page === "admin" ? "admin" : page === "principal" ? "principal" : "negotiator";
-    const cycleId = ng.cid || null;
+    let cycleId = (typeof ng !== "undefined" && ng && ng.cid) || (rest && rest[0] && !isNaN(Number(rest[0])) ? Number(rest[0]) : null);
+    if (!cycleId && page === "principal") {
+      const s = document.getElementById("principal-cycle-select");
+      if (s && s.value) cycleId = Number(s.value);
+    }
 
     try {
       shell.aiHistory.push({ role: "user", text });

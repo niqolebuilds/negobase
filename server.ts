@@ -2360,6 +2360,79 @@ app.post("/api/chat", (req: Request, res: Response) => {
   res.json(parseChatText(text));
 });
 
+function buildAiChatContext(role: string, cycleId: number | null): string {
+  let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+  if (!cyc && cyclesList.length > 0) {
+    cyc = cyclesList.find((c) => c.status === "open") || cyclesList[0];
+  }
+
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+
+  if (!cyc) {
+    return "Belum ada siklus negosiasi yang dimuat. Total negosiasi di sistem: " + cyclesList.length;
+  }
+
+  const rawItems = cycleItemsMap.get(cyc.id) || [];
+  const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
+  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn, cyc));
+  const summary = summarizeCycleItems(enriched);
+
+  const fmtMoney = (v: number | null | undefined) => (v == null ? "—" : rp(v));
+  const fmtDisc = (v: number | null | undefined) => (v == null ? "—" : `${(v * 100).toFixed(1)}%`);
+
+  const stageSummaryText = summary.stages.map((st: any) => {
+    const impText = st.impact != null ? (st.impact < 0 ? `Saving ${rp(Math.abs(st.impact))}` : `Cost Increase ${rp(st.impact)}`) : "Belum dihitung";
+    const mForm = st.margin_impact_vs_formulary != null ? rp(st.margin_impact_vs_formulary) : "—";
+    const mPo = st.margin_impact_vs_po != null ? rp(st.margin_impact_vs_po) : "—";
+    return `  • ${st.label}: ${st.items} SKU diisi, Cost Impact=${impText}, Margin vs Formulary=${mForm}, Margin vs PO=${mPo}`;
+  }).join("\n");
+
+  const topItemsText = enriched.slice(0, 15).map((it) => {
+    const bp = it.base_price ? rp(it.base_price) : "—";
+    const poPrice = it.po_avg_price_per_piece ? rp(it.po_avg_price_per_piece) : "—";
+    const rfqP = it.rfq_unit_price ? rp(it.rfq_unit_price) : "—";
+    const coP = it.co_unit_price ? rp(it.co_unit_price) : "—";
+    const onP = it.on_unit_price ? rp(it.on_unit_price) : "—";
+    const mRfq = it.rfq_margin_per_piece != null ? rp(it.rfq_margin_per_piece) : "—";
+    const mCo = it.co_margin_per_piece != null ? rp(it.co_margin_per_piece) : "—";
+    return `- [${it.erp_code}] ${it.item_name} (${it.brand || it.item_brand || "No Brand"} | Status: ${it.item_status || "Active"} | REF: ${it.catalog_no || "—"}):
+    MOU: ${fmtMoney(it.mou_unit_price)} (Disc: ${fmtDisc(it.mou_disc)}) | PO History: ${poPrice} (Qty 12m: ${it.po_annual_qty || 0})
+    Base Price (HNA/pc × 1,11): ${bp}
+    Penawaran RFQ: ${rfqP} (Disc: ${fmtDisc(it.rfq_disc)}) -> Margin/pc: ${mRfq}
+    Counter Offer: ${coP} (Disc: ${fmtDisc(it.co_disc)}) -> Margin/pc: ${mCo}
+    Online Nego: ${onP} (Disc: ${fmtDisc(it.on_disc)})`;
+  }).join("\n");
+
+  const anomText = anoms.length === 0
+    ? "Tidak ada anomali/temuan terbuka pada siklus ini (Semua bersih)."
+    : anoms.map((a) => `• [${a.severity.toUpperCase()}] ${a.title}: ${a.detail} (Item: ${a.sku_code || a.erp_code || "Umum"})`).join("\n");
+
+  return `
+INFORMASI SIKLUS NEGOSIASI AKTIF:
+• Principal: ${cyc.principal.name} (Kategori: ${cyc.principal.category || "Consumables"})
+• Distributor: ${cyc.principal.distributor || "Direct"}
+• Binding Kontrak: ${cyc.binding} (${cyc.binding === "nett_to_disc" ? "Nett to Discount: Diskon dikunci, kenaikan HNA tidak boleh menaikkan harga beli RS" : "Nett to Nett: Harga nett dikunci"})
+• Tahap Saat Ini: ${cyc.current_step.toUpperCase()}
+• Batas Waktu / Due: ${cyc.step_due || "Belum ditentukan"}
+• Metrik Finansial Keseluruhan:
+  - Total SKU: ${summary.items} (Aktif: ${summary.active}, Discontinue: ${summary.discontinued})
+  - Total Belanja PO 12 Bulan (Baseline Spend): ${rp(summary.po_value_12m)}
+  - Progres Pengisian RFQ: ${summary.rfq_filled} dari ${summary.active} SKU aktif (${(summary.rfq_active_pct * 100).toFixed(0)}%)
+  - Total Margin Impact vs Formularium: ${summary.margin_vs_formulary != null ? rp(summary.margin_vs_formulary) : "Rp 0"}
+  - Total Margin Impact vs PO: ${summary.margin_vs_po != null ? rp(summary.margin_vs_po) : "Rp 0"}
+  - Status Cost Impact Terkini: ${summary.latest_impact != null ? (summary.latest_impact < 0 ? `SAVING ${rp(Math.abs(summary.latest_impact))}` : `KENAIKAN BIAYA ${rp(summary.latest_impact)}`) : "Belum ada impact"}
+
+• Ringkasan per Tahap Negosiasi:
+${stageSummaryText}
+
+• Temuan & Anomali Terbuka (${anoms.length} temuan):
+${anomText}
+
+• Sampel Data SKU (${enriched.length} total SKU, 15 ditampilkan):
+${topItemsText}
+`;
+}
+
 app.post("/api/ai/chat", async (req: Request, res: Response) => {
   const message = String(req.body?.message || "").trim();
   // Role comes from the session, never from the request body.
@@ -2371,85 +2444,61 @@ app.post("/api/ai/chat", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Message is required" });
   }
 
-  const normMsg = message.toLowerCase().trim();
-
-  // Instant answers for frequent prompt chips & questions to guarantee <10ms response time
-  if (
-    normMsg.includes("margin") ||
-    normMsg.includes("hitung margin") ||
-    normMsg.includes("bisa hitung margin")
-  ) {
-    let cycleMarginDetail = "";
-    if (cycleId) {
-      const cyc = cyclesList.find((c) => c.id === cycleId);
-      if (cyc) {
-        const items = cycleItemsMap.get(cyc.id) || [];
-        const ppn = Number(settingsValues.ppn_rate) || 0.11;
-        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
-        const summary = summarizeCycleItems(enriched);
-        cycleMarginDetail = `\n\n📌 **Data Negosiasi Saat Ini (${cyc.principal.name})**:\n• Total Margin Impact vs Formularium: **${rp(summary.margin_impact_vs_formulary)}**\n• Total Margin Impact vs PO: **${rp(summary.margin_impact_vs_po)}**\n(Buka drawer item untuk melihat tabel Margin/pc di setiap step negosiasi).`;
-      }
-    }
-    return res.json({
-      reply: `Fitur **Calculated Margin per Item** sudah aktif di sistem! Berikut cara perhitungannya:\n\n1. **Base Price**: \`HNA/pc × 1,11\` (HNA/pc + PPN 11%)\n2. **Margin/pc per Step**: \`Base Price - Harga/pc\` (tersedia per step: RFQ, Counter Offer, Feedback I, Online Nego)\n3. **Margin Impact**: \`Σ (Qty Annualized × Margin/pc Step) - Margin Saat Ini\`, disajikan dalam 2 versi:\n   • **Versi vs Formularium**: Membandingkan margin step terhadap harga acuan Formularium/MOU\n   • **Versi vs PO**: Membandingkan margin step terhadap harga PO riil 12 bulan terakhir${cycleMarginDetail}`,
-      role,
-    });
-  }
-
-  if (
-    normMsg.includes("cost impact") ||
-    normMsg.includes("rumus cost") ||
-    (normMsg.includes("rumus") && normMsg.includes("impact") && !normMsg.includes("margin"))
-  ) {
-    return res.json({
-      reply: "Rumus **Cost Impact** penawaran:\n\n**Cost Impact = Σ ((Harga Satuan Step × Qty Tahunan) - Total Nilai PO Tahunan)**\n\n• **Nilai Negatif (-)**: **Saving** (Penghematan belanja bagi RS).\n• **Nilai Positif (+)**: **Cost Increase** (Beban biaya naik yang perlu dinegosiasikan ulang).\n\n💡 *Tips*: Pastikan satuan kemasan (UOM/pack size) telah cocok dengan Master Formulary sebelum menyetujui harga satuan.",
-      role,
-    });
-  }
-
-  if (normMsg === "halo" || normMsg === "hai" || normMsg === "hi" || normMsg === "hello") {
-    return res.json({
-      reply: "Halo! Saya asisten **AI Negotiation Intelligence**. Ada yang bisa saya bantu terkait analisa harga, verifikasi penawaran, aturan diskon, atau persiapan counter offer?",
-      role,
-    });
-  }
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const ppnPct = (ppn * 100).toFixed(0);
 
   let systemInstruction = "";
   if (role === "principal") {
-    systemInstruction = `You are the Vendor & Principal Assistant for healthcare procurement negotiations.
-Communicate professionally and politely in Indonesian.
-Assist vendors and principals with: RFQ submissions (Qty, HNA, Discount, Catalog Number, Brand), packaging conversions, UOM, and portal guidance.
-CRITICAL CONFIDENTIALITY: NEVER disclose hospital internal benchmarks, PO history, or target prices.
-Keep answers concise, direct, and under 3 sentences in Indonesian.`;
-  } else if (role === "admin") {
-    systemInstruction = `You are the Procurement Admin Intelligence Assistant for hospital procurement.
-Assist Procurement Administrators with: Period data management, PO exports, Master Formulary, Master SKU, and engine financial settings.
-Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+    systemInstruction = `Anda adalah Asisten Resmi Vendor & Principal Portal Negosiasi RS Siloam.
+Tugas Anda adalah memandu principal/vendor mengisi data penawaran (RFQ), menanggapi counter offer, atau mengunggah dokumen legalitas.
+Jawab dengan ramah, sopan, ringkas, dan jelas dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya berbahasa Inggris).
+
+Petunjuk Teknis untuk Principal:
+1. Format Diskon: Harus diisi dalam bentuk persen (misal 15%) atau desimal antara 0 sampai 1 (contoh: 0.15). Angka 15 tanpa persen akan ditolak sistem karena terbaca 1500%.
+2. HNA (Harga Netto Apotek): Diisi sebelum PPN per kemasan.
+3. Isi Kemasan (Pieces/Pack): Jumlah satuan terkecil per kemasan yang ditawarkan.
+4. Status Item: Pilih "Aktif" atau "Tidak dijual lagi" (Discontinue).
+5. Kenaikan Harga: Jika harga naik dibanding kontrak sebelumnya, wajib memilih alasan dan memberikan keterangan singkat.
+6. Counter Offer: Pada tahap Feedback I, principal dapat menekan "Terima" atau mengisi diskon alternatif beserta alasannya.
+7. Pengiriman (Send Response): Pengisian tersimpan otomatis. Tekan "Kirim Tanggapan" bila seluruh SKU sudah selesai diisi.
+
+KEBIJAKAN KERAHASIAAN KETAT:
+Anda TIDAK BOLEH membagikan data internal Rumah Sakit, harga beli rumah sakit lain, harga acuan internal, target harga maksimal rumah sakit, atau data vendor pesaing. Jika ditanya mengenai hal tersebut, tolak dengan sopan bahwa data tersebut bersifat rahasia internal Siloam.`;
   } else {
-    let cycleInfo = "";
-    if (cycleId) {
-      const cyc = cyclesList.find((c) => c.id === cycleId);
-      if (cyc) {
-        const items = cycleItemsMap.get(cyc.id) || [];
-        const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
-        const ppn = Number(settingsValues.ppn_rate) || 0.11;
-        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
-        const summary = summarizeCycleItems(enriched);
-        cycleInfo = `Current Cycle: ${cyc.principal.name} (${cyc.principal.category}), Step: ${cyc.current_step}, Active Items: ${summary.active}, Open Findings: ${anoms.length}, Total Spend: ${rp(summary.po_value_12m)}`;
-      }
-    }
-    systemInstruction = `You are the Negotiation Intelligence Strategist for hospital procurement negotiators.
-Help negotiators analyze price increases, counter-offers, binding contracts, and cost impact.
-Cost impact formula: SUM per item ((harga step x qty) - nilai PO). Negative is savings!
-Margin formula: (HNA x 1.11) - step price.
-Keep answers crisp, direct, and under 3-4 sentences in Indonesian. Use bold formatting (**bold**) for key numbers or terms.
-${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
+    systemInstruction = `Anda adalah AI Strategist Negosiasi Pengadaan Siloam (Negotiation Intelligence).
+Tugas Anda adalah membantu tim pengadaan / negosiator rumah sakit menganalisa harga penawaran principal, menghitung margin per item, mengevaluasi cost impact, mengidentifikasi temuan anomali, dan menyusun strategi counter offer secara tajam, akurat, dan berbasis data riil.
+
+RUMUS RESMI PENGADAAN SILOAM:
+1. PPN: ${ppnPct}% (faktor pengali 1,${ppnPct}).
+2. Base Price (Harga Acuan Dasar): HNA/pc × 1,11 (HNA per pcs sebelum diskon + PPN).
+3. Harga Satuan (Harga/pc): (HNA / Pack_Size) × (1 - Diskon) × 1,11.
+4. Margin/pc per Step: Base Price - Harga Satuan pada step tersebut.
+   Dihitung untuk setiap step: RFQ, Counter Offer, Feedback I, dan Online Nego.
+5. Margin Impact: Σ [ Qty Tahunan × Margin/pc Step ] - Margin Saat Ini.
+   Disajikan dalam 2 versi:
+   • Versi vs Formularium: Membandingkan margin penawaran step terhadap margin Formularium/MOU.
+   • Versi vs PO: Membandingkan margin penawaran step terhadap margin harga PO riil 12 bulan terakhir.
+6. Cost Impact: Σ [ (Harga Satuan Step × Qty Tahunan) - Total Belanja PO 12 Bulan ].
+   • Nilai Negatif (-) = SAVING (Penghematan belanja bagi RS).
+   • Nilai Positif (+) = COST INCREASE (Kenaikan beban biaya belanja RS yang harus dinegosiasikan ulang).
+7. Binding Kontrak:
+   • "nett_to_disc": Persentase diskon dikunci sebagai batas bawah. Kenaikan list price (HNA) tidak boleh mengikis margin atau menaikkan harga beli bersih RS.
+   • "nett_to_nett": Harga bersih per pcs dikunci mutlak.
+8. 7 Tahap Negosiasi: Prepare -> RFQ -> Counter Offer -> Feedback I -> Online Nego -> Submission -> Closed.
+
+${buildAiChatContext(role, cycleId)}
+
+PEDOMAN MENJAWAB:
+- Jawab secara akurat, lugas, profesional, dan solutif dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya menggunakan Bahasa Inggris).
+- Jika pengguna menanyakan angka atau data spesifik (misal margin, harga item, atau temuan), SEBUTKAN data angka riil dari konteks di atas secara langsung dan transparan.
+- Gunakan format Markdown yang menarik: gunakan **tebal** untuk angka dan poin penting, bullet points untuk rincian, dan tabel/blok kode bila menjelaskan rumus atau perbandingan.
+- Berikan analisis strategis: tunjukkan di mana letak inefisiensi, SKU mana yang memberikan peluang saving terbesar, dan taktik counter offer yang paling efektif.`;
   }
 
   try {
     const contents: any[] = [];
-    for (const h of history.slice(-4)) {
-      if (h.role && h.text) {
+    for (const h of history.slice(-6)) {
+      if (h?.role && h?.text) {
         contents.push({
           role: h.role === "assistant" || h.role === "model" ? "model" : "user",
           parts: [{ text: String(h.text) }],
@@ -2462,17 +2511,15 @@ ${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
     });
 
     const callPromise = ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
+      model: "gemini-3.8-flash",
       contents,
       config: {
         systemInstruction,
-        temperature: 0.3,
-        maxOutputTokens: 300,
       },
     });
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("AI response timeout")), 3500)
+      setTimeout(() => reject(new Error("AI response timeout")), 25000)
     );
 
     const response: any = await Promise.race([callPromise, timeoutPromise]);
@@ -2482,9 +2529,18 @@ ${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
     console.error("Gemini AI chat notice:", err?.message || err);
     let fallbackText = "";
     if (role === "principal") {
-      fallbackText = "Untuk penawaran RFQ, pastikan format diskon dimasukkan antara 0 dan 1 (contoh: 0.15 untuk 15%) dan cek kesesuaian kemasan (UOM) dengan katalog resmi.";
+      fallbackText = "Untuk penawaran RFQ, pastikan format diskon dimasukkan dengan tanda persen (misal 15%) atau desimal 0 sampai 1 (contoh: 0.15) dan cek kesesuaian kemasan (pcs per pack) dengan katalog resmi.";
     } else {
-      fallbackText = `Terkait pertanyaan Anda: Silakan tinjau rincian item aktif, perbandingan harga step terhadap nilai PO tahunan, dan selesaikan temuan (findings) pada tabel negosiasi di atas.`;
+      let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+      if (!cyc && cyclesList.length > 0) cyc = cyclesList.find((c) => c.status === "open") || cyclesList[0];
+      if (cyc) {
+        const rawItems = cycleItemsMap.get(cyc.id) || [];
+        const summary = summarizeCycleItems(rawItems.map((i) => enrichCycleItem(i, ppn, cyc)));
+        const imp = summary.latest_impact != null ? (summary.latest_impact < 0 ? `Saving ${rp(Math.abs(summary.latest_impact))}` : `Kenaikan Biaya ${rp(summary.latest_impact)}`) : "Belum dihitung";
+        fallbackText = `**Data Negosiasi ${cyc.principal.name} (${cyc.current_step.toUpperCase()})**:\n• Total Spend PO 12m: **${rp(summary.po_value_12m)}**\n• Status Cost Impact: **${imp}**\n• Margin vs Formularium: **${summary.margin_vs_formulary != null ? rp(summary.margin_vs_formulary) : "—"}**\n• Margin vs PO: **${summary.margin_vs_po != null ? rp(summary.margin_vs_po) : "—"}**\n\n*Rumus*: Margin/pc = (HNA/pc × 1,11) - Harga Satuan. Cost Impact = Σ (Harga Satuan × Qty) - Nilai PO.`;
+      } else {
+        fallbackText = "Sistem Negotiation Intelligence siap membantu menganalisa harga, margin, dan cost impact per item.";
+      }
     }
     res.json({ reply: fallbackText, role, fallback: true });
   }
@@ -4707,8 +4763,8 @@ app.post("/api/p/chat", async (req: Request, res: Response) => {
 Help the vendor fill in the RFQ form: status (Active/Discontinued), brand, catalogue number (REF), HNA per pack before PPN, pieces per pack, discount as a percentage such as 15% or a decimal 0 to 1 (a bare 15 is invalid), the reason for a price increase, and how to send. Sending is always done by the vendor.
 You know nothing about Siloam's internal prices, contracts, benchmarks, margins, targets or other vendors. If asked, say it is internal and cannot be shared. Never guess such figures.
 Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)" : "open"}; ${left} SKUs still need attention.`;
-    const call = ai.models.generateContent({ model: "gemini-3.1-flash-lite", contents, config: { systemInstruction, temperature: 0.2, maxOutputTokens: 250 } });
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000));
+    const call = ai.models.generateContent({ model: "gemini-3.8-flash", contents, config: { systemInstruction, maxOutputTokens: 400 } });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000));
     const r: any = await Promise.race([call, timeout]);
     const reply = String(r.text || "").trim();
     // Belt and braces: an answer that touches an internal topic is replaced.
