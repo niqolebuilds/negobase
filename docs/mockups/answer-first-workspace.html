@@ -1,0 +1,417 @@
+<title>Answer-first Workspace</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<style>
+/* Layout: one decision per screen. Header, stage strip, answer card (what to do + what it's worth),
+   then the two things that gate it (fix first, suggested counters). Item sheet drops to a tab. */
+:root{
+  --bg:#fffafd; --surface:#ffffff; --breeze:#eef2fe; --border:#e3e3f0; --grid:#eceaf3;
+  --ink:#0f1233; --ink-2:#474a6b; --ink-3:#6f7290;
+  --accent:#0c21a4; --accent-ink:#ffffff; --accent-soft:#b8c7f8;
+  --good:#2f6b1f; --good-bg:#e7f2df;
+  --warn:#9a4f00; --warn-bg:#fff0dc;
+  --crit:#c62b2b; --crit-bg:#fde8e8;
+  --banner-bg:#d4d67d; --banner-ink:#2d2f05;
+  --shadow:0 1px 2px rgba(15,18,51,.06),0 4px 14px rgba(15,18,51,.05);
+  --font:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0b0e2b; --surface:#141a44; --breeze:#1b2257; --border:#2a3270; --grid:#222a63;
+  --ink:#f1f2ff; --ink-2:#c3c7ee; --ink-3:#8f94c4;
+  --accent:#8ea4ff; --accent-ink:#0b0e2b; --accent-soft:#2b3680;
+  --good:#9fd884; --good-bg:#1f3a1a; --warn:#ffb866; --warn-bg:#40290c; --crit:#ff8b8b; --crit-bg:#451a1d;
+  --banner-bg:#3b3d12; --banner-ink:#eef0a8; --shadow:none; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b0e2b; --surface:#141a44; --breeze:#1b2257; --border:#2a3270; --grid:#222a63;
+  --ink:#f1f2ff; --ink-2:#c3c7ee; --ink-3:#8f94c4;
+  --accent:#8ea4ff; --accent-ink:#0b0e2b; --accent-soft:#2b3680;
+  --good:#9fd884; --good-bg:#1f3a1a; --warn:#ffb866; --warn-bg:#40290c; --crit:#ff8b8b; --crit-bg:#451a1d;
+  --banner-bg:#3b3d12; --banner-ink:#eef0a8; --shadow:none; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14px;line-height:1.5;margin:0}
+button{font:inherit;cursor:pointer}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.num{font-variant-numeric:tabular-nums}
+
+/* top bar (kept from the live app) */
+.bar{display:flex;align-items:center;gap:20px;padding:12px max(16px,env(safe-area-inset-left,0px));background:var(--surface);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px}
+.logo i{width:24px;height:24px;border-radius:7px;background:var(--accent);display:block}
+.nav{display:flex;gap:6px;flex:1;flex-wrap:wrap}
+.nav a{padding:6px 14px;border-radius:99px;text-decoration:none;color:var(--ink-2);font-weight:500}
+.nav a.on{background:var(--accent);color:var(--accent-ink)}
+.who{color:var(--ink-2);font-size:13px;text-align:right}
+.who b{display:block;color:var(--ink)}
+.banner{background:var(--banner-bg);color:var(--banner-ink);padding:6px max(16px,env(safe-area-inset-left,0px));font-size:12px;font-weight:500}
+
+.wrap{max-width:1180px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left,0px)) 64px;padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:18px}
+
+/* title */
+.crumb{font-size:13px;color:var(--ink-3)}
+.crumb a{font-weight:600;text-decoration:none}
+h1{font-size:26px;line-height:1.2;margin:2px 0 2px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+.meta{color:var(--ink-3);font-size:13px}
+.titlerow{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.linkrow{display:flex;gap:8px;flex-wrap:wrap}
+.ghost{background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:99px;padding:6px 14px;font-weight:600;font-size:13px}
+.ghost:hover{background:var(--breeze)}
+
+/* stage strip */
+.stages{display:flex;gap:0;overflow-x:auto;padding:2px 0;scrollbar-width:thin}
+.stage{flex:1 0 128px;display:flex;flex-direction:column;gap:2px;padding:8px 12px 8px 0;position:relative;color:var(--ink-3);font-size:12px;min-width:128px}
+.stage::before{content:"";display:block;height:4px;border-radius:2px;background:var(--grid);margin-bottom:6px;margin-right:8px}
+.stage.done::before{background:var(--accent-soft)}
+.stage.now::before{background:var(--accent)}
+.stage b{font-size:13px;color:var(--ink-2);font-weight:600}
+.stage.now b{color:var(--ink)}
+.stage .who2{font-size:11px;letter-spacing:.03em}
+.stage.now .tag{display:inline-block;background:var(--accent);color:var(--accent-ink);border-radius:99px;font-size:10px;font-weight:700;padding:1px 8px;margin-top:2px;letter-spacing:.03em;width:max-content}
+
+/* answer card */
+.answer{background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);overflow:hidden}
+.a-main{padding:24px 28px;display:grid;gap:18px;align-content:start}
+.eyebrow{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--accent)}
+.headline{font-size:22px;line-height:1.3;font-weight:600;margin:0;text-wrap:balance;max-width:34ch}
+.headline em{font-style:normal;color:var(--good);font-weight:800}
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.fig{display:grid;gap:2px;padding:12px 14px;border-radius:12px;background:var(--breeze)}
+.fig span{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:4px}
+.fig strong{font-size:24px;font-weight:800;letter-spacing:-.01em}
+.fig small{font-size:11.5px;color:var(--ink-3)}
+.fig.bad strong{color:var(--crit)}
+.fig.good strong{color:var(--good)}
+.q{width:16px;height:16px;border-radius:50%;border:1px solid var(--ink-3);background:none;color:var(--ink-3);font-size:10px;line-height:1;padding:0;font-weight:700;position:relative}
+.fig .q .tip{display:none}
+.fig .q:hover .tip,.fig .q:focus .tip{display:block}
+.tip{position:absolute;left:-8px;top:22px;z-index:5;width:250px;background:var(--ink);color:var(--bg);border-radius:10px;padding:10px 12px;font-size:12px;font-weight:400;text-align:left;line-height:1.45;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.gap{display:grid;gap:6px}
+.gapbar{height:10px;border-radius:99px;background:var(--crit-bg);overflow:hidden;display:flex}
+.gapbar i{display:block;height:100%;background:var(--good);transition:width .5s ease}
+.gaplbl{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2)}
+.a-side{padding:24px 24px;background:var(--breeze);display:grid;gap:14px;align-content:start;border-left:1px solid var(--border)}
+.cta{border:0;background:var(--accent);color:var(--accent-ink);border-radius:12px;padding:13px 16px;font-weight:700;font-size:15px;width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.cta:hover{filter:brightness(1.1)}
+.cta[disabled]{opacity:.55;cursor:default}
+.cta small{font-weight:500;opacity:.85;font-size:12px}
+.alt{background:var(--surface);border:1px solid var(--border);color:var(--ink);border-radius:12px;padding:10px 14px;font-weight:600;width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center}
+.alt:hover{border-color:var(--accent)}
+.badge{background:var(--warn-bg);color:var(--warn);border-radius:99px;font-size:12px;font-weight:700;padding:1px 9px}
+.badge.ok{background:var(--good-bg);color:var(--good)}
+.ready{list-style:none;margin:0;padding:0;display:grid;gap:8px;font-size:13px}
+.ready li{display:grid;grid-template-columns:20px 1fr;gap:8px;color:var(--ink-2)}
+.ready .ic{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:800}
+.ic.ok{background:var(--good-bg);color:var(--good)}
+.ic.w{background:var(--warn-bg);color:var(--warn)}
+.ready b{color:var(--ink)}
+.confirm{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 14px;font-size:13px;gap:10px}
+.confirm.show{display:grid}
+.confirm .row{display:flex;gap:8px;flex-wrap:wrap}
+.confirm button{border-radius:99px;padding:6px 14px;font-weight:700;border:1px solid var(--accent)}
+.confirm .go{background:var(--accent);color:var(--accent-ink)}
+.confirm .no{background:transparent;color:var(--accent)}
+
+/* two-up */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px;align-items:start}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;min-width:0}
+.card h2{margin:0;font-size:16px;font-weight:700}
+.card .sub{color:var(--ink-3);font-size:12.5px;margin:2px 0 12px}
+.chead{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+
+/* findings */
+.find{display:grid;gap:6px;padding:12px 0;border-top:1px solid var(--grid)}
+.find:first-of-type{border-top:0}
+.ftop{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sev{font-size:10.5px;font-weight:800;letter-spacing:.05em;border-radius:6px;padding:2px 7px}
+.sev.high{background:var(--crit-bg);color:var(--crit)}
+.sev.med{background:var(--warn-bg);color:var(--warn)}
+.sev.data{background:var(--breeze);color:var(--accent)}
+.ftitle{font-weight:600}
+.fitem{font-size:12px;color:var(--ink-3)}
+.fbody{color:var(--ink-2);font-size:13px}
+.facts{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink-3)}
+.facts b{color:var(--ink);font-weight:600}
+.fact-bad b{color:var(--crit)}
+.fbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px}
+.fix{background:var(--accent);color:var(--accent-ink);border:0;border-radius:99px;padding:6px 14px;font-weight:700;font-size:12.5px}
+.link{background:none;border:0;color:var(--accent);font-weight:600;font-size:12.5px;padding:6px 4px}
+.find.done{opacity:.55}
+.find.done .fix{background:var(--good-bg);color:var(--good);pointer-events:none}
+.more{width:100%;margin-top:6px;background:var(--breeze);border:0;border-radius:10px;color:var(--accent);font-weight:600;padding:9px}
+
+/* table */
+.tablewrap{overflow-x:auto;margin:0 -4px;padding:0 4px}
+table{width:100%;border-collapse:collapse;font-size:13px;min-width:520px}
+th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);font-weight:700;text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:10px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
+th.r,td.r{text-align:right;white-space:nowrap}
+.item b{display:block;font-weight:600}
+.item small{color:var(--ink-3);font-size:11.5px}
+.pill{display:inline-block;border-radius:99px;padding:1px 9px;font-size:12px;font-weight:700}
+.pill.up{background:var(--crit-bg);color:var(--crit)}
+.pill.flat{background:var(--breeze);color:var(--ink-2)}
+.pill.cut{background:var(--good-bg);color:var(--good)}
+.tfoot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px;font-size:12.5px;color:var(--ink-3)}
+
+/* detail tabs, demoted */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.tabs button{background:none;border:0;border-bottom:3px solid transparent;padding:10px 14px;color:var(--ink-2);font-weight:600}
+.tabs button[aria-selected="true"]{color:var(--accent);border-color:var(--accent)}
+.tabs small{color:var(--ink-3);font-weight:500;margin-left:4px}
+.tabpanel{padding:14px 2px;color:var(--ink-3);font-size:13px}
+
+/* what changed */
+.notes{background:var(--surface);border:1px dashed var(--accent-soft);border-radius:14px;padding:16px 20px}
+.notes h3{margin:0 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.notes ul{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;font-size:13px;color:var(--ink-2)}
+.notes b{color:var(--ink)}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:99px;font-weight:600;font-size:13px;opacity:0;pointer-events:none;transition:opacity .25s;z-index:20}
+.toast.show{opacity:1}
+
+@media (max-width:900px){
+  .answer,.two{grid-template-columns:minmax(0,1fr)}
+  .a-side{border-left:0;border-top:1px solid var(--border)}
+  .notes ul{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:560px){
+  .trio{grid-template-columns:minmax(0,1fr)}
+  .a-main{padding:20px 18px}
+  .headline{font-size:19px}
+  .who{display:none}
+}
+@media (prefers-reduced-motion:reduce){.gapbar i,.toast{transition:none}}
+</style>
+
+<header class="bar">
+  <div class="logo"><i></i>Negotiation Intelligence</div>
+  <nav class="nav" aria-label="Sections">
+    <a href="#">Master data</a><a href="#" class="on">Negotiation</a><a href="#">Principal</a>
+  </nav>
+  <div class="who"><b>Heldra Procurement</b>Negotiator</div>
+</header>
+<div class="banner">Mockup on sample data. Prices are synthetic. The proposed layout is not wired to the engine.</div>
+
+<main class="wrap">
+
+  <div>
+    <div class="crumb"><a href="#">&larr; All principals</a> &nbsp;·&nbsp; Distributor: PT Distribusi Medis Utama</div>
+    <div class="titlerow">
+      <div>
+        <h1>PT Medika Nusantara</h1>
+        <div class="meta">Contract 1 Feb 2027 – 31 Jan 2030 · Binding nett price · PPN 11% · MOU ends in 74 days</div>
+      </div>
+      <div class="linkrow">
+        <button class="ghost" type="button">Download Template_Nego</button>
+        <button class="ghost" type="button">Principal link</button>
+        <button class="ghost" type="button">Preview portal &#8599;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- stage strip: where am I, who holds the ball -->
+  <div class="stages" role="list" aria-label="Negotiation steps">
+    <div class="stage done" role="listitem"><b>1 Prepare</b><span class="who2">Siloam · done</span></div>
+    <div class="stage done" role="listitem"><b>2 RFQ &amp; identification</b><span class="who2">Principal · done</span></div>
+    <div class="stage now" role="listitem"><b>3 Counter offer</b><span class="who2">Siloam · your turn</span><span class="tag">YOU ARE HERE</span></div>
+    <div class="stage" role="listitem"><b>4 Feedback I</b><span class="who2">Principal</span></div>
+    <div class="stage" role="listitem"><b>5 Online nego</b><span class="who2">Siloam</span></div>
+    <div class="stage" role="listitem"><b>6 Submission</b><span class="who2">Principal</span></div>
+  </div>
+
+  <!-- THE ANSWER -->
+  <section class="answer" aria-labelledby="ans-h">
+    <div class="a-main">
+      <div class="eyebrow">Step 3 · Counter offer</div>
+      <h2 class="headline" id="ans-h">
+        Their offer raises your yearly cost by Rp 203,0 Mn. Countering <span id="n-sugg">87 items</span> brings it down by <em id="save">Rp 92,3 Mn</em>.
+      </h2>
+
+      <div class="trio">
+        <div class="fig bad">
+          <span>Their offer (RFQ)
+            <button class="q" type="button" aria-label="What is this?">?<span class="tip">Extra yearly spend if you accept every RFQ price, compared with what you actually paid on POs in the last 12 months (annualized). Source: latest RFQ vs PO export.</span></button>
+          </span>
+          <strong class="num">+Rp 203,0 Mn</strong>
+          <small>a year · PO spend Rp 1,52 Bn</small>
+        </div>
+        <div class="fig good">
+          <span>After your counter
+            <button class="q" type="button" aria-label="What is this?">?<span class="tip">Their RFQ impact minus the saving from the counter discounts the engine suggests. Counters never go below the lowest of MOU price, your last PO price and a confirmed market benchmark.</span></button>
+          </span>
+          <strong class="num" id="after">+Rp 203,0 Mn</strong>
+          <small id="after-sub">no counter applied yet</small>
+        </div>
+        <div class="fig">
+          <span>Margin vs Formularium
+            <button class="q" type="button" aria-label="What is this?">?<span class="tip">Change in Siloam's margin per year against the Formularium (HNA) price. Negative means margin shrinks.</span></button>
+          </span>
+          <strong class="num" style="color:var(--warn)">-Rp 5,9 Mn</strong>
+          <small>a year · vs PO: -Rp 26,0 Mn</small>
+        </div>
+      </div>
+
+      <div class="gap">
+        <div class="gapbar" aria-hidden="true"><i id="bar" style="width:0%"></i></div>
+        <div class="gaplbl"><span id="gaplbl">0% of the increase removed</span><span>Goal: hold at the MOU price</span></div>
+      </div>
+    </div>
+
+    <aside class="a-side" aria-label="Next action">
+      <div>
+        <button class="cta" type="button" id="apply">
+          <span>Apply 87 suggestions<br><small>Saves Rp 92,3 Mn vs their offer</small></span><span aria-hidden="true">&rarr;</span>
+        </button>
+        <div class="confirm" id="confirm" role="alert">
+          <div><b>Apply 87 counter discounts?</b> You can still edit each item. 92 items stay as quoted.</div>
+          <div class="row"><button class="go" type="button" id="yes">Apply</button><button class="no" type="button" id="no">Cancel</button></div>
+        </div>
+      </div>
+      <a class="alt" href="#fix" style="text-decoration:none"><span>Review findings first</span><span class="badge" id="fcount">9 open</span></a>
+      <ul class="ready" aria-label="Readiness">
+        <li><span class="ic ok">&#10003;</span><span><b>RFQ received</b> for 179 of 179 active items.</span></li>
+        <li><span class="ic w">!</span><span><b id="fready">9 findings open.</b> Fix the high ones before you counter.</span></li>
+        <li><span class="ic w">!</span><span><b>No confirmed market benchmark.</b> 172 matches wait for your review, so counters rely on MOU and PO prices only.</span></li>
+      </ul>
+      <div class="meta">Then: send to principal &rarr; <b style="color:var(--ink)">Feedback I</b></div>
+    </aside>
+  </section>
+
+  <!-- Gating detail -->
+  <div class="two">
+    <section class="card" id="fix" aria-labelledby="f-h">
+      <div class="chead"><h2 id="f-h">Fix first</h2><span class="meta" id="fsub">Showing 4 of 9, biggest risk first</span></div>
+      <p class="sub">Problems that would make a counter wrong or embarrassing.</p>
+
+      <div class="find" data-f>
+        <div class="ftop"><span class="sev data">CHECK DATA</span><span class="ftitle">RFQ price is negative</span></div>
+        <div class="fitem">MED000228 · Blood Lancet 30G Medisafe V3</div>
+        <div class="fbody">The tool read a price of Rp -5.346 and shows it as 1966.7% cheaper than the MOU. This looks like a typo in the RFQ file.</div>
+        <div class="fbtns"><button class="fix" type="button">Mark as fixed</button><button class="link" type="button">Open item</button><button class="link" type="button">Keep as is…</button></div>
+      </div>
+
+      <div class="find" data-f>
+        <div class="ftop"><span class="sev high">HIGH</span><span class="ftitle">Price up more than 50%</span></div>
+        <div class="fitem">MED000261 · Three Way Stopcock Extension 10cm Medisafe</div>
+        <div class="facts fact-bad"><span>Their price <b>Rp 55.500</b></span><span>Your last PO <b>Rp 5.475</b></span><span>Change <b>+913,7%</b></span></div>
+        <div class="fbtns"><button class="fix" type="button">Counter 90,1% discount</button><button class="link" type="button">Open item</button><button class="link" type="button">Keep as is…</button></div>
+      </div>
+
+      <div class="find" data-f>
+        <div class="ftop"><span class="sev high">HIGH</span><span class="ftitle">Price up more than 50%</span></div>
+        <div class="fitem">MED000202 · Infusion Set Anak OneMed V3</div>
+        <div class="facts fact-bad"><span>Their price <b>Rp 55.500</b></span><span>Your last PO <b>Rp 14.627</b></span><span>Change <b>+279,4%</b></span></div>
+        <div class="fbtns"><button class="fix" type="button">Counter 73,6% discount</button><button class="link" type="button">Open item</button><button class="link" type="button">Keep as is…</button></div>
+      </div>
+
+      <div class="find" data-f>
+        <div class="ftop"><span class="sev med">MEDIUM</span><span class="ftitle">Pack size does not match</span></div>
+        <div class="fitem">MED000105 · Spuit 3cc Medisafe</div>
+        <div class="fbody">RFQ says 100 per pack. Your PO is BOX of 200. Check the unit conversion.</div>
+        <div class="fbtns"><button class="fix" type="button">Match PO pack (200)</button><button class="link" type="button">Open item</button><button class="link" type="button">Keep as is…</button></div>
+      </div>
+
+      <button class="more" type="button" id="morebtn">Show the other 5 findings</button>
+    </section>
+
+    <section class="card" aria-labelledby="c-h">
+      <div class="chead"><h2 id="c-h">Where to counter</h2><span class="meta">Sorted by yearly impact</span></div>
+      <p class="sub">The engine holds each price at the lowest of MOU, your last PO and a confirmed benchmark.</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Item</th><th class="r">MOU /pc</th><th class="r">RFQ /pc</th><th class="r">Change</th><th class="r">Impact / yr</th><th>Suggested</th></tr></thead>
+          <tbody>
+            <tr><td class="item"><b>Alcohol Swab Standard Medisafe</b><small>MED000138 · Medisafe</small></td><td class="r num">302</td><td class="r num">302</td><td class="r"><span class="pill flat">0,0%</span></td><td class="r num">+Rp 92,2 K</td><td>Keep, same as MOU</td></tr>
+            <tr><td class="item"><b>Alcohol Swab Standard BD V3</b><small>MED000224 · BD</small></td><td class="r num">168</td><td class="r num">178</td><td class="r"><span class="pill up">+6,2%</span></td><td class="r num">+Rp 25,1 K</td><td><b>Counter to 168</b></td></tr>
+            <tr><td class="item"><b>Alcohol Swab Standard Medisafe V2</b><small>MED000181 · Medisafe</small></td><td class="r num">226</td><td class="r num">226</td><td class="r"><span class="pill flat">0,0%</span></td><td class="r num">+Rp 45,4 K</td><td>Keep, same as MOU</td></tr>
+            <tr><td class="item"><b>Blood Lancet 28G B. Braun</b><small>MED000141 · B. Braun</small></td><td class="r num">332</td><td class="r num">332</td><td class="r"><span class="pill flat">0,0%</span></td><td class="r num">+Rp 37,7 K</td><td>Keep, same as MOU</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tfoot"><span><b style="color:var(--ink)">87</b> to counter · <b style="color:var(--ink)">92</b> keep as quoted · 39 up, 3 down of 179</span><a href="#items">Open full item sheet (180) &rarr;</a></div>
+    </section>
+  </div>
+
+  <!-- Detail, demoted -->
+  <section aria-label="Details" id="items">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" type="button" data-t="0">Items<small>180</small></button>
+      <button role="tab" aria-selected="false" type="button" data-t="1">Brands<small>6</small></button>
+      <button role="tab" aria-selected="false" type="button" data-t="2">Market benchmarks<small>172 to review</small></button>
+      <button role="tab" aria-selected="false" type="button" data-t="3">Files &amp; prepare</button>
+      <button role="tab" aria-selected="false" type="button" data-t="4">Activity</button>
+    </div>
+    <div class="tabpanel" id="panel">The full item sheet lives here: search, filters and sort as today. Its 25+ columns are grouped behind a column picker (Current MOU, RFQ, Counter, Feedback I, Online Nego, Margins) so each stage shows only its own columns.</div>
+  </section>
+
+  <aside class="notes" aria-label="What changed">
+    <h3>What changed from the current screen</h3>
+    <ul>
+      <li><b>One sentence answers "what now".</b> The current screen opens with six unlabeled tiles.</li>
+      <li><b>One primary action.</b> "Apply 87 suggestions" moves up from the middle of the Negotiate tab.</li>
+      <li><b>Every number has a "?"</b> that says where it comes from and how it is worked out.</li>
+      <li><b>Findings come before the counter</b>, with the fix on the card. A negative RFQ price is caught before it is sent.</li>
+      <li><b>Readiness is explicit.</b> It lists what is missing, such as the 172 benchmark matches.</li>
+      <li><b>Detail is demoted.</b> The item sheet, brands and files sit in tabs below the decision.</li>
+    </ul>
+  </aside>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var toast=function(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show')},2400)};
+
+  // apply suggestions (inline confirm, no browser dialog)
+  var applied=false;
+  $('apply').addEventListener('click',function(){ if(applied) return; $('confirm').classList.add('show'); });
+  $('no').addEventListener('click',function(){ $('confirm').classList.remove('show'); });
+  $('yes').addEventListener('click',function(){
+    applied=true;
+    $('confirm').classList.remove('show');
+    $('after').textContent='+Rp 110,7 Mn';
+    $('after-sub').textContent='a year · 87 counters set';
+    $('bar').style.width='45%';
+    $('gaplbl').textContent='45% of the increase removed';
+    var b=$('apply'); b.disabled=true; b.innerHTML='<span>87 counters set<br><small>Next: send to principal (Feedback I)</small></span><span aria-hidden="true">&#10003;</span>';
+    toast('87 counter discounts applied. Edit any item in the sheet.');
+  });
+
+  // findings
+  var open=9;
+  function sync(){
+    $('fcount').textContent=open?open+' open':'All clear';
+    $('fcount').className='badge'+(open?'':' ok');
+    $('fready').textContent=open?open+' findings open.':'No open findings.';
+  }
+  document.querySelectorAll('[data-f]').forEach(function(el){
+    var fix=el.querySelector('.fix'), orig=fix.textContent;
+    fix.addEventListener('click',function(){
+      if(el.classList.contains('done')) return;
+      el.classList.add('done'); fix.textContent='Done'; open--; sync(); toast('Finding resolved.');
+    });
+    el.querySelectorAll('.link')[1].addEventListener('click',function(){
+      if(el.classList.contains('done')) return;
+      el.classList.add('done'); fix.textContent='Kept'; open--; sync(); toast('Kept as is. Logged in Activity.');
+    });
+  });
+  $('morebtn').addEventListener('click',function(){ toast('Prototype: the remaining 5 low findings expand here.'); });
+
+  // tabs
+  var texts=[
+    'The full item sheet lives here: search, filters and sort as today. Its 25+ columns are grouped behind a column picker (Current MOU, RFQ, Counter, Feedback I, Online Nego, Margins) so each stage shows only its own columns.',
+    'Brands in this negotiation: B. Braun, BD, GEA, Medisafe, OneMed, Terumo. Per-brand impact and counter status.',
+    'Matches between RFQ items and market prices (INAPROC e-Katalog, SIMO Inhealth). Strong matches confirm automatically. 172 wait for review. Principals never see this.',
+    'Download Template_Nego, upload the principal\'s file, regenerate the item list.',
+    'Who changed what and when. Every counter, fix and kept finding is logged.'
+  ];
+  document.querySelectorAll('.tabs button').forEach(function(b){
+    b.addEventListener('click',function(){
+      document.querySelectorAll('.tabs button').forEach(function(x){x.setAttribute('aria-selected','false')});
+      b.setAttribute('aria-selected','true'); $('panel').textContent=texts[+b.dataset.t];
+    });
+  });
+})();
+</script>
