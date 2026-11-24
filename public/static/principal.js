@@ -59,6 +59,7 @@ const T = {
     dc_t: "Konfirmasi SKU Discontinue", dc_p: (n) => `${n} SKU dinyatakan Discontinue. Surat DC diurus bersama Siloam; Anda bisa melampirkan surat DC atau dokumen lain (tidak wajib).`, dc_confirm: "Saya konfirmasi SKU di atas Discontinue.", dc_attach: "Lampirkan dokumen", dc_attached: (n) => `${n} dokumen terlampir`,
     up_changes: "Isian yang akan berubah", up_overwrite: (n) => `${n} isian di portal akan ditimpa oleh file ini.`, up_overwrite_ok: "Saya setuju menimpa isian portal dengan isi file ini.", up_old: "Sekarang", up_new: "File",
     disc_bad: "Isi diskon 0 sampai 100",
+    docs_missing: "Dokumen wajib belum lengkap", docs_ok: "Dokumen wajib sudah lengkap.", docs_locked: "Kirim terkunci sampai NIB, NPWP, dan Pakta Integritas terunggah.",
     new_btn: "+ Item baru", new_t: "Tambah item baru", new_p: "Untuk item yang belum ada di daftar Siloam. Status New Item, Siloam akan memeriksanya dan memberi kode ERP.", new_name: "Nama item", new_badge: "New Item", new_added: "Item baru ditambahkan", new_remove: "Hapus item baru", new_note: "Item baru: menunggu pemeriksaan Siloam.", new_n: (n) => `${n} item baru akan ditambahkan:`, add: "Tambah",
   },
   en: {
@@ -109,6 +110,7 @@ const T = {
     dc_t: "Confirm Discontinue SKUs", dc_p: (n) => `${n} SKUs are marked Discontinue. The DC letter is arranged with Siloam; you may attach it or another document (optional).`, dc_confirm: "I confirm the SKUs above are Discontinue.", dc_attach: "Attach a document", dc_attached: (n) => `${n} document(s) attached`,
     up_changes: "Entries that will change", up_overwrite: (n) => `${n} entries already in the portal will be overwritten by this file.`, up_overwrite_ok: "I agree to overwrite the portal entries with this file.", up_old: "Now", up_new: "File",
     disc_bad: "Enter a discount from 0 to 100",
+    docs_missing: "Required documents missing", docs_ok: "All required documents are uploaded.", docs_locked: "Sending is locked until NIB, NPWP and the Integrity Pact are uploaded.",
     new_btn: "+ New item", new_t: "Add a new item", new_p: "For an item not on Siloam's list. Its status is New Item; Siloam checks it and assigns the ERP code.", new_name: "Item name", new_badge: "New Item", new_added: "New item added", new_remove: "Remove new item", new_note: "New item: waiting for Siloam to check it.", new_n: (n) => `${n} new items will be added:`, add: "Add",
   },
 };
@@ -832,6 +834,9 @@ async function loadDocs() {
 
 function drawDocs(d) {
   const box = clear($("docs"));
+  const sendBtn = document.querySelector(".sendbar button");
+  if (sendBtn && P.me.step === "submission") { sendBtn.disabled = d.missing_required.length > 0; sendBtn.title = d.missing_required.length ? t("docs_locked") : ""; }
+  if (d.missing_required.length) put(box, el("p", { class: "warnline", text: t("docs_locked") }));
   put(box, el("p", { class: "muted", text: t("doc_note") }));
   const list = el("div", { class: "doclist-p" });
   for (const ty of d.types) {
@@ -884,11 +889,14 @@ async function openSummary() {
       render();
     } catch (e) { toast(e.message); sendBtn.disabled = false; }
   });
-  const facts = s.step === "submission" ? [["doc_uploaded", s.documents], ["sum_missing", s.missing]]
+  const facts = s.step === "submission" ? [["doc_uploaded", s.documents], ["docs_missing", (s.missing_documents || []).length]]
     : [["sum_items", s.items], ["sum_done", s.done], ["sum_missing", s.missing], ["sum_check", s.to_check], ["sum_disc", s.discontinued]];
   const body = clear($("dlg-body"));
   put(body, el("h2", { text: t("sum_t") }),
-    el("div", { class: "facts" }, facts.map(([k, v]) => el("div", { class: k === "sum_missing" && v ? "bad" : k === "sum_check" && v ? "warn" : "" }, el("span", { text: t(k) }), el("b", { text: num(v) })))),
+    el("div", { class: "facts" }, facts.map(([k, v]) => el("div", { class: (k === "sum_missing" || k === "docs_missing") && v ? "bad" : k === "sum_check" && v ? "warn" : "" }, el("span", { text: t(k) }), el("b", { text: num(v) })))),
+    s.step === "submission" ? ((s.missing_documents || []).length
+      ? el("div", {}, el("h3", { text: t("docs_missing") }), el("ul", { class: "left" }, s.missing_documents.map((k) => el("li", { text: ({ nib: "NIB", npwp: "NPWP", pakta_integritas: "Pakta Integritas" })[k] || k }))))
+      : el("p", { class: "okline", text: `✓ ${t("docs_ok")}` })) :
     s.outstanding_count ? el("div", {}, el("h3", { text: `${t("sum_left")} (${num(s.outstanding_count)})` }),
       el("ul", { class: "left" }, s.outstanding.map((o) => el("li", {},
         el("div", {}, el("b", { text: o.item_name }), el("span", { class: "muted", text: ` ${o.erp_code || ""}` }),
