@@ -3605,7 +3605,18 @@ function computePackage(cid: number) {
     discontinued: items.length - active.length,
     missing_on: incomplete.slice(0, 10).map((x) => x.erp_code),
     escalation: esc,
+    templates: templateChoice(cid),
   };
+}
+
+// Which Word template each document uses: Nett binding -> Nett template; Disc and Nett to Disc -> Disc template.
+// A final scheme chosen in Online Nego overrides the binding.
+function templateChoice(cid: number) {
+  const c = cycleOf(cid);
+  const scheme = (c.final_scheme || (c.binding === "Nett" ? "Nett" : "Disc")) as "Nett" | "Disc";
+  const bakKey = scheme === "Nett" ? "bak_nett" : "bak_disc";
+  const info = (k: string) => (docTemplates[k] ? `${docTemplates[k].name} (unggahan Siloam)` : "draft bawaan app");
+  return { binding: c.binding, scheme, from_final_scheme: !!c.final_scheme, bak: { key: bakKey, label: DOC_TEMPLATE_KEYS[bakKey], using: info(bakKey) }, pks: { key: "pks", label: DOC_TEMPLATE_KEYS.pks, using: info("pks") } };
 }
 
 app.post("/api/admin/nego/cycles/:cid/step", (req: Request, res: Response) => {

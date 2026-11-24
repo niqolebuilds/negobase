@@ -4159,8 +4159,16 @@ function computePackage(cid) {
     active: active.length,
     discontinued: items.length - active.length,
     missing_on: incomplete.slice(0, 10).map((x) => x.erp_code),
-    escalation: esc
+    escalation: esc,
+    templates: templateChoice(cid)
   };
+}
+function templateChoice(cid) {
+  const c = cycleOf(cid);
+  const scheme = c.final_scheme || (c.binding === "Nett" ? "Nett" : "Disc");
+  const bakKey = scheme === "Nett" ? "bak_nett" : "bak_disc";
+  const info = (k) => docTemplates[k] ? `${docTemplates[k].name} (unggahan Siloam)` : "draft bawaan app";
+  return { binding: c.binding, scheme, from_final_scheme: !!c.final_scheme, bak: { key: bakKey, label: DOC_TEMPLATE_KEYS[bakKey], using: info(bakKey) }, pks: { key: "pks", label: DOC_TEMPLATE_KEYS.pks, using: info("pks") } };
 }
 app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   const cid = Number(req.params.cid);
