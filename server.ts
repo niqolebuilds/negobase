@@ -5221,7 +5221,7 @@ app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req: Request, res: Re
   const rows = packageRows(cid);
   const meta = packageMeta(cid); meta.sku_count = rows.length;
   logCycle(cid, "package.excel", { rows: rows.length });
-  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}.xlsx`);
+  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}_${meta.category}_${String(c.binding).replace(/\s+/g, "")}.xlsx`);
 });
 
 async function sendDocx(res: Response, buf: Buffer, filename: string) {

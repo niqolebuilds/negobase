@@ -681,8 +681,8 @@ function confRow(no, name, code, uom, baseUnit, hna, disc, ppn) {
 async function buildConfirmationWorkbook(meta, rows) {
   const wb = new ExcelJS3.Workbook();
   const ws = wb.addWorksheet("Confirmation");
-  ws.addRow([`Agreed prices: ${meta.principal}`]).font = { bold: true, size: 13 };
-  ws.addRow([`Contract ${meta.contract_start} to ${meta.contract_end} \xB7 Binding ${meta.binding} \xB7 Scheme ${meta.scheme}`]);
+  ws.addRow([`Agreed prices: ${meta.principal} (${meta.category})`]).font = { bold: true, size: 13 };
+  ws.addRow([`Contract ${meta.contract_start} to ${meta.contract_end} \xB7 Binding ${meta.binding}${meta.scheme !== (meta.binding === "Nett" ? "Nett" : "Disc") ? ` \xB7 Final scheme ${meta.scheme}` : ""}`]);
   ws.addRow([]);
   const head = ws.addRow(["No", "Item Name", "ERP Code", "UOM", "Base Unit", "HNA", "Disc", "Unit Price", "Unit Price (+VAT)"]);
   head.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -5912,7 +5912,7 @@ app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req, res) => {
   const meta = packageMeta(cid);
   meta.sku_count = rows.length;
   logCycle(cid, "package.excel", { rows: rows.length });
-  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}.xlsx`);
+  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}_${meta.category}_${String(c.binding).replace(/\s+/g, "")}.xlsx`);
 });
 async function sendDocx(res, buf, filename) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
