@@ -3947,7 +3947,7 @@ app.get("/api/admin/nego/principals-template.xlsx", async (_req, res) => {
     "Category: Drugs, CnC, or Drugs & CnC.",
     "Negotiation Type: Renewal, New Vendor, Addendum or Force Majeure.",
     "Binding: Nett, Disc or Nett to Disc.",
-    "Items (ERP codes): optional, separated by ; or commas. These items are tagged to the principal.",
+    "Items are not listed here: tag SKUs to principals with the SKU tagging upload in Admin > Negotiation Periods.",
     "Current MOU Start / End: yyyy-mm-dd. Required except for New Vendor. The end date drives the 6-month alert.",
     "The new contract dates are entered when you start the negotiation."
   ].forEach((t) => notes.addRow([t]));
