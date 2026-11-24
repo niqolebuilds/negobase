@@ -22,6 +22,7 @@ async function adminMaster(body) {
   master.picked = new Set();
   master.filter = "new";
   master.q = "";
+  if (!masterReadOnly()) body.append(bucketCard());
 
   const search = el("input", { type: "search", placeholder: "Search code, name, brand, generic, group, tag", "aria-label": "Search items", class: "msearch" });
   let timer;
@@ -179,4 +180,20 @@ async function checkImport(box, file) {
         catch (e) { toast(e.message); }
       }) : el("span", { class: "muted small", text: "Nothing to apply." }),
       act("Cancel", () => { clear(box); file.value = ""; }, "ghost"))));
+}
+
+
+// DB Bucket: Consump or Charge per SKU (and whether it is SBP). Uploaded here once; the analysis counts SKUs per bucket.
+function bucketCard() {
+  const file = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", id: "bucket-file" });
+  const out = el("div");
+  file.addEventListener("change", async () => {
+    if (!file.files.length) return;
+    const fd = new FormData(); fd.append("file", file.files[0]);
+    put(clear(out), el("p", { class: "muted", text: "Uploading…" }));
+    try { const r = await upload("/api/admin/master/bucket", fd); clear(out); toast(`DB Bucket: ${r.report.ok} of ${r.report.total} rows saved`); showReport("DB Bucket", r.report); if (master.refreshSets) master.refreshSets(); }
+    catch (e) { put(clear(out), el("p", { class: "error", text: e.message })); }
+  });
+  return card("DB Bucket (Consump / Charge)", "Satu baris per SKU. Kolom: ERP Code, Bucket (Consump atau Charge), SBP (opsional, Ya/Tidak). Dipakai di analisis dan laporan.",
+    el("div", { class: "actions" }, el("label", { class: "act secondary", for: "bucket-file", text: "Upload DB Bucket" }), file), out);
 }

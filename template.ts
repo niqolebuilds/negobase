@@ -125,7 +125,7 @@ export async function buildTemplate(_unused: string | null, items: any[], o: Tem
       // Discounts are written as numbers 0-100 (the cell shows the % sign), so 15 can never be read as 1,500%.
       const pctOf = (v: any) => (v == null ? null : Math.round(v * 10000) / 100);
       put(r, "rfqDisc", pctOf(it.rfq_disc));
-      put(r, "reason", it.price_reason ? (REASONS.find((x) => x.key === it.price_reason)?.label || it.price_reason) : null);
+      put(r, "reason", it.price_reason ? (REASONS.find((x) => x.key === String(it.price_reason).split(" — ")[0])?.label || it.price_reason) : null);
       if (!o.forPrincipal) {
         put(r, "mouQty", it.mou_qty); put(r, "mouHna", it.mou_hna); put(r, "mouDisc", pctOf(it.mou_disc));
         put(r, "coNote", it.co_note); put(r, "onDisc", pctOf(it.on_disc)); put(r, "onNett", pctOf(it.on_disc_nett)); put(r, "onDiscScheme", pctOf(it.on_disc_disc));

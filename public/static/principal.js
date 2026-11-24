@@ -17,15 +17,15 @@ const T = {
     step_of: (n) => `Langkah ${n} dari 6`, your_task: "Tugas Anda",
     steps: { rfq: "Isi data item & harga penawaran (RFQ)", feedback1: "Tanggapi counter offer", submission: "Kirim dokumen perusahaan" },
     last_step: "Langkah terakhir", doc_required: "Wajib", doc_optional: "Opsional", doc_upload: "Unggah", doc_uploaded: "Terunggah", doc_delete: "Hapus",
-    doc_note: "Dokumen disimpan terenkripsi dan hanya bisa dibuka tim pengadaan. PDF, JPG, PNG, DOCX, XLSX atau ZIP, maksimal 15 MB per file.",
+    doc_note: "Dokumen hanya bisa dibuka admin Siloam. Hanya PDF, JPG, atau PNG, maksimal 10 MB per file.",
     howto: {
-      rfq: ["Untuk setiap SKU: pilih status (Aktif atau Tidak dijual lagi), isi brand dan nomor katalog (REF).", "Isi HNA per kemasan (sebelum PPN), isi per kemasan, dan diskon dalam persen (contoh: 15%).", "Jika ada peringatan, periksa kembali isian Anda. Jika harga naik, mohon isi alasannya. Semua tersimpan otomatis."],
+      rfq: ["Untuk setiap SKU: pilih status (Aktif atau Discontinue), isi brand dan nomor katalog (REF), atau zat aktif untuk obat.", "Isi HNA per kemasan (sebelum PPN), isi per kemasan, dan diskon sebagai angka 0 sampai 100 (contoh: 15). Tanda % muncul otomatis.", "Jika ada peringatan, periksa kembali isian Anda. Jika harga naik, mohon isi alasannya. Semua tersimpan otomatis."],
       feedback1: ["Tim pengadaan mengirim counter offer berupa diskon per SKU.", "Klik Terima, atau isi diskon Anda sendiri dan alasannya.", "Klik Kirim jika sudah selesai."],
       submission: ["Harga sudah disepakati. Langkah terakhir: unggah dokumen perusahaan.", "Dokumen bertanda Wajib harus diunggah sebelum mengirim.", "Klik Kirim jika sudah lengkap."],
     },
     help: "Bantuan", help_t: "Butuh bantuan?", help_p: "Hubungi tim pengadaan. Kami akan membantu Anda mengisi.", help_wa: "Chat WhatsApp", help_mail: "Kirim email", help_none: "Balas pesan atau email kami, tim kami akan membantu.",
     excel_or: "Lebih suka Excel? Unduh file, isi, lalu unggah kembali.", view_table: "Tabel", view_list: "Kartu", view_one: "Satu per satu",
-    h_item: "Barang", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Keterangan", h_hna: "HNA / kemasan", h_qty: "Isi (pcs)", h_disc: "Diskon (mis. 15%)", h_unit: "Harga/pcs", h_rfq: "Harga Anda", h_co: "Counter Offer", h_own: "Diskon Anda",
+    h_item: "Barang", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Keterangan", h_hna: "HNA / kemasan", h_qty: "Isi (pcs)", h_disc: "Diskon % (0–100)", h_unit: "Harga/pcs", h_rfq: "Harga Anda", h_co: "Counter Offer", h_own: "Diskon Anda",
     tip_paste: "Tips: salin sel dari Excel lalu tempel di kolom pertama yang mau diisi.",
     contract: "Kontrak", due: "Batas waktu", progress: (d, a) => `${d} dari ${a} SKU selesai`,
     download: "Unduh Excel", upload: "Unggah Excel", send: "Kirim Tanggapan",
@@ -35,24 +35,30 @@ const T = {
     fill_confirm_fb1: () => "Terima counter offer untuk semua SKU yang belum ditanggapi?",
     filled: (n) => `${n} SKU terisi`, none: "Tidak ada SKU di sini.", more: "Tampilkan lebih banyak", prev: "← Sebelumnya", next: "Berikutnya →",
     state: { missing: "Belum diisi", check: "Perlu dicek", done: "Selesai" },
-    status: "Status", active: "Aktif", disc_btn: "Tidak dijual lagi",
+    status: "Status", active: "Aktif", disc_btn: "Discontinue",
     qty: (pack) => `Isi per ${pack} (pcs)`, hna: (pack) => `HNA per ${pack}, sebelum PPN`, disc: "Diskon",
     per_pcs: "Harga per pcs termasuk PPN",
-    brand: "Brand / pabrikan", ref: "Nomor katalog (REF)", remarks: "Keterangan (opsional)",
+    brand: "Brand / pabrikan", ref: "Nomor katalog (REF)", ai: "Zat aktif (Active Ingredient)", remarks: "Keterangan (opsional)",
     rfq_price: "Harga RFQ Anda", co: "Counter Offer", accept: "Terima counter offer", own: "Atau isi diskon Anda",
     reason: "Alasan", reason_pick: "Pilih alasan…", reason_detail: "Keterangan singkat (opsional)", yes: "Ya, sudah benar", confirmed: "Sudah dikonfirmasi",
     saved: "Tersimpan ✓", saving: "Menyimpan…", unsaved: "Belum tersimpan. Coba lagi", retry: "Coba lagi",
     waiting_t: "Menunggu Verifikasi", waiting_p: "Tidak ada yang perlu diisi saat ini. Tim pengadaan akan menghubungi Anda untuk langkah berikutnya.",
     sent_t: "Terima kasih, sudah terkirim", sent_p: (at) => `Dikirim pada ${at}. Tim pengadaan sedang meninjau. Anda akan dihubungi untuk langkah berikutnya.`,
-    sum_t: "Periksa sebelum mengirim", sum_items: "SKU", sum_done: "Selesai", sum_missing: "Belum diisi", sum_check: "Perlu dicek", sum_disc: "Tidak dijual lagi",
+    sum_t: "Periksa sebelum mengirim", sum_items: "SKU", sum_done: "Selesai", sum_missing: "Belum diisi", sum_check: "Perlu dicek", sum_disc: "Discontinue",
     sum_left: "Perlu dilengkapi dulu", sum_fix: "Perbaiki", sum_up: "Harga naik (dengan alasan)", sum_ok: "Semua SKU sudah lengkap.",
     sum_agree: "Saya sudah memeriksa dan data ini benar.", sum_send: "Kirim sekarang", cancel: "Batal", close: "Tutup",
     up_t: "Unggah Excel", up_p: "Gunakan file Excel yang diunduh dari halaman ini. Kolom yang bisa diisi berwarna oranye. Baris yang salah tidak disimpan dan ditampilkan di bawah.",
     up_check: "Periksa file", up_res: (a, r) => `${a} baris siap disimpan, ${r} baris perlu diperbaiki.`, up_save: (n) => `Simpan ${n} baris`,
     up_done: (n) => `${n} baris tersimpan`, row: "Baris", not_found: (n) => `${n} baris tidak dikenali (kode ERP tidak ada di daftar).`,
     sent_ok: "Terkirim. Terima kasih!", err: "Terjadi kesalahan",
-    locked_t: "Sudah terkirim dan dikunci", locked_p: (at) => `Isian ini dikirim${at ? ` pada ${at}` : ""} dan sekarang dikunci supaya angkanya tidak berubah saat counter offer disiapkan. Hubungi tim pengadaan jika ada yang perlu diubah.`,
+    locked_t: "Sudah terkirim dan dikunci", locked_p: (at) => `Isian ini dikirim${at ? ` pada ${at}` : ""} dan sekarang dikunci supaya angkanya tidak berubah saat counter offer disiapkan. Jika ada yang perlu diubah, tulis pengajuan koreksi pada SKU yang bersangkutan.`,
     not_open: "Langkah ini belum dibuka. Tim pengadaan akan menghubungi Anda.",
+    wait: { review_rfq: "Siloam sedang meninjau RFQ Anda", counter_offer: "Menunggu counter offer dari Siloam", online_nego: "Menunggu jadwal online nego dengan Siloam", closed: "Selesai. Terima kasih", prepare: "Siloam sedang menyiapkan negosiasi" },
+    overdue: (n) => `Terlambat ${n} hari`, returned: "Siloam mengembalikan isian Anda", flagged: "Siloam meminta Anda memeriksa SKU ini",
+    comment_btn: "Ajukan koreksi", comment_ph: "Tulis koreksi yang Anda minta (mis. HNA salah ketik)", comment_send: "Kirim ke Siloam", comment_sent: "Pengajuan terkirim ke Siloam", comment_open: "Menunggu Siloam", comment_done: "Sudah ditangani",
+    dc_t: "Konfirmasi SKU Discontinue", dc_p: (n) => `${n} SKU dinyatakan Discontinue. Surat DC diurus bersama Siloam; Anda bisa melampirkan surat DC atau dokumen lain (tidak wajib).`, dc_confirm: "Saya konfirmasi SKU di atas Discontinue.", dc_attach: "Lampirkan dokumen", dc_attached: (n) => `${n} dokumen terlampir`,
+    up_changes: "Isian yang akan berubah", up_overwrite: (n) => `${n} isian di portal akan ditimpa oleh file ini.`, up_overwrite_ok: "Saya setuju menimpa isian portal dengan isi file ini.", up_old: "Sekarang", up_new: "File",
+    disc_bad: "Isi diskon 0 sampai 100",
   },
   en: {
     portal: "Principal Portal", loading: "Loading…",
@@ -60,15 +66,15 @@ const T = {
     step_of: (n) => `Step ${n} of 6`, your_task: "Your task",
     steps: { rfq: "Item details & price quote (RFQ)", feedback1: "Respond to counter offer", submission: "Send company documents" },
     last_step: "Last step", doc_required: "Required", doc_optional: "Optional", doc_upload: "Upload", doc_uploaded: "Uploaded", doc_delete: "Delete",
-    doc_note: "Documents are stored encrypted and only the procurement team can open them. PDF, JPG, PNG, DOCX, XLSX or ZIP, up to 15 MB each.",
+    doc_note: "Only Siloam admins can open the documents. PDF, JPG or PNG only, up to 10 MB each.",
     howto: {
-      rfq: ["For every SKU: choose the status (Active or Discontinued), then fill in the brand and catalogue number (REF).", "Enter the HNA per pack (before PPN), the pieces per pack and the discount as a percentage (e.g. 15%).", "If a warning shows, please re-check your entry. If the price goes up, please give the reason. Everything saves automatically."],
+      rfq: ["For every SKU: choose the status (Active or Discontinue), then fill in the brand and catalogue number (REF).", "Enter the HNA per pack (before PPN), the pieces per pack and the discount as a number from 0 to 100 (e.g. 15). The % sign appears by itself.", "If a warning shows, please re-check your entry. If the price goes up, please give the reason. Everything saves automatically."],
       feedback1: ["Procurement sent a counter-offer discount for each SKU.", "Click Accept, or enter your own discount and the reason.", "Click Send when you're done."],
       submission: ["Prices are agreed. Last step: upload your company documents.", "Documents marked Required must be uploaded before sending.", "Click Send when everything is there."],
     },
     help: "Help", help_t: "Need help?", help_p: "Contact the procurement team. We'll help you fill it in.", help_wa: "Chat on WhatsApp", help_mail: "Send an email", help_none: "Reply to our message or email and our team will help.",
     excel_or: "Prefer Excel? Download the file, fill it in, then upload it again.", view_table: "Table", view_list: "Cards", view_one: "One by one",
-    h_item: "Item", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Remarks", h_hna: "HNA / pack", h_qty: "Pieces", h_disc: "Discount (e.g. 15%)", h_unit: "Price/pc", h_rfq: "Your price", h_co: "Counter Offer", h_own: "Your discount",
+    h_item: "Item", h_status: "Status", h_brand: "Brand", h_ref: "REF", h_remarks: "Remarks", h_hna: "HNA / pack", h_qty: "Pieces", h_disc: "Discount % (0–100)", h_unit: "Price/pc", h_rfq: "Your price", h_co: "Counter Offer", h_own: "Your discount",
     tip_paste: "Tip: copy cells from Excel and paste them into the first column you want to fill.",
     contract: "Contract", due: "Due", progress: (d, a) => `${d} of ${a} SKUs done`,
     download: "Download Excel", upload: "Upload Excel", send: "Send Response",
@@ -78,24 +84,30 @@ const T = {
     fill_confirm_fb1: () => "Accept counter offer for every SKU you haven't answered?",
     filled: (n) => `${n} SKUs filled`, none: "No SKUs here.", more: "Show more", prev: "← Previous", next: "Next →",
     state: { missing: "To fill", check: "To check", done: "Done" },
-    status: "Status", active: "Active", disc_btn: "Discontinued",
+    status: "Status", active: "Active", disc_btn: "Discontinue",
     qty: (pack) => `Pieces per ${pack}`, hna: (pack) => `HNA per ${pack}, before PPN`, disc: "Discount",
     per_pcs: "Price per piece incl. PPN",
-    brand: "Brand / manufacturer", ref: "Catalogue no. (REF)", remarks: "Remarks (optional)",
+    brand: "Brand / manufacturer", ref: "Catalogue no. (REF)", ai: "Active ingredient", remarks: "Remarks (optional)",
     rfq_price: "Your RFQ price", co: "Counter Offer", accept: "Accept counter offer", own: "Or enter your discount",
     reason: "Reason", reason_pick: "Choose a reason…", reason_detail: "Short detail (optional)", yes: "Yes, that's right", confirmed: "Confirmed",
     saved: "Saved ✓", saving: "Saving…", unsaved: "Not saved. Try again", retry: "Try again",
     waiting_t: "Waiting for Verification", waiting_p: "There's nothing to fill right now. The procurement team will contact you for the next step.",
     sent_t: "Thank you, it's sent", sent_p: (at) => `Sent on ${at}. The procurement team is reviewing it and will contact you for the next step.`,
-    sum_t: "Check before sending", sum_items: "SKUs", sum_done: "Done", sum_missing: "To fill", sum_check: "To check", sum_disc: "Discontinued",
+    sum_t: "Check before sending", sum_items: "SKUs", sum_done: "Done", sum_missing: "To fill", sum_check: "To check", sum_disc: "Discontinue",
     sum_left: "Complete these first", sum_fix: "Fix", sum_up: "Price increases (with reasons)", sum_ok: "Every SKU is complete.",
     sum_agree: "I've checked this and it's correct.", sum_send: "Send now", cancel: "Cancel", close: "Close",
     up_t: "Upload Excel", up_p: "Use the Excel file downloaded from this page. The cells you can fill are orange. Rows with mistakes aren't saved and are listed below.",
     up_check: "Check file", up_res: (a, r) => `${a} rows ready to save, ${r} rows need fixing.`, up_save: (n) => `Save ${n} rows`,
     up_done: (n) => `${n} rows saved`, row: "Row", not_found: (n) => `${n} rows not recognised (ERP code not in the list).`,
     sent_ok: "Sent. Thank you!", err: "Something went wrong",
-    locked_t: "Sent and locked", locked_p: (at) => `This form was sent${at ? ` on ${at}` : ""} and is now locked so the numbers stay put while the counter offer is prepared. Contact the procurement team if something must change.`,
+    locked_t: "Sent and locked", locked_p: (at) => `This form was sent${at ? ` on ${at}` : ""} and is now locked so the numbers stay put while the counter offer is prepared. If something must change, leave a correction request on that SKU.`,
     not_open: "This step is not open yet. The procurement team will contact you.",
+    wait: { review_rfq: "Siloam is reviewing your RFQ", counter_offer: "Waiting for Siloam's counter offer", online_nego: "Waiting for the online nego with Siloam", closed: "Done. Thank you", prepare: "Siloam is preparing the negotiation" },
+    overdue: (n) => `${n} days late`, returned: "Siloam sent your form back", flagged: "Siloam asks you to check this SKU",
+    comment_btn: "Request a correction", comment_ph: "Describe the correction you need (e.g. HNA typo)", comment_send: "Send to Siloam", comment_sent: "Request sent to Siloam", comment_open: "Waiting for Siloam", comment_done: "Handled",
+    dc_t: "Confirm Discontinue SKUs", dc_p: (n) => `${n} SKUs are marked Discontinue. The DC letter is arranged with Siloam; you may attach it or another document (optional).`, dc_confirm: "I confirm the SKUs above are Discontinue.", dc_attach: "Attach a document", dc_attached: (n) => `${n} document(s) attached`,
+    up_changes: "Entries that will change", up_overwrite: (n) => `${n} entries already in the portal will be overwritten by this file.`, up_overwrite_ok: "I agree to overwrite the portal entries with this file.", up_old: "Now", up_new: "File",
+    disc_bad: "Enter a discount from 0 to 100",
   },
 };
 const t = (k, ...a) => { const v = k.split(".").reduce((o, p) => (o == null ? o : o[p]), T[P.lang]); return typeof v === "function" ? v(...a) : v ?? k; };
@@ -123,7 +135,7 @@ const num = (v, d = 0) => (v == null ? "—" : nf(d).format(v));
 const rp = (v) => (v == null ? "—" : `Rp ${num(v, v < 100 && v % 1 ? 2 : 0)}`);
 const pctTxt = (f) => (f == null ? "" : `${num(f * 100, Math.abs(f * 100 - Math.round(f * 100)) > 1e-6 ? 2 : 0)}%`);
 const fmtDate = (iso) => new Intl.DateTimeFormat(P.lang === "id" ? "id-ID" : "en-GB", { day: "numeric", month: "long", year: "numeric" }).format(new Date(iso.length <= 10 ? iso + "T00:00:00" : iso));
-const unitPrice = (hna, qty, disc) => (hna == null || !qty ? null : (hna / qty) * (1 - (disc || 0)) * (1 + (P.me?.ppn ?? 0.11)));
+const unitPrice = (hna, qty, disc) => (hna == null || !qty || Number.isNaN(disc) ? null : (hna / qty) * (1 - (disc || 0)) * (1 + (P.me?.ppn ?? 0.11)));
 function toast(text) {
   const n = $("ptoast"); n.textContent = text; n.hidden = false;
   clearTimeout(toast.t); toast.t = setTimeout(() => { n.hidden = true; }, 3000);
@@ -168,15 +180,15 @@ function hnaShow(v) {
   const [a, b] = typeof v === "number" ? String(v).split(".") : String(v).split(",");
   return nf(0).format(+a) + (b !== undefined ? "," + b : "");
 }
-// Discount is a percentage cell: "15%" or "0,15" are valid, a bare "15" is refused by the server.
-// It is sent exactly as typed so the server can tell the two apart.
-function discValue(s) { return String(s || "").trim(); }
-const discShow = (f) => (f == null ? "" : `${String(+(f * 100).toFixed(4)).replace(".", ",")}%`);
+// Discount: the principal types a number from 0 to 100 (15 or 27,5); the % sign is added by the page.
+// A value outside 0-100 gives NaN: no price is shown and no reason is asked for.
+function discValue(s) { return String(s || "").trim().replace(/%/g, ""); }
+const discShow = (f) => (f == null ? "" : `${String(+(f * 100).toFixed(2)).replace(".", ",")}%`);
 const discFraction = (s) => {
-  const v = String(s || "").trim();
+  const v = String(s || "").trim().replace(/%/g, "").replace(",", ".");
   if (!v) return 0;
-  const n = +v.replace("%", "").replace(/\./g, "").replace(",", ".");
-  return Number.isNaN(n) ? 0 : v.includes("%") ? n / 100 : n;
+  const n = +v;
+  return Number.isNaN(n) || n < 0 || n >= 100 ? NaN : n / 100;
 };
 
 // ---------- boot ----------
@@ -342,11 +354,15 @@ function render() {
   const lockBanner = me.locked ? el("section", { class: "pcard lockcard", role: "status" },
     el("h2", { text: `🔒 ${t(me.lock_reason === "sent" ? "locked_t" : "not_open")}` }),
     me.lock_reason === "sent" ? el("p", { text: t("locked_p", me.submitted ? fmtDate(me.submitted.at) : "") }) : null) : null;
+  const waiting = me.turn === "siloam";
+  const returned = me.return_note ? el("p", { class: "warnline", role: "status" }, `${t("returned")}${me.return_note.message ? `: ${me.return_note.message}` : ""}`) : null;
   put(app,
     el("section", { class: "pcard stepcard" },
-      el("p", { class: "eyebrow", text: t("your_task") }),
-      el("h1", { text: t(`steps.${me.step}`) }),
-      el("p", { class: "muted", text: `${t("contract")} ${fmtDate(me.contract.start)} – ${fmtDate(me.contract.end)}${me.due ? ` · ${t("due")} ${fmtDate(me.due)}` : ""}` }),
+      el("p", { class: "eyebrow", text: waiting ? "" : t("your_task") }),
+      el("h1", { text: waiting ? (t(`wait.${me.current_step}`) !== `wait.${me.current_step}` ? t(`wait.${me.current_step}`) : t(`steps.${me.step}`)) : t(`steps.${me.step}`) }),
+      el("p", { class: "muted", text: `${t("contract")} ${fmtDate(me.contract.start)} – ${fmtDate(me.contract.end)}${me.due && !waiting ? ` · ${t("due")} ${fmtDate(me.due)}` : ""}` }),
+      me.overdue_days > 0 && !waiting ? el("p", { class: "warnline", role: "status", text: `⚠ ${t("overdue", me.overdue_days)}` }) : null,
+      returned,
       me.locked ? null : howto,
       me.step === "submission" || me.locked ? null : el("div", { class: "excelrow" },
         el("span", { class: "muted", text: me.excel_upload ? t("excel_or") : "" }),
@@ -469,7 +485,7 @@ const HEAD = { item: "h_item", status: "h_status", brand: "h_brand", ref: "h_ref
 
 function theader() {
   return el("div", { class: `thead tc-${P.me.step}`, role: "row" },
-    TCOLS[P.me.step].map((c) => el("span", { role: "columnheader", text: HEAD[c] ? t(HEAD[c]) : "" })));
+    TCOLS[P.me.step].map((c) => el("span", { role: "columnheader", text: c === "ref" && P.me.category === "Drugs" ? t("ai") : HEAD[c] ? t(HEAD[c]) : "" })));
 }
 
 function statusSelect(a, it) {
@@ -496,13 +512,13 @@ function trow(it) {
   const cell = {};
   cell.item = el("div", { class: "tc-item" },
     el("b", { text: it.item_name || "—" }),
-    el("span", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no].filter(Boolean).join(" · ") }),
+    el("span", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no || it.active_ingredient].filter(Boolean).join(" · ") }),
     el("span", { class: `state s-${it.state}`, text: t(`state.${it.state}`) }),
     el("span", { class: "savestate", "aria-live": "polite" }));
   cell.status = statusSelect(a, it);
   if (step === "rfq") {
     const plain = (field, col) => tinput(a, it, col, field, { "aria-label": t(HEAD[col]) }, (v) => v.trim(), (v) => v || "");
-    cell.brand = plain("brand", "brand"); cell.ref = plain("catalog_no", "ref");
+    cell.brand = plain("brand", "brand"); cell.ref = plain(P.me.category === "Drugs" ? "active_ingredient" : "catalog_no", "ref");
     const hna = tinput(a, it, "hna", "rfq_hna", { inputmode: "decimal", "aria-label": t("h_hna") }, hnaValue, hnaShow);
     const qty = tinput(a, it, "qty", "rfq_qty", { inputmode: "numeric", "aria-label": t("h_qty") }, digits, (v) => (v != null ? String(v) : ""));
     const disc = tinput(a, it, "disc", "rfq_disc", { inputmode: "decimal", "aria-label": t("h_disc") }, discValue, discShow);
@@ -511,14 +527,15 @@ function trow(it) {
     const live = () => {
       const n = (x) => +String(x).replace(",", ".");
       const pr = unitPrice(n(hnaValue(hna.value)) || null, +digits(qty.value) || null, discFraction(disc.value));
-      const bad = discFraction(disc.value) < 0 || discFraction(disc.value) >= 1;
+      const bad = Number.isNaN(discFraction(disc.value));
       unit.textContent = off || bad ? "—" : pr == null ? "—" : rp(pr);
     };
     hna.addEventListener("input", () => { const v = hnaValue(hna.value); hna.value = v ? hnaShow(v) : ""; live(); });
     qty.addEventListener("input", () => { qty.value = digits(qty.value); live(); });
     disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,%]/g, ""); live(); });
+    disc.addEventListener("blur", () => { const f = discFraction(disc.value); if (disc.value && !Number.isNaN(f)) disc.value = discShow(Math.round(f * 10000) / 10000); });
     cell.hna = el("div", { class: "affix" }, el("span", { text: "Rp" }), hna);
-    cell.qty = qty; cell.disc = disc; disc.placeholder = "15%";
+    cell.qty = qty; cell.disc = disc; disc.placeholder = "15";
     cell.unit = unit;
     live();
   } else {
@@ -527,12 +544,16 @@ function trow(it) {
     cell.co = has ? el("span", {}, `${pctTxt(it.co_disc)} → `, el("b", { text: rp(it.co_unit_price) })) : el("span", { class: "muted", text: "—" });
     const accepted = has && it.fb1_disc != null && Math.abs(it.fb1_disc - it.co_disc) < 1e-9;
     cell.accept = has ? el("button", { type: "button", class: `pbtn small ${accepted ? "on" : "primary"}`, text: accepted ? `✓ ${t("accept")}` : t("accept"),
-      onclick: () => save(a, it, { fb1_disc: discShow(it.co_disc) }, true), disabled: !!P.me.locked }) : el("span");
+      onclick: () => save(a, it, { fb1_disc: "__co__" }, true), disabled: !!P.me.locked }) : el("span");
     const own = tinput(a, it, "own", "fb1_disc", { inputmode: "decimal", "aria-label": t("h_own") }, discValue, discShow);
     own.disabled = !has || !!P.me.locked;
-    own.addEventListener("input", () => { own.value = own.value.replace(/[^\d.,]/g, ""); });
-    cell.own = own; own.placeholder = "15%";
     cell.unit = el("b", { class: "tc-unit", text: has ? rp(it.fb1_unit_price) : "—" });
+    own.addEventListener("input", () => {
+      own.value = own.value.replace(/[^\d.,%]/g, "");
+      const pr = unitPrice(it.rfq_hna, it.rfq_qty, discFraction(own.value));
+      cell.unit.textContent = pr == null ? "—" : rp(pr);
+    });
+    cell.own = own; own.placeholder = "15";
   }
   put(a, el("div", { class: `tcells tc-${step}` }, TCOLS[step].map((c) => el("div", { class: `td td-${c}`, role: "cell" }, cell[c]))), el("div", { class: "issues" }));
   paintIssues(a, it);
@@ -594,7 +615,7 @@ function card(it) {
   const a = el("article", { class: `sku st-${it.state}`, "data-id": it.id });
   const head = el("header", { class: "sku-head" },
     el("div", {}, el("h2", { text: it.item_name || "—" }),
-      el("p", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no].filter(Boolean).join(" · ") })),
+      el("p", { class: "meta", text: [it.erp_code, it.brand, it.catalog_no || it.active_ingredient].filter(Boolean).join(" · ") })),
     el("span", { class: `state s-${it.state}`, text: t(`state.${it.state}`) }));
   put(a, head);
   const body = el("div", { class: "sku-body" });
@@ -630,11 +651,11 @@ function rfqBody(body, it, a) {
   };
   put(body, statusButtons(a, it));
   if (it.item_status === "Discontinue") return;
-  put(body, el("div", { class: "grid3" }, input("brand", t("brand")), input("catalog_no", t("ref")), input("remarks", t("remarks"))));
+  put(body, el("div", { class: "grid3" }, input("brand", t("brand")), P.me.category === "Drugs" ? input("active_ingredient", t("ai")) : input("catalog_no", t("ref")), input("remarks", t("remarks"))));
   const lock = !!P.me.locked;
   const qty = el("input", { inputmode: "numeric", value: it.rfq_qty != null ? String(it.rfq_qty) : null, "aria-label": t("qty", pack), disabled: lock });
   const hna = el("input", { inputmode: "decimal", value: hnaShow(it.rfq_hna) || null, "aria-label": t("hna", pack), disabled: lock });
-  const disc = el("input", { inputmode: "decimal", value: it.rfq_disc != null ? discShow(it.rfq_disc) : null, "aria-label": t("disc"), placeholder: "15%", disabled: lock });
+  const disc = el("input", { inputmode: "decimal", value: it.rfq_disc != null ? discShow(it.rfq_disc) : null, "aria-label": t("disc"), placeholder: "15", disabled: lock });
   const result = el("div", { class: "result" });
   const live = () => {
     const n = (x) => +String(x).replace(",", ".");
@@ -644,6 +665,7 @@ function rfqBody(body, it, a) {
   qty.addEventListener("input", () => { qty.value = digits(qty.value); live(); });
   hna.addEventListener("input", () => { const v = hnaValue(hna.value); hna.value = v ? hnaShow(v) : ""; live(); });
   disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,%]/g, ""); live(); });
+  disc.addEventListener("blur", () => { const f = discFraction(disc.value); if (disc.value && !Number.isNaN(f)) disc.value = discShow(Math.round(f * 10000) / 10000); });
   qty.addEventListener("change", () => save(a, it, { rfq_qty: digits(qty.value) || null }));
   hna.addEventListener("change", () => save(a, it, { rfq_hna: hnaValue(hna.value) || null }));
   disc.addEventListener("change", () => save(a, it, { rfq_disc: discValue(disc.value) || null }));
@@ -658,21 +680,41 @@ function rfqBody(body, it, a) {
 function fbBody(body, it, a) {
   if (it.co_disc == null) { put(body, el("p", { class: "muted", text: "—" })); return; }
   const disc = el("input", { inputmode: "decimal", value: it.fb1_disc != null ? discShow(it.fb1_disc) : null, "aria-label": t("own"), disabled: !!P.me.locked });
-  disc.addEventListener("input", () => { disc.value = disc.value.replace(/[^\d.,]/g, ""); });
+  const fbPrice = el("b", { text: rp(it.fb1_unit_price) });
+  disc.addEventListener("input", () => {
+    disc.value = disc.value.replace(/[^\d.,%]/g, "");
+    const pr = unitPrice(it.rfq_hna, it.rfq_qty, discFraction(disc.value));
+    fbPrice.textContent = pr == null ? "—" : rp(pr);
+  });
+  disc.addEventListener("blur", () => { const f = discFraction(disc.value); if (disc.value && !Number.isNaN(f)) disc.value = discShow(Math.round(f * 10000) / 10000); });
   disc.addEventListener("change", () => save(a, it, { fb1_disc: discValue(disc.value) || null }));
   const accepted = it.fb1_disc != null && Math.abs(it.fb1_disc - it.co_disc) < 1e-9;
   put(body, 
     el("div", { class: "ref" }, el("span", { class: "lbl", text: t("rfq_price") }), el("span", {}, `HNA ${rp(it.rfq_hna)} · ${t("disc")} ${pctTxt(it.rfq_disc || 0)} → `, el("b", { text: `${rp(it.rfq_unit_price)}/pcs` }))),
     el("div", { class: "ref co" }, el("span", { class: "lbl", text: t("co") }), el("span", {}, `${t("disc")} ${pctTxt(it.co_disc)} → `, el("b", { text: `${rp(it.co_unit_price)}/pcs` })),
       el("button", { type: "button", class: `pbtn small ${accepted ? "on" : "primary"}`, text: accepted ? `✓ ${t("accept")}` : t("accept"),
-        disabled: !!P.me.locked, onclick: () => save(a, it, { fb1_disc: discShow(it.co_disc) }, true) })),
+        disabled: !!P.me.locked, onclick: () => save(a, it, { fb1_disc: "__co__" }, true) })),
     el("label", { class: "field narrow" }, el("span", { class: "lbl", text: t("own") }), disc),
-    el("div", { class: "result" }, el("span", { class: "lbl", text: t("per_pcs") }), el("b", { text: rp(it.fb1_unit_price) })));
+    el("div", { class: "result" }, el("span", { class: "lbl", text: t("per_pcs") }), fbPrice));
+}
+
+// A sent form is read-only: a change is requested with a comment on the SKU, which Siloam sees on the item and in Findings.
+function paintComments(a, it, box) {
+  const list = it.comments || [];
+  for (const m of list) put(box, el("p", { class: "small muted", text: `💬 ${m.text} · ${m.resolved ? t("comment_done") : t("comment_open")}` }));
+  const ta = el("textarea", { rows: 2, placeholder: t("comment_ph"), maxlength: 500, hidden: true });
+  const send = el("button", { type: "button", class: "pbtn small primary", text: t("comment_send"), hidden: true });
+  const open = el("button", { type: "button", class: "pbtn small ghost", text: t("comment_btn"), onclick: () => { ta.hidden = false; send.hidden = false; open.hidden = true; ta.focus(); } });
+  send.addEventListener("click", async () => {
+    if (!ta.value.trim()) return;
+    try { const r = await call(`/api/p/items/${it.id}/comment`, { method: "POST", body: { text: ta.value.trim() } }); it.comments = r.comments; toast(t("comment_sent")); clear(box); paintComments(a, it, box); } catch (e) { toast(e.message); }
+  });
+  put(box, open, ta, send);
 }
 
 function paintIssues(a, it) {
   const box = clear(a.querySelector(".issues"));
-  if (P.me.locked) return; // sent: read-only, nothing left to fix
+  if (P.me.locked) { if (P.me.lock_reason === "sent") paintComments(a, it, box); return; } // sent: read-only, comments only
   const open = new Set(it.outstanding);
   const confirmed = new Set((it.principal_confirmed || "").split(",").filter(Boolean));
   for (const i of it.issues) {
@@ -689,9 +731,9 @@ function paintIssues(a, it) {
 
 function reasonPicker(a, it) {
   const [pick0, ...rest] = (it.price_reason || "").split(" — ");
-  const known = P.me.reasons.find((r) => r.id === pick0 || r.en === pick0);
+  const known = P.me.reasons.find((r) => r.key === pick0 || r.id === pick0 || r.en === pick0);
   const sel = el("select", { "aria-label": t("reason"), disabled: !!P.me.locked }, el("option", { value: "", text: t("reason_pick") }),
-    P.me.reasons.map((r) => el("option", { value: r.id, text: r[P.lang], selected: known && known.id === r.id })));
+    P.me.reasons.map((r) => el("option", { value: r.key, text: r[P.lang], selected: known && known.key === r.key })));
   const detail = el("input", { placeholder: t("reason_detail"), value: known ? rest.join(" — ") || null : it.price_reason || null, maxlength: 200, disabled: !!P.me.locked });
   const push = () => {
     const v = [sel.value, detail.value.trim()].filter(Boolean).join(" — ");
@@ -749,7 +791,7 @@ function drawDocs(d) {
   const list = el("div", { class: "doclist-p" });
   for (const ty of d.types) {
     const mine = d.documents.filter((x) => x.doc_type === ty.key);
-    const file = el("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png,.docx,.xlsx,.zip", class: "sr-only", id: `f-${ty.key}` });
+    const file = el("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png", class: "sr-only", id: `f-${ty.key}` });
     file.addEventListener("change", async () => {
       if (!file.files.length) return;
       const fd = new FormData(); fd.append("file", file.files[0]); fd.append("doc_type", ty.key);
@@ -765,17 +807,32 @@ function drawDocs(d) {
   put(box, list);
 }
 
+// Optional attachment for Discontinue SKUs (DC letter or another document), uploaded from the send dialog.
+function dcAttach(s) {
+  const file = el("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png", class: "sr-only", id: "dcfile" });
+  const note = el("span", { class: "small muted", text: s.dc_documents ? t("dc_attached", s.dc_documents) : "" });
+  file.addEventListener("change", async () => {
+    if (!file.files.length) return;
+    const fd = new FormData(); fd.append("file", file.files[0]); fd.append("doc_type", "dc_letter");
+    try { const d = await call("/api/p/documents", { method: "POST", form: fd }); note.textContent = t("dc_attached", d.documents.filter((x) => x.doc_type === "dc_letter").length); } catch (e) { toast(e.message); }
+  });
+  return el("div", { class: "pactions" }, el("label", { class: "pbtn small", for: "dcfile" }, t("dc_attach")), file, note);
+}
+
 // ---------- send ----------
 async function openSummary() {
   let s;
   try { s = await call("/api/p/summary"); } catch (e) { toast(e.message); return; }
   const agree = el("input", { type: "checkbox", id: "agree" });
+  const dcCheck = el("input", { type: "checkbox", id: "dcok" });
   const sendBtn = el("button", { type: "button", class: "pbtn primary", text: t("sum_send"), disabled: true });
-  agree.addEventListener("change", () => { sendBtn.disabled = !(agree.checked && s.can_send); });
+  const ready = () => { sendBtn.disabled = !(agree.checked && s.can_send && (!s.needs_discontinue_confirm || dcCheck.checked)); };
+  agree.addEventListener("change", ready);
+  dcCheck.addEventListener("change", ready);
   sendBtn.addEventListener("click", async () => {
     sendBtn.disabled = true;
     try {
-      await call("/api/p/submit", { method: "POST", body: {} });
+      await call("/api/p/submit", { method: "POST", body: { confirm_discontinue: dcCheck.checked } });
       $("dlg").close();
       toast(t("sent_ok"));
       P.me = await call("/api/p/me");
@@ -796,6 +853,9 @@ async function openSummary() {
     s.increase_count ? el("details", {}, el("summary", { text: `${t("sum_up")} (${num(s.increase_count)})` }),
       el("ul", { class: "left" }, s.increases.map((x) => el("li", {}, el("div", {}, el("b", { text: x.item_name }),
         el("div", { class: "small", text: x.reason || "—" })))))) : null,
+    s.needs_discontinue_confirm ? el("div", { class: "dcbox" }, el("h3", { text: t("dc_t") }), el("p", { class: "small", text: t("dc_p", s.discontinued) }),
+      el("ul", { class: "left" }, s.discontinued_list.slice(0, 30).map((x) => el("li", {}, el("b", { text: x.item_name }), el("span", { class: "muted", text: ` ${x.erp_code}` })))),
+      dcAttach(s), el("label", { class: "agree" }, dcCheck, t("dc_confirm"))) : null,
     el("label", { class: "agree" }, agree, t("sum_agree")),
     el("div", { class: "pactions" }, sendBtn, el("button", { type: "button", class: "pbtn", text: t("cancel"), onclick: () => $("dlg").close() })));
   if (!s.can_send) agree.disabled = true;
@@ -822,18 +882,25 @@ function openUpload() {
 
 function showUpload(out, r, f) {
   const bad = r.rejected.length + r.read_errors.length;
-  put(clear(out), el("p", { class: bad ? "warnline" : "okline", text: t("up_res", r.accepted, bad) }),
+  const agree = el("input", { type: "checkbox", id: "ow" });
+  const save = el("button", { type: "button", class: "pbtn primary", text: t("up_save", r.saved_rows ?? r.accepted), disabled: r.overwrite_count > 0, onclick: async () => {
+    const fd = new FormData(); fd.append("file", f); fd.append("apply", "1"); if (r.overwrite_count) fd.append("confirm_overwrite", "1");
+    try { const res = await call("/api/p/template", { method: "POST", form: fd }); toast(t("up_done", res.applied)); $("dlg").close(); load(true); }
+    catch (e) { toast(e.message); }
+  } });
+  agree.addEventListener("change", () => { save.disabled = !agree.checked; });
+  const fmtV = (v) => (v == null ? "—" : typeof v === "number" && v > 0 && v < 1 ? discShow(v) : String(v));
+  put(clear(out), el("p", { class: bad ? "warnline" : "okline", text: t("up_res", r.saved_rows ?? r.accepted, bad) }),
     r.unmatched_count ? el("p", { class: "small muted", text: t("not_found", r.unmatched_count) }) : null,
     bad ? el("ul", { class: "left errs" }, [...r.read_errors, ...r.rejected].map((x) => el("li", {},
       el("b", { text: `${t("row")} ${x.row}` }), x.item_name ? el("span", { text: ` ${x.item_name}` }) : null,
       el("div", { class: "small", text: x.messages.map((m) => msg(m)).join(" ") })))) : null,
+    r.changes && r.changes.length ? el("details", { open: r.overwrite_count > 0 }, el("summary", { text: `${t("up_changes")} (${num(r.changes.length)})` }),
+      el("ul", { class: "small left" }, r.changes.slice(0, 100).map((c) => el("li", { text: `${c.erp_code} ${c.item_name} · ${c.header}: ${fmtV(c.old)} → ${fmtV(c.new)}` })))) : null,
+    r.overwrite_count ? el("div", { class: "warnline" }, el("p", { text: t("up_overwrite", r.overwrite_count) }), el("label", { class: "agree" }, agree, t("up_overwrite_ok"))) : null,
     r.notes.length ? el("details", {}, el("summary", { text: `${r.notes.length} catatan / notes` }),
       el("ul", { class: "small" }, r.notes.map((n) => el("li", { text: `${t("row")} ${n.row}: ${msg(n)}` })))) : null,
-    r.accepted ? el("button", { type: "button", class: "pbtn primary", text: t("up_save", r.accepted), onclick: async () => {
-      const fd = new FormData(); fd.append("file", f); fd.append("apply", "1");
-      try { const res = await call("/api/p/template", { method: "POST", form: fd }); toast(t("up_done", res.applied)); $("dlg").close(); load(true); }
-      catch (e) { toast(e.message); }
-    } }) : null);
+    r.accepted || (r.changes && r.changes.length) ? save : null);
 }
 
 boot();

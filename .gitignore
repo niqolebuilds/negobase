@@ -6,3 +6,4 @@ data/warehouse.db
 screenshots/
 data/workspace/
 node_modules/
+package-lock.json

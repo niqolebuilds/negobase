@@ -1,3 +1,25 @@
+# Status: semua fase sudah dikerjakan
+
+Semua 31 poin review dan 5 catatan kecil sudah diimplementasi. Pertanyaan terbuka di akhir dokumen ini dijawab dengan keputusan sendiri dari isi review, supaya tidak ada yang menunggu. Ubah kalau Siloam punya jawaban lain.
+
+| Pertanyaan | Keputusan yang dipakai |
+|---|---|
+| Template BAK dan PKS (Word) | Ada draft bawaan (Nett dan Disc, plus PKS). Template Siloam bisa diunggah di Admin > Documents; placeholder `{{principal}}`, `{{tabel_harga}}`, dst. diisi otomatis. |
+| Format file formularium | Kolom dibaca dari review: Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA, Konversi, Disc, Price, Base Price, HNA for SBP, Jenis. Kolom yang kosong tidak membuat upload gagal. |
+| File kompetitor dan Bucket | Benchmark: satu file per periode (ERP Code, Source, Price/PCS, Link). Bucket: Admin > Master data (ERP Code, Bucket, SBP). |
+| Kolom tabel 68/70 | Disusun dari daftar di A7 review. Pre-Nego dan Post-Nego tampil dari server (`/api/nego/cycles/:cid/analysis`) jadi mudah diubah. |
+| Batas eskalasi default | 5% dari nilai PO setahun atau Rp 50 Jt (contoh di D2). Bisa diubah di Engine settings. |
+| Data hilang saat restart | Tidak diubah (di luar review). Data masih di memori. |
+
+Cara menjalankan tes: `npm test` (angka review, template Excel, dan alur end-to-end lewat server sungguhan).
+
+Catatan teknis yang berubah:
+- `pricing.ts`: semua rumus harga, margin, cost impact, parser diskon, eskalasi. `bak.ts`: Excel Confirmation, BAK, PKS.
+- `template.ts`: template Excel dibuat dari kode (tidak lagi dari file `Template_Nego.xlsx`), jadi petunjuk kolom selalu benar dan file terbuka tanpa perbaikan.
+- Diskon disimpan sebagai pecahan (0,275). Principal mengetik angka 0 sampai 100.
+
+---
+
 # Rencana Update Nego App — berdasarkan Review Nov 2026
 
 Sumber: *Review Nego App – Nov 2026* (31 poin A1–G1 + 5 catatan kecil).

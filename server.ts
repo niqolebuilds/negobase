@@ -1415,8 +1415,8 @@ function getCycleSummaryCard(c: any) {
 
 // ---- Principal master rules -------------------------------------------------------------
 const CATEGORY_TOKENS: Record<string, "Drugs" | "CnC"> = {
-  drugs: "Drugs", drug: "Drugs", obat: "Drugs", pharma: "Drugs", pharmaceuticals: "Drugs",
-  cnc: "CnC", consumables: "CnC", consumable: "CnC", reagents: "CnC", reagent: "CnC", "consumables & chemicals": "CnC",
+  drugs: "Drugs", drug: "Drugs",
+  cnc: "CnC", consumables: "CnC", consumable: "CnC", "consumables & chemicals": "CnC",
 };
 // Category is Drugs, CnC, or both. Accepts "Drugs", "CnC", "Drugs & CnC", "Drugs, CnC", arrays.
 function normalizeCategory(v: any): string | null {
@@ -3312,7 +3312,7 @@ function ingestPeriodRows(kind: string, rows: Row[], pd: PeriodData, per: NegoPe
     });
     pd.formulary = out; rep.ok = out.length;
     // The principal column of the formulary also tags SKUs, unless a tagging file was uploaded.
-    if (!pd.files.sku_tagging || pd.files.sku_tagging.by === "formulary") {
+    if (!pd.files.sku_tagging || pd.files.sku_tagging.by === "formulary" || pd.files.sku_tagging.by === "sample data") {
       pd.tagging = out.filter((f) => f.principal).map((f) => ({ code: f.code, principal: f.principal }));
       pd.files.sku_tagging = { name: `${file} (kolom Principal)`, rows: pd.tagging.length, at: nowIso(), by: "formulary" };
     }
@@ -3981,7 +3981,39 @@ app.get("/api/admin/nego/notify", (_req: Request, res: Response) => {
 });
 
 app.get("/api/admin/nego/assist", (_req: Request, res: Response) => {
-  res.json({ enabled: Boolean(settingsValues.llm_assist), available: false });
+  res.json({ enabled: true, available: true, setting: true, api_key: true });
+});
+
+// Drafts for the negotiator, written from the negotiation's own per-SKU data (never invented figures).
+app.post("/api/admin/nego/cycles/:cid/assist", (req: Request, res: Response) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const kind = String(req.body?.kind || "");
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const en = (cycleItemsMap.get(cid) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c));
+  const esc = computeEscalation(cid);
+  const line = (e: any, price: number | null, disc: number | null) => `- ${e.erp_code} ${e.item_name}: disc ${fmtPct(disc)}, harga ${price == null ? "-" : rp(price)}/pcs (+PPN)`;
+  let text = "";
+  const facts: Record<string, any> = {};
+  if (kind === "co_cover") {
+    const withCo = en.filter((e) => e.co_disc != null);
+    facts.sku_co = withCo.length;
+    text = `Yth. ${c.principal.contact_name || "Bapak/Ibu"} dari ${c.principal.name},\n\nTerima kasih atas penawaran RFQ yang telah dikirim. Berdasarkan evaluasi Siloam Hospitals, kami mengajukan counter offer untuk ${withCo.length} SKU dengan rincian berikut:\n${withCo.slice(0, 40).map((e) => line(e, e.co_unit_price, e.co_disc)).join("\n")}${withCo.length > 40 ? `\n... dan ${withCo.length - 40} SKU lain (lihat portal)` : ""}\n\nMohon tanggapan Anda di portal sebelum ${c.step_due ? fmtDateId(c.step_due) : "batas waktu yang ditentukan"}.\n\nSalam,\nTim Pengadaan Siloam Hospitals`;
+  } else if (kind === "meeting_summary") {
+    const agreed = en.filter((e) => e.on_unit_price != null);
+    facts.sku_sepakat = agreed.length;
+    const m = c.meeting || {};
+    text = `NOTULEN ONLINE NEGO - ${c.principal.name}\nTanggal: ${m.at ? m.at.replace("T", " ") : "(belum dicatat)"}\nPeserta Siloam: ${m.attendees_siloam || "-"}\nPeserta principal: ${m.attendees_principal || "-"}\n\nKesepakatan per SKU (${agreed.length}):\n${agreed.slice(0, 60).map((e) => line(e, e.on_unit_price, e.on_disc)).join("\n") || "(belum ada)"}\n\nDampak biaya setahun vs PO (+PPN): ${esc.impact == null ? "-" : rp(esc.impact)} (status eskalasi: ${esc.status}).\n\nCatatan: ${m.notes || "-"}\n\nTindak lanjut:\n${(m.followups || []).map((f: any) => `- ${f.text}${f.owner ? ` (${f.owner})` : ""}${f.due ? `, tenggat ${fmtDateId(f.due)}` : ""}`).join("\n") || "-"}`;
+  } else if (kind === "bak_points") {
+    const r = answerAdminFromData("draft notulen dan poin bak", cid);
+    text = r || "Belum ada harga sepakat.";
+    facts.sku = en.filter((e) => e.on_unit_price != null).length;
+  } else if (kind === "escalation_note") {
+    facts.status = esc.status;
+    text = `CATATAN ESKALASI - ${c.principal.name}\nCost impact FIN: ${esc.impact == null ? "-" : rp(esc.impact)} (${esc.impact_pct == null ? "-" : fmtPct(esc.impact_pct)} dari nilai PO setahun ${rp(esc.po_value)}).\nBatas: ${fmtPct(esc.limit_pct)} atau ${rp(esc.limit_rp)}. Status: ${esc.status === "needed" ? "melewati batas, perlu persetujuan atasan" : esc.status === "approved" ? "disetujui" : "dalam batas"}.\n${(esc.reasons || []).includes("pct") ? "- Melewati batas persentase.\n" : ""}${(esc.reasons || []).includes("rp") ? "- Melewati batas nominal.\n" : ""}`;
+  } else return res.status(400).json({ error: "Jenis draft tidak dikenal" });
+  res.json({ text, model: "data nego (tanpa model)", facts });
 });
 
 // --------------------------------------------------------------------------
@@ -4496,6 +4528,13 @@ app.patch("/api/p/items/:iid", (req: Request, res: Response) => {
     }
     for (const f of ["rfq_disc", "fb1_disc"] as const) {
       if (changes[f] === undefined) continue;
+      // "Accept counter offer": the exact counter-offer discount, not a rounded copy of it.
+      if (f === "fb1_disc" && changes[f] === "__co__") {
+        if (step !== "feedback1") return res.status(403).json({ error: "Feedback I belum dibuka." });
+        if (it.co_disc == null) return res.status(400).json({ error: "SKU ini belum punya counter offer." });
+        next.fb1_disc = it.co_disc;
+        continue;
+      }
       if (f === "rfq_disc" && step !== "rfq") return res.status(403).json({ error: "RFQ sudah terkunci." });
       if (f === "fb1_disc" && step !== "feedback1") return res.status(403).json({ error: "Feedback I belum dibuka." });
       const d = parseDiscount(changes[f]);
@@ -4914,7 +4953,7 @@ app.get("/api/nego/cycles/:cid/analysis", (req: Request, res: Response) => {
   if (q) rows = rows.filter((r) => `${r.erp_code} ${r.item_name} ${r.brand}`.toLowerCase().includes(q));
   const offset = Math.max(0, Number(req.query.offset || 0)), limit = Math.max(1, Math.min(500, Number(req.query.limit || 100)));
   const keys = a.columns.map((c) => c.key);
-  res.json({ summary: a.summary, columns: a.columns, total: rows.length, offset, rows: rows.slice(offset, offset + limit).map((r) => Object.fromEntries(keys.map((k) => [k, r[k] ?? null]))) });
+  res.json({ summary: a.summary, columns: a.columns, total: rows.length, offset, rows: rows.slice(offset, offset + limit).map((r) => ({ id: r.id, ...Object.fromEntries(keys.map((k) => [k, r[k] ?? null])) })) });
 });
 
 async function analysisWorkbook(cid: number, mode: "pre" | "post", stepKey?: string) {

@@ -62,12 +62,33 @@ async function request(path, { method = "GET", body, form } = {}) {
     window.dispatchEvent(new CustomEvent("nego:signed-out"));
     if (location.pathname !== "/") location.href = "/#signin";
   }
-  if (!r.ok) throw new Error((j && j.error) || r.statusText);
+  if (!r.ok) { const err = new Error((j && j.error) || r.statusText); err.data = j; err.status = r.status; throw err; }
   return j;
 }
 const api = (path) => request(path);
 const send = (path, method, body) => request(path, { method, body });
 const upload = (path, form) => request(path, { method: "POST", form });
+// Result of an upload: how many rows were saved out of the total, which rows were rejected or ignored and why,
+// and what was repaired automatically. Shown after every data upload.
+function reportBody(r) {
+  const list = (rows, cols) => rows.length ? el("div", { class: "table-wrap", style: "max-height:220px;overflow:auto" }, (() => { const t = el("table"); table(t, cols, rows.slice(0, 300)); return t; })()) : null;
+  return el("div", {},
+    el("div", { class: "facts" },
+      el("div", {}, el("span", { text: "Berhasil" }), el("b", { text: `${num(r.ok)} dari ${num(r.total)} baris` })),
+      el("div", {}, el("span", { text: "Error" }), el("b", { text: num(r.errors.length) })),
+      el("div", {}, el("span", { text: "Diabaikan" }), el("b", { text: num(r.ignored.length) })),
+      el("div", {}, el("span", { text: "Diperbaiki otomatis" }), el("b", { text: num(r.fixed.length) }))),
+    r.errors.length ? el("h4", { text: "Baris error (tidak disimpan)" }) : null,
+    list(r.errors, [{ label: "Baris", get: (x) => x.row }, { label: "Kode", get: (x) => x.code || "—" }, { label: "Alasan", get: (x) => x.message }]),
+    r.ignored.length ? el("h4", { text: "Baris diabaikan" }) : null,
+    list(r.ignored, [{ label: "Baris", get: (x) => x.row }, { label: "Kode", get: (x) => x.code || "—" }, { label: "Alasan", get: (x) => x.message }]),
+    r.fixed.length ? el("h4", { text: "Data yang diperbaiki" }) : null,
+    list(r.fixed, [{ label: "Baris", get: (x) => x.row }, { label: "Kode", get: (x) => x.code || "—" }, { label: "Kolom", get: (x) => x.field }, { label: "Dari", get: (x) => x.from }, { label: "Jadi", get: (x) => x.to }]));
+}
+function showReport(title, r) {
+  openPanel(el("p", { class: "eyebrow", text: r.label || "Hasil upload" }), el("h2", { id: "drawer-title", text: title }), el("p", { class: "muted small", text: `${r.file} · ${new Date(r.at).toLocaleString("en-GB")}` }), reportBody(r));
+}
+
 function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); return n; }
 function colorFor(name, i) {
   // Colour follows the entity, not its rank: a name keeps its slot once assigned.

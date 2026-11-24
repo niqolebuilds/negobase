@@ -215,3 +215,12 @@ table.items thead th.sortable.sorted .th-sort-icon { opacity: 1; color: var(--ac
 
 .step-blocked { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .step-blocked button[disabled] { opacity: .5; cursor: not-allowed; }
+
+/* Review fixes: margin card readable on white, lateness, escalation */
+.item-margin-card, .item-margin-card td, .item-margin-card th, .item-margin-card .label, .item-margin-card .value { color: #0f172a; }
+.item-margin-card .note, .item-margin-card .small { color: #334155 !important; }
+.turn-banner.late { background: #fdecec; color: #8a1c1c; border-color: #e7a3a3; }
+.esc.need { background: #fdecec; color: #8a1c1c; }
+.esc.ok { background: #e8f6ee; color: #14532d; }
+.stepper li.final .n { background: #14532d; color: #fff; }
+.clickable-tile.alert { outline: 2px solid #c0392b33; }
