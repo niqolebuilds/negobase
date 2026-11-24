@@ -215,3 +215,8 @@ input:disabled, select:disabled { background: #f1f2f6; color: #5b6070; cursor: n
 .dcbox { border: 1px solid #f0b36b; background: #fffaf2; color: #3a2a00; border-radius: 10px; padding: 12px; margin: 12px 0; }
 .dcbox h3, .dcbox p { color: inherit; }
 .issues textarea { width: 100%; margin: 6px 0; }
+
+.terms { border: 1px solid var(--border, #dcdfec); border-radius: 10px; padding: 10px 14px; margin: 10px 0; background: #f7f8fd; color: #14182f; }
+.terms summary { cursor: pointer; }
+.terms ol { margin: 8px 0 0 18px; padding: 0; line-height: 1.5; font-size: 13.5px; }
+.terms li { margin-bottom: 6px; }

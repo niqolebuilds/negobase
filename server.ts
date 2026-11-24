@@ -4422,6 +4422,29 @@ function portalLocked(cycle: any, step: string): { locked: boolean; reason: stri
   return { locked: false, reason: null };
 }
 
+// What every principal must know, per negotiation (so per category). Shown at the top of the portal.
+const ddmmyyyy = (iso: string) => { const [y, m, d] = String(iso || "").slice(0, 10).split("-"); return y ? `${d}/${m}/${y}` : "-"; };
+function termsFor(cycle: any): { id: string; en: string }[] {
+  const b = cycle.binding;
+  const bind = b === "Disc"
+    ? { id: "Pengikatan dilakukan pada discount. Harga dasar mengikuti HNA, dan discount yang disepakati tetap berlaku selama periode kontrak.", en: "Binding is on the discount. The price follows the HNA and the agreed discount stays fixed for the contract period." }
+    : b === "Nett to Disc"
+    ? { id: "Pengikatan dilakukan pada nett price, dengan perhitungan dari HNA formularium Siloam dan discount yang disepakati. Apabila HNA berubah selama periode kontrak, discount menyesuaikan sehingga nett price tetap.", en: "Binding is on the nett price, calculated from Siloam's formulary HNA and the agreed discount. If the HNA changes during the contract, the discount adjusts so the nett price stays the same." }
+    : { id: "Pengikatan dilakukan pada nett price. Apabila terjadi kenaikan HNA selama periode kontrak, akan diberlakukan discount conversion sehingga nett price tetap sesuai kesepakatan.", en: "Binding is on the nett price. If the HNA rises during the contract period, a discount conversion is applied so the nett price stays as agreed." };
+  const fee = String(cycle.delivery_fee || "").replace(/^Delivery Fee:\s*/i, "");
+  const delivery = !fee || /^free/i.test(fee) ? { id: "Free delivery untuk seluruh unit Siloam Group.", en: "Free delivery to all Siloam Group units." } : { id: fee, en: fee };
+  return [
+    { id: `Contract Period: ${ddmmyyyy(cycle.contract_start)} sampai ${ddmmyyyy(cycle.contract_end)}`, en: `Contract Period: ${ddmmyyyy(cycle.contract_start)} to ${ddmmyyyy(cycle.contract_end)}` },
+    { id: `Binding: ${bind.id}`, en: `Binding: ${bind.en}` },
+    { id: `Delivery Fee: ${delivery.id}`, en: `Delivery Fee: ${delivery.en}` },
+    { id: "Seluruh kolom pada template RFQ yang telah ditandai wajib dilengkapi. Untuk New Item, tambahkan pada baris paling bawah dan isi status \"New Item\".", en: "All columns marked in the RFQ template are required. For a New Item, add it on the bottom row and set the status to \"New Item\"." },
+    { id: "Seluruh item wajib memiliki Nomor Izin Edar (NIE) yang masih berlaku pada saat quotation disampaikan.", en: "Every item must have a Marketing Authorization Number (NIE) that is still valid when the quotation is submitted." },
+    { id: "Untuk item berstatus Discontinued pada periode kontrak berikutnya, mohon melampirkan surat resmi discontinue dari principal atau principal global. Surat tidak perlu dikirimkan kembali apabila telah disampaikan sebelumnya.", en: "For items that will be Discontinued in the next contract period, please attach the official discontinue letter from the principal or global principal. The letter need not be sent again if it was submitted before." },
+    { id: "RFQ ini bersifat rahasia, merupakan initial offer, dan tidak dapat diartikan sebagai komitmen maupun jaminan kelanjutan kerja sama oleh Siloam Group.", en: "This RFQ is confidential, is an initial offer, and cannot be read as a commitment or guarantee of continued cooperation by Siloam Group." },
+    { id: "Principal diharapkan menyampaikan penawaran terbaik pada submission awal, mengingat penawaran tersebut akan menjadi dasar utama dalam proses evaluasi kerja sama.", en: "The principal is expected to give its best offer at the first submission, as it will be the main basis for evaluating the cooperation." },
+  ];
+}
+
 const PORTAL_STEP_NO: Record<string, number> = { rfq: 1, review_rfq: 2, counter_offer: 2, feedback1: 3, online_nego: 4, submission: 5, closed: 6 };
 const PORTAL_REASONS = [
   { key: "raw_material", id: "Kenaikan harga bahan baku", en: "Raw material cost increase" },
@@ -4457,6 +4480,7 @@ app.get("/api/p/me", (req: Request, res: Response) => {
     completed_at: cycle.completed_at || null,
     ppn: Number(settingsValues.ppn_rate) || 0.11,
     reasons: PORTAL_REASONS,
+    terms: termsFor(cycle),
     link_expires: link?.expires_at || addMonths(nowIso().slice(0, 10), 1),
     help: {
       whatsapp: process.env.NEGO_HELP_WHATSAPP || "6281112345678",

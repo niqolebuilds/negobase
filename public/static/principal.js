@@ -12,7 +12,7 @@ if (!["table", "list", "one"].includes(P.view) || (NARROW && P.view === "table")
 
 const T = {
   id: {
-    portal: "Portal Principal", loading: "Memuat…",
+    portal: "Portal Principal", loading: "Memuat…", terms_t: "Ketentuan RFQ",
     invalid_t: "Tautan tidak berlaku", invalid_p: "Tautan ini sudah kedaluwarsa atau dicabut. Minta tautan baru ke tim pengadaan.",
     step_of: (n) => `Langkah ${n} dari 6`, your_task: "Tugas Anda",
     steps: { rfq: "Isi data item & harga penawaran (RFQ)", feedback1: "Tanggapi counter offer", submission: "Kirim dokumen perusahaan" },
@@ -61,7 +61,7 @@ const T = {
     disc_bad: "Isi diskon 0 sampai 100",
   },
   en: {
-    portal: "Principal Portal", loading: "Loading…",
+    portal: "Principal Portal", loading: "Loading…", terms_t: "RFQ terms",
     invalid_t: "Link not valid", invalid_p: "This link has expired or was revoked. Ask the procurement team for a new one.",
     step_of: (n) => `Step ${n} of 6`, your_task: "Your task",
     steps: { rfq: "Item details & price quote (RFQ)", feedback1: "Respond to counter offer", submission: "Send company documents" },
@@ -355,6 +355,9 @@ function render() {
     el("h2", { text: `🔒 ${t(me.lock_reason === "sent" ? "locked_t" : "not_open")}` }),
     me.lock_reason === "sent" ? el("p", { text: t("locked_p", me.submitted ? fmtDate(me.submitted.at) : "") }) : null) : null;
   const waiting = me.turn === "siloam";
+  const termsBox = (me.terms || []).length ? el("details", { class: "terms", open: me.step === "rfq" && !me.locked },
+    el("summary", {}, el("b", { text: `${t("terms_t")} · ${me.category}${me.period ? ` · ${me.period}` : ""}` })),
+    el("ol", {}, me.terms.map((x) => el("li", { text: x[P.lang] || x.id })))) : null;
   const returned = me.return_note ? el("p", { class: "warnline", role: "status" }, `${t("returned")}${me.return_note.message ? `: ${me.return_note.message}` : ""}`) : null;
   put(app,
     el("section", { class: "pcard stepcard" },
@@ -363,6 +366,7 @@ function render() {
       el("p", { class: "muted", text: `${t("contract")} ${fmtDate(me.contract.start)} – ${fmtDate(me.contract.end)}${me.due && !waiting ? ` · ${t("due")} ${fmtDate(me.due)}` : ""}` }),
       me.overdue_days > 0 && !waiting ? el("p", { class: "warnline", role: "status", text: `⚠ ${t("overdue", me.overdue_days)}` }) : null,
       returned,
+      termsBox,
       me.locked ? null : howto,
       me.step === "submission" || me.locked ? null : el("div", { class: "excelrow" },
         el("span", { class: "muted", text: me.excel_upload ? t("excel_or") : "" }),
