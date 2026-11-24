@@ -24,6 +24,7 @@ const FILTERS = [
   ["all", "All items"],
   ["active", "Active items only"],
   ["discontinued", "Discontinued only"],
+  ["new", "New items (cek Siloam)"],
   ["anomalies", "With open findings"],
   ["increase", "Price up vs acuan (+%)"],
   ["decrease", "Price down vs acuan (-%)"],
@@ -773,7 +774,7 @@ async function renderItems(body) {
   const q = el("input", { type: "search", id: "ng-q", value: p.q || null, placeholder: "Search ERP code, name, brand, REF…" });
   
   const statusSelect = el("select", { id: "ng-status" },
-    [["all", "All statuses"], ["Active", "Active only"], ["Discontinue", "Discontinued only"]].map(([k, l]) =>
+    [["all", "All statuses"], ["Active", "Active only"], ["Discontinue", "Discontinued only"], ["New Item", "New items"]].map(([k, l]) =>
       el("option", { value: k, text: l })
     )
   );
@@ -1011,7 +1012,7 @@ async function loadItems(wrap, pager) {
           text: "⚲",
           onclick: (e) => {
             e.stopPropagation();
-            toggleColFilterMenu(th, "status", ["Active", "Discontinue"], p.status, (val) => {
+            toggleColFilterMenu(th, "status", ["Active", "Discontinue", "New Item"], p.status, (val) => {
               p.status = val;
               p.offset = 0;
               loadItems(wrap, pager);
@@ -1390,7 +1391,7 @@ function renderItemMarginCard(it) {
 }
 
 const BOOL_FIELDS = new Set(["sbp", "need_sbp", "proceed_bak"]);
-const SELECT_FIELDS = { item_status: ["", "Active", "Discontinue"], bucket: ["", "Consump", "Charge"] };
+const SELECT_FIELDS = { item_status: ["", "Active", "Discontinue", "New Item"], bucket: ["", "Consump", "Charge"] };
 
 async function openItem(id) {
   const body = openPanel(el("p", { class: "muted", text: "Loading…" }));
@@ -1431,7 +1432,7 @@ async function openItem(id) {
   rsnBox.hidden = true;
   const drugs = (ng.ov.cycle.category || "") === "Drugs";
   for (const [sec, fields0] of EDIT_GROUPS) {
-    const fields = fields0.filter((f) => !(f === "catalog_no" && drugs) && !(f === "active_ingredient" && !drugs));
+    const fields = [...(sec === "rfq" && it.is_new ? ["erp_code", "item_name"] : []), ...fields0.filter((f) => !(f === "catalog_no" && drugs) && !(f === "active_ingredient" && !drugs))];
     const fs = el("fieldset", { class: SECTION_CLASS[sec] }, el("legend", { text: SECTION_SHORT[sec] }));
     const lockedHere = fields.some((f) => fieldLocked(f));
     if (lockedHere) fs.append(el("p", { class: "small muted", style: "margin-top: 0;", text: "🔒 Data step ini sudah terkunci karena negosiasi sudah melewatinya. Mengubahnya = koreksi: isi alasan di bawah." }));
@@ -1494,6 +1495,7 @@ async function openItem(id) {
     el("p", { class: "eyebrow", text: it.erp_code || "No ERP code" }),
     el("h2", { id: "drawer-title", text: it.item_name || "Unnamed item" }),
     el("p", { class: "muted small", text: [it.brand, drugs ? it.active_ingredient : it.catalog_no, it.item_status, it.bucket].filter(Boolean).join(" · ") }),
+    it.is_new && it.item_status === "New Item" ? el("p", { class: "reason-note co" }, el("b", { text: "Item baru dari principal. " }), "Isi ERP code resmi di bawah (sekarang kode sementara), lalu setujui lewat Findings atau ubah status ke Active.") : null,
     prices, facts, marginBox, reason,
     el("h3", { text: "Findings" }), findings,
     el("h3", { text: canWork() ? "Edit" : "Values" }), anyLocked ? el("p", { class: "small muted", text: "Data step yang sudah lewat terkunci. Koreksi hanya atas pengajuan principal." }) : null, form,
@@ -1725,12 +1727,13 @@ function importPreview(plan, file) {
     Object.keys(plan.changes_by_column).length ? el("p", { class: "small", text: `Changes by column: ${Object.entries(plan.changes_by_column).map(([k, v]) => `${k} ${v}`).join(" · ")}` }) : null,
     plan.errors.length ? el("details", { open: "" }, el("summary", { text: `${plan.errors.length} baris dengan error (sel yang benar tetap dihitung)` }),
       el("ul", { class: "errors" }, plan.errors.slice(0, 60).map((x) => el("li", { text: `Baris ${x.row} ${x.erp_code || ""}: ${x.message}` })))) : null,
+    plan.new_items && plan.new_items.length ? el("div", { class: "preview ok" }, el("b", { text: `${plan.new_items.length} item baru akan ditambahkan (status New Item, masuk Findings untuk dicek)` }), el("ul", { class: "small" }, plan.new_items.map((n) => el("li", { text: `Baris ${n.row}: ${n.item_name}` })))) : null,
     plan.unmatched.length ? el("p", { class: "small muted", text: `Not matched: ${plan.unmatched.slice(0, 6).map((u) => u.erp_code || u.item_name).join(", ")}${plan.unmatched_count > 6 ? "…" : ""}` }) : null);
   const reason = el("textarea", { rows: "2", placeholder: "Alasan koreksi (atas pengajuan principal)" });
   if (plan.locked_count) box.append(el("div", { class: "preview bad" },
     el("p", { class: "error", text: `${plan.locked_count} perubahan menyentuh data step yang sudah terkunci (${(plan.locked_columns || []).join(", ")}). Ini koreksi: hanya atas pengajuan principal, tercatat di riwayat item.` }),
     field("Alasan koreksi (wajib)", reason)));
-  if (plan.changes.length) {
+  if (plan.changes.length || (plan.new_items && plan.new_items.length)) {
     const t = el("table");
     table(t, [{ label: "Baris", get: (c) => c.row }, { label: "ERP", get: (c) => c.erp_code }, { label: "Item", get: (c) => c.item_name }, { label: "Column", get: (c) => c.header },
       { label: "Now", get: (c) => fmtAny(c.field, c.old) }, { label: "File", get: (c) => fmtAny(c.field, c.new) }], plan.changes.slice(0, 100));

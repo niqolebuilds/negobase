@@ -426,7 +426,7 @@ async function buildTemplate(_unused, items, o) {
       c.alignment = { wrapText: true, vertical: "top" };
     }
   };
-  hint("status", "Active atau Discontinue. Discontinue wajib dengan surat DC (lampirkan di portal).");
+  hint("status", "Active atau Discontinue. Item baru: tulis di baris paling bawah dengan status New Item. Discontinue: lampirkan surat DC di portal.");
   hint("rfqQty", `Jumlah pcs per kemasan. Basis HNA kolom ${L.rfqHna}.`);
   hint("rfqHna", `HNA per satuan pembelian (kolom ${L.rfqQty}), sebelum PPN.`);
   hint("rfqDisc", "Angka 0 sampai 100 (15 = 15%). Maksimal 2 desimal.");
@@ -516,7 +516,7 @@ async function buildTemplate(_unused, items, o) {
     if (!at(k)) return;
     for (let r = FIRST_ROW; r <= LAST_ROW; r++) ws.getCell(r, at(k)).dataValidation = def;
   };
-  dv("status", { type: "list", allowBlank: true, formulae: ['"Active,Discontinue"'], showErrorMessage: true, errorTitle: "Item Status", error: "Pilih Active atau Discontinue." });
+  dv("status", { type: "list", allowBlank: true, formulae: ['"Active,Discontinue,New Item"'], showErrorMessage: true, errorTitle: "Item Status", error: "Pilih Active, Discontinue, atau New Item." });
   dv("rfqQty", { type: "whole", operator: "greaterThanOrEqual", allowBlank: true, formulae: [1], showErrorMessage: true, errorTitle: "Qty/PO Unit", error: "Isi bilangan bulat minimal 1." });
   dv("rfqHna", { type: "decimal", operator: "greaterThan", allowBlank: true, formulae: [0], showErrorMessage: true, errorTitle: "HNA", error: "HNA harus lebih dari 0." });
   for (const k of ["rfqDisc", "fb1Disc"]) dv(k, { type: "decimal", operator: "between", allowBlank: true, formulae: [0, 99.99], showErrorMessage: true, errorTitle: "Diskon", error: "Isi angka 0 sampai 99,99 (15 = 15%)." });
@@ -599,7 +599,7 @@ async function readTemplate(buffer) {
   }
   return rows;
 }
-var STATUS_WORDS = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue" };
+var STATUS_WORDS = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue", "new item": "New Item", newitem: "New Item", "item baru": "New Item" };
 var FIELD_META = {
   brand: { header: "Brand / Manufacturer", field: "brand", kind: "text" },
   ref: { header: "Catalog No. (REF)", field: "catalog_no", kind: "text" },
@@ -632,7 +632,7 @@ function checkRow(cells, allowed) {
     }
     if (m.kind === "status") {
       const v = STATUS_WORDS[raw.toLowerCase()];
-      if (!v) bad("pakai Active atau Discontinue");
+      if (!v) bad("pakai Active, Discontinue, atau New Item");
       else changes.push({ field: m.field, header: m.header, value: v });
       continue;
     }
@@ -1940,6 +1940,17 @@ function scanCycleAnomalies(cid) {
     if (comments.length) {
       const last = comments[comments.length - 1];
       pushFinding(raw, "principal_comment", "Pengajuan koreksi dari principal", "medium", `Principal mengajukan koreksi: "${last.text}"`, { principal_comment: last.text });
+    }
+    if (raw.is_new && raw.item_status === "New Item") {
+      pushFinding(
+        raw,
+        "new_item",
+        "Item baru dari principal",
+        "medium",
+        `Item baru "${raw.item_name}" (kode sementara ${raw.erp_code}): belum ada MOU, PO, atau formularium sebagai pembanding. Cek NIE, kode ERP, dan harganya, lalu setujui sebagai item aktif.`,
+        { field: "item_status", suggestion: null, suggestion_text: "Beri ERP code di detail item, lalu ubah status ke Active" }
+      );
+      continue;
     }
     if (raw.item_status === "Discontinue") continue;
     const acuan = en.primary_bench;
@@ -3462,6 +3473,7 @@ app.get("/api/nego/cycles/:cid/items", (req, res) => {
   else if (filter === "increase") rows = rows.filter((r) => (r.change_pct || 0) > 5e-4);
   else if (filter === "decrease") rows = rows.filter((r) => (r.change_pct || 0) < -5e-4);
   else if (filter === "no_mou") rows = rows.filter((r) => !r.in_mou);
+  else if (filter === "new") rows = rows.filter((r) => r.is_new);
   else if (filter === "no_rfq") rows = rows.filter((r) => r.rfq_hna == null && r.item_status !== "Discontinue");
   else if (filter === "has_rfq") rows = rows.filter((r) => r.rfq_hna != null);
   else if (filter === "discontinued") rows = rows.filter((r) => r.item_status === "Discontinue");
@@ -4080,11 +4092,56 @@ function newCycleItem(cid, idx, it) {
     proceed_bak: null,
     needs_check: false,
     check_note: null,
+    is_new: false,
     comments: [],
     corrections: [],
     history: [],
     version: 0
   };
+}
+function addNewItem(cid, f, by) {
+  const items = cycleItemsMap.get(cid) || [];
+  const used = new Set(items.map((i) => String(i.erp_code)));
+  let code = normalizeCode(f.erp_code);
+  if (!code || used.has(code)) {
+    let k = items.filter((i) => /^NEW-\d+$/.test(String(i.erp_code))).length + 1;
+    while (used.has(`NEW-${String(k).padStart(3, "0")}`)) k++;
+    code = `NEW-${String(k).padStart(3, "0")}`;
+  }
+  const base = newCycleItem(cid, 0, {
+    erp_code: code,
+    item_name: String(f.item_name || "").trim().slice(0, 200),
+    brand: "",
+    catalog_no: "",
+    active_ingredient: "",
+    item_status: "New Item",
+    remarks: null,
+    mou_qty: null,
+    mou_hna: null,
+    mou_disc: null,
+    formulary_hna: null,
+    form_conv: null,
+    form_disc: null,
+    hna_sbp: null,
+    form_kind: "",
+    bucket: "",
+    sbp: null,
+    need_sbp: null,
+    notes: "",
+    po_unit_text: "",
+    po_qty_12m: 0,
+    po_value_12m: 0,
+    po_avg_price: null,
+    last_po_price: null,
+    po_years: {}
+  });
+  const it = { ...base, id: Math.max(0, ...items.map((i) => i.id)) + 1, sort: items.length + 1, is_new: true, added_by: by, added_at: nowIso() };
+  items.push(it);
+  cycleItemsMap.set(cid, items);
+  const changes = {};
+  for (const k of ["brand", "catalog_no", "active_ingredient", "remarks", "rfq_qty", "rfq_hna", "rfq_disc", "price_reason"]) if (f[k] !== void 0 && f[k] !== null && f[k] !== "") changes[k] = f[k];
+  recordChange(it, changes, { source: "item baru", by });
+  return it;
 }
 app.post("/api/admin/nego/cycles", (req, res) => {
   const pid = Number(req.body?.principal_id);
@@ -4340,7 +4397,7 @@ app.post("/api/admin/nego/cycles/:cid/scan", (req, res) => {
   const counts = scanCycleAnomalies(cid);
   res.json({ ...counts, counts });
 });
-var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note", "notes", "bucket", "active_ingredient"];
+var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note", "notes", "bucket", "active_ingredient", "erp_code", "item_name"];
 var ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "on_disc_nett", "on_disc_disc", "mou_disc"];
 var ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
 var ITEM_BOOL_FIELDS = ["proceed_bak", "sbp", "need_sbp"];
@@ -4350,7 +4407,7 @@ function cleanItemChanges(input) {
     if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
     else if (ITEM_BOOL_FIELDS.includes(k)) out[k] = v === null || v === "" ? null : v === true || v === "true" || v === "yes";
     else if (k === "item_status") {
-      if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
+      if (!["Active", "Discontinue", "New Item"].includes(String(v))) return { changes: {}, error: "Item status must be Active, Discontinue or New Item" };
       out[k] = v;
     } else if (ITEM_DISC_FIELDS.includes(k)) {
       const d = parseDiscount(v);
@@ -4382,6 +4439,17 @@ app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req, res) => {
   if (!it || !c) return res.status(404).json({ error: "No such item" });
   const clean = cleanItemChanges(req.body?.changes || {});
   if (clean.error) return res.status(400).json({ error: clean.error });
+  if (clean.changes.erp_code !== void 0 || clean.changes.item_name !== void 0) {
+    if (!it.is_new) return res.status(400).json({ error: "ERP code dan nama hanya bisa diubah untuk item baru dari principal." });
+    if (clean.changes.erp_code !== void 0) {
+      const code = normalizeCode(clean.changes.erp_code);
+      if (!code) return res.status(400).json({ error: "ERP code tidak boleh kosong." });
+      if (items.some((x) => x.id !== it.id && x.erp_code === code)) return res.status(409).json({ error: `ERP code ${code} sudah dipakai SKU lain di negosiasi ini.` });
+      clean.changes.erp_code = code;
+    }
+    if (clean.changes.item_name !== void 0 && !clean.changes.item_name) return res.status(400).json({ error: "Nama item tidak boleh kosong." });
+  }
+  if (clean.changes.item_status === "New Item" && !it.is_new) return res.status(400).json({ error: "Status New Item hanya untuk item baru dari principal." });
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const baseVersion = req.body?.base_version;
   if (baseVersion != null && Number(baseVersion) !== (it.version || 0)) {
@@ -4412,7 +4480,10 @@ app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req, res) => {
   const it = items.find((x) => x.id === a.item_id);
   const c = cycleOf(cid);
   if (decision === "fix") {
-    if (a.field && a.suggestion != null && it) {
+    if (a.rule === "new_item" && it) {
+      if (/^NEW-\d+$/.test(String(it.erp_code))) return res.status(400).json({ error: "Beri ERP code resmi di detail item dulu, lalu setujui item baru ini." });
+      recordChange(it, { item_status: "Active" }, { source: "item baru disetujui" });
+    } else if (a.field && a.suggestion != null && it) {
       if (lockedStepFor(c, a.field)) return res.status(423).json({ error: "Data step ini sudah terkunci. Koreksi lewat detail item dengan alasan." });
       recordChange(it, { [a.field]: a.suggestion }, { source: "finding" });
     }
@@ -4960,6 +5031,7 @@ function formatPrincipalItem(it, step, cycle) {
     brand: it.brand || "",
     catalog_no: it.catalog_no || "",
     active_ingredient: it.active_ingredient || "",
+    is_new: !!it.is_new,
     item_status: it.item_status || "Active",
     remarks: it.remarks || null,
     rfq_qty: it.rfq_qty ?? null,
@@ -5088,8 +5160,14 @@ app.patch("/api/p/items/:iid", (req, res) => {
   let caution = null;
   if (changes) {
     if (changes.item_status !== void 0) {
-      if (!["Active", "Discontinue"].includes(String(changes.item_status))) return res.status(400).json({ error: "Status harus Aktif atau Discontinue." });
-      next.item_status = changes.item_status;
+      if (it.is_new && it.item_status === "New Item") {
+      } else if (!["Active", "Discontinue"].includes(String(changes.item_status))) return res.status(400).json({ error: "Status harus Aktif atau Discontinue." });
+      else next.item_status = changes.item_status;
+    }
+    if (changes.item_name !== void 0 && it.is_new) {
+      const nm = String(changes.item_name || "").trim().slice(0, 200);
+      if (!nm) return res.status(400).json({ error: "Nama item tidak boleh kosong." });
+      next.item_name = nm;
     }
     for (const f of ["brand", "catalog_no", "active_ingredient", "remarks"]) if (changes[f] !== void 0) next[f] = String(changes[f] ?? "").trim().slice(0, 300);
     if (changes.rfq_qty !== void 0) {
@@ -5143,6 +5221,51 @@ app.patch("/api/p/items/:iid", (req, res) => {
   pruneAnswers(it, step, cycle);
   scanCycleAnomalies(cycle.id);
   res.json({ ...formatPrincipalItem(it, step, cycle), caution });
+});
+app.post("/api/p/items", (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (step !== "rfq" || portalLocked(cycle, step).locked) return res.status(403).json({ error: "Item baru hanya bisa ditambahkan saat RFQ terbuka." });
+  const b = req.body || {};
+  const name = String(b.item_name || "").trim();
+  if (!name) return res.status(400).json({ error: "Nama item wajib diisi." });
+  if ((cycleItemsMap.get(cycle.id) || []).some((i) => String(i.item_name).trim().toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: "Nama item ini sudah ada di daftar." });
+  const f = { item_name: name };
+  if (b.brand) f.brand = String(b.brand).trim().slice(0, 300);
+  if (b.catalog_no) f.catalog_no = String(b.catalog_no).trim().slice(0, 300);
+  if (b.active_ingredient) f.active_ingredient = String(b.active_ingredient).trim().slice(0, 300);
+  if (b.rfq_qty) {
+    const n = parseMoney(b.rfq_qty);
+    if (n == null || n < 1) return res.status(400).json({ error: "Isi per kemasan harus bilangan bulat minimal 1." });
+    f.rfq_qty = Math.round(n);
+  }
+  if (b.rfq_hna) {
+    const n = parseMoney(b.rfq_hna);
+    if (n == null || n <= 0) return res.status(400).json({ error: "Harga HNA tidak valid." });
+    f.rfq_hna = n;
+  }
+  if (b.rfq_disc) {
+    const d = parseDiscount(b.rfq_disc);
+    if (d.error) return res.status(400).json({ error: d.error });
+    f.rfq_disc = d.value;
+  }
+  const it = addNewItem(cycle.id, f, `principal:${cycle.principal.name}`);
+  scanCycleAnomalies(cycle.id);
+  logCycle(cycle.id, "principal.new_item", { item_name: name, code: it.erp_code }, `principal:${cycle.principal.name}`);
+  res.json(formatPrincipalItem(it, step, cycle));
+});
+app.delete("/api/p/items/:iid", (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci." });
+  const items = cycleItemsMap.get(cycle.id) || [];
+  const it = items.find((x) => x.id === Number(req.params.iid));
+  if (!it || !it.is_new) return res.status(400).json({ error: "Hanya item baru yang bisa dihapus." });
+  cycleItemsMap.set(cycle.id, items.filter((x) => x.id !== it.id));
+  scanCycleAnomalies(cycle.id);
+  res.json({ ok: true });
 });
 app.post("/api/p/fill", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
@@ -5200,6 +5323,7 @@ app.get("/api/p/summary", (req, res) => {
     step,
     items: pItems.length,
     discontinued: dcList.length,
+    new_items: pItems.filter((i) => i.is_new).length,
     discontinued_list: dcList.slice(0, 200),
     needs_discontinue_confirm: step === "rfq" && dcList.length > 0,
     done: pItems.filter((i) => i.state === "done").length,
@@ -5294,12 +5418,14 @@ app.get("/api/p/template.xlsx", async (req, res) => {
 function fieldNow(it, field) {
   return it[field] ?? null;
 }
-function planTemplateRows(rows, items, allowed) {
+function planTemplateRows(rows, items, allowed, allowNew = false) {
   const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
   const count = /* @__PURE__ */ new Map();
   for (const r of rows) if (r.erp_code) count.set(r.erp_code, [...count.get(r.erp_code) || [], r.row]);
   const rejected = [];
   const unmatched = [];
+  const newRows = [];
+  const names = /* @__PURE__ */ new Map();
   const changes = [];
   const perItem = /* @__PURE__ */ new Map();
   const seen = /* @__PURE__ */ new Set();
@@ -5307,6 +5433,21 @@ function planTemplateRows(rows, items, allowed) {
   for (const r of rows) {
     const it = byErp.get(r.erp_code);
     if (!it) {
+      if (allowNew && /^(new\s*item|item baru)$/i.test((r.cells.status || "").trim())) {
+        const key = r.item_name.trim().toLowerCase();
+        const errs = [];
+        if (!r.item_name.trim()) errs.push({ column: "Item Name", value: "", message: "nama item baru wajib diisi" });
+        if (names.has(key)) errs.push({ column: "Item Name", value: r.item_name, message: `nama dobel dengan baris ${names.get(key)}` });
+        names.set(key, r.row);
+        const chk2 = checkRow(r.cells, allowed.filter((k) => k !== "status"));
+        errs.push(...chk2.errors);
+        if (errs.length) {
+          rejected.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name, errors: errs });
+          continue;
+        }
+        newRows.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name.trim(), fields: Object.fromEntries(chk2.changes.map((c) => [c.field, c.value])) });
+        continue;
+      }
       unmatched.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name });
       continue;
     }
@@ -5327,7 +5468,7 @@ function planTemplateRows(rows, items, allowed) {
       perItem.set(it.id, { ...perItem.get(it.id) || {}, [ch.field]: ch.value });
     }
   }
-  return { byErp, rejected, unmatched, changes, perItem, seen, matched, okRows, total: rows.length };
+  return { byErp, rejected, unmatched, newRows, changes, perItem, seen, matched, okRows: okRows + newRows.length, total: rows.length };
 }
 app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file")), async (req, res) => {
   const cid = Number(req.params.cid);
@@ -5342,7 +5483,7 @@ app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file
     return res.status(400).json({ error: e.message });
   }
   const items = cycleItemsMap.get(cid) || [];
-  const plan = planTemplateRows(rows, items, STAFF_COLUMNS);
+  const plan = planTemplateRows(rows, items, STAFF_COLUMNS, true);
   const locked = plan.changes.filter((x) => lockedStepFor(c, x.field));
   const byCol = {};
   plan.changes.forEach((x) => {
@@ -5367,11 +5508,17 @@ app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file
       }
       if (done.includes("on_disc_nett") || done.includes("on_disc_disc")) syncFinalScheme(c, it);
     }
+    for (const nr of plan.newRows) {
+      addNewItem(cid, { erp_code: nr.erp_code, item_name: nr.item_name, ...nr.fields }, actingUser().email);
+      applied++;
+      touched.add(-applied);
+    }
     const scan = scanCycleAnomalies(cid);
     logCycle(cid, "cycle.import", { items: touched.size, changes: applied, locked: locked.length, reason: reason || null, file: file.originalname, rejected_rows: plan.rejected.length });
     return res.json({ applied_items: touched.size, applied_changes: applied, rejected_rows: plan.rejected.length, scan: { found: scan.open } });
   }
   res.json({
+    new_items: plan.newRows.map((n) => ({ row: n.row, item_name: n.item_name, erp_code: n.erp_code || null })),
     rows_in_file: plan.total,
     ok_rows: plan.okRows,
     rejected_rows: plan.rejected.length,
@@ -5403,7 +5550,7 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, re
   }
   const allowed = step === "rfq" ? ["brand", "ref", "ai", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "reason"] : step === "feedback1" ? ["fb1Disc"] : [];
   const items = cycleItemsMap.get(cycle.id) || [];
-  const plan = planTemplateRows(rows, items, allowed);
+  const plan = planTemplateRows(rows, items, allowed, step === "rfq");
   const overwrites = plan.changes.filter((x) => x.overwrites);
   if (String(req.body?.apply) === "1") {
     if (overwrites.length && String(req.body?.confirm_overwrite) !== "1") {
@@ -5417,9 +5564,13 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, re
         it.needs_check = false;
       }
     }
+    for (const nr of plan.newRows) {
+      addNewItem(cycle.id, { erp_code: nr.erp_code, item_name: nr.item_name, ...nr.fields }, `principal:${cycle.principal.name}`);
+      applied++;
+    }
     scanCycleAnomalies(cycle.id);
-    logCycle(cycle.id, "principal.excel", { step, rows: plan.total, applied, rejected_rows: plan.rejected.length }, `principal:${cycle.principal.name}`);
-    return res.json({ applied, rejected_rows: plan.rejected.length });
+    logCycle(cycle.id, "principal.excel", { step, rows: plan.total, applied, new_items: plan.newRows.length, rejected_rows: plan.rejected.length }, `principal:${cycle.principal.name}`);
+    return res.json({ applied, new_items: plan.newRows.length, rejected_rows: plan.rejected.length });
   }
   res.json({
     total: plan.total,
@@ -5430,6 +5581,7 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, re
     changes: plan.changes.map((x) => ({ erp_code: x.erp_code, item_name: x.item_name, header: x.header, old: x.old, new: x.new, overwrites: x.overwrites })),
     overwrite_count: overwrites.length,
     changed_items: plan.perItem.size,
+    new_items: plan.newRows.map((n) => ({ row: n.row, item_name: n.item_name, erp_code: n.erp_code || null })),
     read_errors: [],
     unmatched_count: plan.unmatched.length,
     notes: []
