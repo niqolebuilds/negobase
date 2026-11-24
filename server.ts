@@ -3540,8 +3540,9 @@ app.post("/api/admin/nego/cycles", (req: Request, res: Response) => {
   if (cyclesList.some((x) => x.principal_id === p.id && x.status === "open" && (x.category || categoriesOf(p)[0]) === category)) {
     return res.status(409).json({ error: `${p.name} already has an open ${category} negotiation` });
   }
-  // The negotiation reads the active period of its own category.
-  const per = activePeriodFor(category);
+  // The negotiation reads the active period of its own category. With none active there is no price to read.
+  const per = periodsList.find((x) => x.category === category && x.active);
+  if (!per) return res.status(400).json({ error: `Belum ada periode ${category} yang aktif. Aktifkan satu periode ${category} di Admin > Negotiation Periods.` });
   const c = {
     id: Math.max(0, ...cyclesList.map((x) => x.id)) + 1,
     principal_id: p.id,
