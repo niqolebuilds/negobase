@@ -4,7 +4,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
-import ExcelJS3 from "exceljs";
+import ExcelJS4 from "exceljs";
 
 // tabular.ts
 import ExcelJS from "exceljs";
@@ -102,22 +102,6 @@ function hasColumn(rows, ...aliases) {
   const keys = Object.keys(rows[0]).map(norm);
   return aliases.some((a) => keys.includes(norm(a)));
 }
-function toNumber(v) {
-  if (v == null) return null;
-  let s = String(v).trim().replace(/rp/i, "").replace(/%/g, "").replace(/\s/g, "");
-  if (!s) return null;
-  const lastDot = s.lastIndexOf(".");
-  const lastComma = s.lastIndexOf(",");
-  if (lastDot >= 0 && lastComma >= 0) {
-    s = lastComma > lastDot ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
-  } else if (lastComma >= 0) {
-    s = /^\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, "") : s.replace(",", ".");
-  } else if (lastDot >= 0 && /^\d{1,3}(\.\d{3})+$/.test(s)) {
-    s = s.replace(/\./g, "");
-  }
-  const n = parseFloat(s);
-  return Number.isNaN(n) ? null : n;
-}
 function toIsoDate(v) {
   if (!v) return null;
   const s = String(v).trim();
@@ -131,96 +115,427 @@ function toIsoDate(v) {
 
 // template.ts
 import ExcelJS2 from "exceljs";
-var COL = {
-  erp: 1,
-  name: 2,
-  brand: 3,
-  ref: 4,
-  status: 5,
-  remarks: 6,
-  mouQty: 7,
-  mouHna: 8,
-  mouDisc: 9,
-  mouPrice: 10,
-  rfqQty: 11,
-  rfqHna: 12,
-  rfqDisc: 13,
-  rfqPrice: 14,
-  coDisc: 15,
-  coPrice: 16,
-  fb1Disc: 17,
-  fb1Price: 18,
-  onDisc: 19,
-  onPrice: 20
+
+// pricing.ts
+var DEFAULT_PPN = 0.11;
+function matchUoMQty(text2) {
+  if (!text2) return null;
+  const s = String(text2).trim();
+  const multi = s.match(/(\d+)\s*(?:strip|blister|alu|tube|botol|vial|amp\w*|sachet|bag)\s*(?:@|x|isi|\*)\s*(\d+)/i);
+  if (multi) return Math.max(1, parseInt(multi[1], 10) * parseInt(multi[2], 10));
+  const m = s.match(/(?:@|\/|isi\s*|x\s*|:\s*|=\s*|of\s*)(\d+)/i) || s.match(/\b(?:box|pack|pak|dus|btl|bag|strip)\s*(\d+)\b/i) || s.match(/\b(\d+)\s*(?:pcs|pc|tab\w*|cap\w*|amp\w*|vial\w*|strip\w*|roll\w*|test\w*|pair\w*|bag\w*|btl|botol|sachet|syringe|unit|lembar|set)/i);
+  return m ? Math.max(1, parseInt(m[1], 10)) : null;
+}
+function parseUoMQty(text2) {
+  return matchUoMQty(text2) ?? 1;
+}
+function normalizeUom(text2) {
+  const s = String(text2 ?? "").trim();
+  if (!s) return "";
+  const up = s.toUpperCase();
+  const qty = matchUoMQty(up);
+  const words = (up.match(/[A-Z]+/g) || []).filter((w) => !["ISI", "X", "OF", "PCS", "PC"].includes(w));
+  const unit = words[0] || "";
+  if (unit && qty) return `${unit}@${qty}`;
+  if (qty && !unit) return `@${qty}`;
+  return up.replace(/\s+/g, " ");
+}
+var normalizeCode = (v) => String(v ?? "").trim().toUpperCase();
+var normalizePrincipalName = (v) => String(v ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+function parseMoney(v) {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  let s = String(v).trim().replace(/rp\.?/i, "").replace(/%/g, "").replace(/\s/g, "");
+  if (!s) return null;
+  const lastDot = s.lastIndexOf(".");
+  const lastComma = s.lastIndexOf(",");
+  if (lastDot >= 0 && lastComma >= 0) s = lastComma > lastDot ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+  else if (lastComma >= 0) s = /^-?\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, "") : s.replace(",", ".");
+  else if (lastDot >= 0 && /^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? null : n;
+}
+function parseDiscount(raw) {
+  if (raw == null) return { value: null };
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return { value: null, error: "Diskon bukan angka." };
+    return checkDisc(raw);
+  }
+  const s = String(raw).trim().replace(/\s/g, "");
+  if (s === "") return { value: null };
+  const body = s.replace(/%/g, "");
+  if (!/^\d+([.,]\d+)?$/.test(body)) return { value: null, error: `Diskon "${String(raw).trim()}" bukan angka. Isi angka 0 sampai 100, contoh 15 atau 27,5.` };
+  return checkDisc(parseFloat(body.replace(",", ".")));
+}
+function checkDisc(percent) {
+  if (percent < 0) return { value: null, error: "Diskon tidak boleh negatif." };
+  if (percent >= 100) return { value: null, error: `Diskon ${percent}% tidak wajar. Isi angka antara 0 dan 100 (contoh 15 untuk 15%).` };
+  const rounded = Math.round(percent * 100) / 100;
+  return { value: Math.round(rounded * 100) / 1e4 };
+}
+function fmtPct(frac) {
+  if (frac == null) return "";
+  const p2 = Math.round(frac * 1e4) / 100;
+  return `${String(p2).replace(".", ",")}%`;
+}
+function priceHnaPc(it, binding, formHnaPc, poAvgPc) {
+  const rfqPc = it.rfq_hna != null && it.rfq_qty > 0 ? it.rfq_hna / it.rfq_qty : null;
+  if (binding === "Nett to Disc") return formHnaPc ?? poAvgPc ?? rfqPc;
+  return rfqPc;
+}
+var STEP_KEYS = ["rfq", "co", "fb1", "on"];
+function enrichCycleItem(item, ppn = DEFAULT_PPN, cycle) {
+  const it = { ...item };
+  const binding = cycle?.binding || it.binding || "Nett";
+  const negoType = cycle?.nego_type || it.nego_type || "Renewal";
+  const monthsElapsed = cycle?.months_elapsed || 12;
+  const vat = 1 + ppn;
+  const poPack = matchUoMQty(it.po_unit_text) || it.form_conv || it.mou_qty || it.rfq_qty || 1;
+  const formConv = it.form_conv || poPack;
+  it.po_unit_pcs = poPack;
+  const formHnaPc = it.formulary_hna ? it.formulary_hna / formConv : null;
+  const formDisc = it.form_disc ?? 0;
+  it.form_hna_pc = formHnaPc;
+  it.form_base_price = formHnaPc != null ? formHnaPc * vat : it.form_base_price_given ?? null;
+  it.form_nett_price = formHnaPc != null ? formHnaPc * (1 - formDisc) * vat : it.form_price_given ?? null;
+  it.form_margin_unit = it.form_base_price != null && it.form_nett_price != null ? it.form_base_price - it.form_nett_price : null;
+  const poAvgPc = it.po_avg_price ? it.po_avg_price / poPack : null;
+  it.po_avg_pc = poAvgPc;
+  it.po_unit_price = poAvgPc != null ? poAvgPc * vat : null;
+  it.annual_pcs = it.po_qty_12m ? it.po_qty_12m * poPack * 12 / monthsElapsed : null;
+  it.po_annualized_value = (it.po_value_12m || 0) * 12 / monthsElapsed;
+  it.po_annualized_value_ppn = it.po_annualized_value * vat;
+  it.in_mou = it.mou_hna != null && it.mou_qty > 0;
+  it.mou_unit_price = it.in_mou ? it.mou_hna / it.mou_qty * (1 - (it.mou_disc || 0)) * vat : null;
+  const hnaPc = priceHnaPc(it, binding, formHnaPc, poAvgPc);
+  const hasRfq = it.rfq_hna != null && it.rfq_qty > 0;
+  const priceAt = (disc, schemeBinding = binding) => {
+    if (!hasRfq || disc == null) return null;
+    const base = priceHnaPc(it, schemeBinding, formHnaPc, poAvgPc);
+    return base != null ? base * (1 - disc) * vat : null;
+  };
+  it.rfq_unit_price = hasRfq ? priceAt(it.rfq_disc ?? 0) : null;
+  it.co_unit_price = priceAt(it.co_disc);
+  it.fb1_unit_price = priceAt(it.fb1_disc);
+  it.on_unit_price = priceAt(it.on_disc);
+  it.on_nett_unit_price = priceAt(it.on_disc_nett, "Nett");
+  it.on_disc_unit_price = priceAt(it.on_disc_disc, "Disc");
+  const acuan = it.form_nett_price ?? it.mou_unit_price ?? it.po_unit_price ?? null;
+  const acuanTag = it.form_nett_price != null ? "Formularium" : it.mou_unit_price != null ? "MOU" : it.po_unit_price != null ? "PO" : "tanpa acuan";
+  it.primary_bench = acuan;
+  it.bench_tag = acuanTag;
+  it.base_from = acuanTag;
+  it.base_price_cmp = acuan;
+  let baseHnaPc;
+  if (binding === "Nett") baseHnaPc = it.rfq_hna != null && it.rfq_qty > 0 ? it.rfq_hna / it.rfq_qty : it.in_mou ? it.mou_hna / it.mou_qty : formHnaPc ?? poAvgPc;
+  else baseHnaPc = formHnaPc ?? poAvgPc;
+  const baseMargin = baseHnaPc != null ? baseHnaPc * vat : null;
+  it.hna_per_pc = baseHnaPc;
+  it.base_margin_price = baseMargin;
+  it.base_price = baseMargin;
+  const poValue = it.po_annualized_value_ppn;
+  const formMarginUnit = () => {
+    if (it.form_margin_unit != null) return it.form_margin_unit;
+    return baseMargin != null && acuan != null ? baseMargin - acuan : null;
+  };
+  const metrics = (price) => {
+    if (price == null) return null;
+    const annual = it.annual_pcs;
+    const totalCost = annual ? price * annual : null;
+    let costImpact = null;
+    if (annual) {
+      if (negoType === "Force Majeure" && it.mou_unit_price != null) costImpact = (price - it.mou_unit_price) * annual;
+      else if (it.po_annualized_value) costImpact = price * annual - poValue;
+    }
+    const marginPc = baseMargin != null ? baseMargin - price : null;
+    const totalMargin = marginPc != null && annual ? marginPc * annual : null;
+    const fm = formMarginUnit();
+    const poMarginUnit = baseMargin != null && it.po_unit_price != null ? baseMargin - it.po_unit_price : null;
+    return {
+      price,
+      total_cost: totalCost,
+      cost_impact: costImpact,
+      margin_pc: marginPc,
+      total_margin: totalMargin,
+      margin_impact_form: marginPc != null && fm != null && annual ? (marginPc - fm) * annual : null,
+      margin_impact_po: marginPc != null && poMarginUnit != null && annual ? (marginPc - poMarginUnit) * annual : null
+    };
+  };
+  const byStep = {};
+  for (const k of STEP_KEYS) byStep[k] = metrics(it[`${k}_unit_price`]);
+  const preKey = ["fb1", "co", "rfq"].find((k) => byStep[k]);
+  byStep.pre = preKey ? { ...byStep[preKey], step: preKey } : null;
+  byStep.post = byStep.on ? { ...byStep.on, step: "on" } : null;
+  const latestKey = ["on", "fb1", "co", "rfq"].find((k) => byStep[k]);
+  byStep.latest = latestKey ? { ...byStep[latestKey], step: latestKey } : null;
+  it.m = byStep;
+  for (const k of STEP_KEYS) {
+    const m = byStep[k];
+    it[`impact_${k}`] = m?.cost_impact ?? null;
+    it[`margin_pc_${k}`] = m?.margin_pc ?? null;
+    it[`margin_annual_${k}`] = m?.total_margin ?? null;
+    it[`margin_impact_${k}_vs_formulary`] = m?.margin_impact_form ?? null;
+    it[`margin_impact_${k}_vs_po`] = m?.margin_impact_po ?? null;
+  }
+  const L = byStep.latest;
+  it.latest_stage = L?.step ?? null;
+  it.latest_price = L?.price ?? null;
+  it.change_pct = L && acuan ? L.price / acuan - 1 : null;
+  it.impact = L?.cost_impact ?? null;
+  it.margin_pc = L?.margin_pc ?? null;
+  it.margin_pct = L && baseMargin ? L.margin_pc / baseMargin : null;
+  it.margin_annual = L?.total_margin ?? null;
+  it.margin_vs_formulary = L?.margin_impact_form ?? null;
+  it.margin_vs_po = L?.margin_impact_po ?? null;
+  it.margin_impact_vs_formulary = it.margin_vs_formulary;
+  it.margin_impact_vs_po = it.margin_vs_po;
+  it.formulary_unit_price = it.form_nett_price;
+  it.margin_pc_formulary = formMarginUnit();
+  it.margin_pc_po = baseMargin != null && it.po_unit_price != null ? baseMargin - it.po_unit_price : null;
+  it.variance_hna_pc = it.rfq_hna != null && it.rfq_qty > 0 && formHnaPc != null ? it.rfq_hna / it.rfq_qty - formHnaPc : null;
+  it.variance_disc = it.rfq_disc != null && it.form_disc != null ? it.rfq_disc - it.form_disc : null;
+  void hnaPc;
+  return it;
+}
+var sum = (xs) => {
+  const v = xs.filter((x) => x != null);
+  return v.length ? v.reduce((a, b) => a + b, 0) : null;
 };
+function summarizeCycleItems(enriched) {
+  const active = enriched.filter((i) => i.item_status !== "Discontinue");
+  const stages = ["rfq", "co", "fb1", "on"].map((key) => {
+    const rows = active.filter((i) => i[`${key}_unit_price`] != null);
+    const cmp = (i) => i.primary_bench;
+    return {
+      key,
+      label: { rfq: "RFQ", co: "Counter offer", fb1: "Feedback I", on: "Online nego" }[key],
+      items: rows.length,
+      increases: rows.filter((i) => cmp(i) && i[`${key}_unit_price`] > cmp(i) * 1.0005).length,
+      decreases: rows.filter((i) => cmp(i) && i[`${key}_unit_price`] < cmp(i) * 0.9995).length,
+      impact: sum(rows.map((i) => i[`impact_${key}`])),
+      margin_impact_vs_formulary: sum(rows.map((i) => i[`margin_impact_${key}_vs_formulary`])),
+      margin_impact_vs_po: sum(rows.map((i) => i[`margin_impact_${key}_vs_po`]))
+    };
+  });
+  const rfqFilled = active.filter((i) => i.rfq_hna != null);
+  const poValue = active.reduce((s, i) => s + (i.po_annualized_value_ppn || 0), 0);
+  return {
+    items: enriched.length,
+    active: active.length,
+    discontinued: enriched.length - active.length,
+    with_mou: enriched.filter((i) => i.in_mou).length,
+    with_po: enriched.filter((i) => i.po_qty_12m != null && i.po_qty_12m !== 0).length,
+    po_value_12m: poValue,
+    baseline_spend: poValue,
+    stages,
+    rfq_filled: rfqFilled.length,
+    rfq_active_pct: active.length ? rfqFilled.length / active.length : 0,
+    latest_impact: sum(active.map((i) => i.impact)),
+    margin_vs_formulary: sum(active.map((i) => i.margin_vs_formulary)),
+    margin_vs_po: sum(active.map((i) => i.margin_vs_po)),
+    margin_impact_vs_formulary: sum(active.map((i) => i.margin_vs_formulary)),
+    margin_impact_vs_po: sum(active.map((i) => i.margin_vs_po))
+  };
+}
+function escalationFor(costImpactFin, poValueAnnualPpn, pctLimit, rpLimit) {
+  if (costImpactFin == null || costImpactFin <= 0) return { needed: false, reasons: [], pct: costImpactFin != null && poValueAnnualPpn ? costImpactFin / poValueAnnualPpn : null };
+  const pct = poValueAnnualPpn > 0 ? costImpactFin / poValueAnnualPpn : null;
+  const reasons = [];
+  if (pctLimit > 0 && pct != null && pct > pctLimit) reasons.push("pct");
+  if (rpLimit > 0 && costImpactFin > rpLimit) reasons.push("rp");
+  return { needed: reasons.length > 0, reasons, pct };
+}
+function parseDiscLenient(raw) {
+  if (raw == null || raw === "") return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const n = parseMoney(s);
+  if (n == null || n < 0) return null;
+  const frac = s.includes("%") ? n / 100 : n < 1 ? n : n / 100;
+  return frac >= 1 ? null : Math.round(frac * 1e4) / 1e4;
+}
+var normName = (v) => String(v ?? "").toUpperCase().replace(/[.,]/g, "").replace(/\s+/g, " ").trim();
+
+// template.ts
 var FIRST_ROW = 8;
-var FORMULA_ROWS = 500;
+var LAST_ROW = 1e3;
+var HEADER_ROW = 7;
+var REASONS = [
+  { key: "raw_material", label: "Kenaikan harga bahan baku" },
+  { key: "fx", label: "Perubahan nilai tukar (kurs)" },
+  { key: "production", label: "Kenaikan biaya produksi / logistik" },
+  { key: "other", label: "Lainnya" }
+];
 var fmtLongDate = (iso) => {
   const m = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
-  const [y, mo, d] = iso.split("-").map(Number);
-  return `${String(d).padStart(2, "0")} ${m[mo - 1]} ${y}`;
+  const [y, mo, d] = String(iso || "").split("-").map(Number);
+  return y ? `${String(d).padStart(2, "0")} ${m[mo - 1]} ${y}` : "-";
 };
-async function buildTemplate(templatePath, items, o) {
+function columnsFor(o) {
+  const drugs = o.category === "Drugs";
+  const cols = [
+    { key: "erp", header: "ERP Code", width: 14, kind: "text", section: "Item" },
+    { key: "name", header: "Item Name", width: 42, kind: "text", section: "Item" },
+    { key: "brand", header: "Brand / Manufacturer", width: 20, kind: "text", input: true, section: "Item" },
+    drugs ? { key: "ai", header: "Active Ingredient", width: 22, kind: "text", input: true, section: "Item" } : { key: "ref", header: "Catalog No. (REF)", width: 18, kind: "text", input: true, section: "Item" },
+    { key: "status", header: "Item Status", width: 14, kind: "status", input: true, section: "Item" },
+    { key: "remarks", header: "Remarks", width: 24, kind: "text", input: true, section: "Item" },
+    { key: "mouQty", header: "MOU_Qty/PO Unit", width: 12, kind: "qty", staffOnly: true, section: "Current MOU (reference)" },
+    { key: "mouHna", header: "MOU_HNA/PO Unit (excl. PPN)", width: 18, kind: "money", staffOnly: true, section: "Current MOU (reference)" },
+    { key: "mouDisc", header: "MOU_Disc%", width: 11, kind: "disc", staffOnly: true, section: "Current MOU (reference)" },
+    { key: "mouPrice", header: "MOU_Unit Price/pcs (incl. PPN)", width: 18, kind: "price", staffOnly: true, section: "Current MOU (reference)" },
+    { key: "rfqQty", header: "RFQ_Qty/PO Unit", width: 12, kind: "qty", input: true, section: "RFQ" },
+    { key: "rfqHna", header: "RFQ_HNA/PO Unit (excl. PPN)", width: 18, kind: "money", input: true, section: "RFQ" },
+    { key: "rfqDisc", header: "RFQ_Disc%", width: 11, kind: "disc", input: true, section: "RFQ" },
+    { key: "rfqPrice", header: "RFQ_Unit Price/PCS (incl. PPN)", width: 18, kind: "price", section: "RFQ" },
+    { key: "reason", header: "Alasan Kenaikan Harga", width: 30, kind: "reason", input: true, section: "RFQ" },
+    { key: "coDisc", header: "CO_Disc%", width: 11, kind: "disc", counter: true, section: "Counter offer" },
+    { key: "coPrice", header: "CO_Unit Price/PCS (incl. PPN)", width: 18, kind: "price", counter: true, section: "Counter offer" },
+    { key: "coNote", header: "CO_Note (Siloam)", width: 28, kind: "text", staffOnly: true, section: "Counter offer" },
+    { key: "fb1Disc", header: "FB1_Disc%", width: 11, kind: "disc", counter: true, input: true, section: "Feedback I" },
+    { key: "fb1Price", header: "FB1_Unit Price/PCS (incl. PPN)", width: 18, kind: "price", counter: true, section: "Feedback I" },
+    { key: "onDisc", header: "ON_Disc%", width: 11, kind: "disc", staffOnly: true, section: "Online Nego" },
+    { key: "onPrice", header: "ON_Unit Price/PCS (incl. PPN)", width: 18, kind: "price", staffOnly: true, section: "Online Nego" },
+    { key: "onNett", header: "ON_Disc% (skema Nett)", width: 14, kind: "disc", staffOnly: true, section: "Online Nego" },
+    { key: "onDiscScheme", header: "ON_Disc% (skema Disc)", width: 14, kind: "disc", staffOnly: true, section: "Online Nego" }
+  ];
+  return cols.filter((c) => (o.forPrincipal ? !c.staffOnly : true) && (!c.counter || !o.forPrincipal || o.showCounterOffer));
+}
+async function buildTemplate(_unused, items, o) {
   const wb = new ExcelJS2.Workbook();
-  await wb.xlsx.readFile(templatePath);
-  const ws = wb.getWorksheet("Form") || wb.worksheets[0];
-  ws.getCell("A1").value = `Contract Period: ${fmtLongDate(o.contractStart)}  -  ${fmtLongDate(o.contractEnd)}`;
+  wb.creator = "Siloam Negotiation";
+  const ws = wb.addWorksheet("Form");
+  const cols = columnsFor(o);
+  const L = {};
+  cols.forEach((c, i) => {
+    L[c.key] = ws.getColumn(i + 1).letter;
+  });
+  const at = (k) => cols.findIndex((c) => c.key === k) + 1;
   const bindingText = o.binding === "Disc" ? "Discount (% off HNA)" : o.binding === "Nett to Disc" ? "Nett to Disc (formulary HNA \xD7 (1 \u2212 disc))" : "Nett Price (HNA after discount)";
+  ws.getCell("A1").value = `Contract Period: ${fmtLongDate(o.contractStart)}  -  ${fmtLongDate(o.contractEnd)}`;
   ws.getCell("A2").value = `Binding: ${bindingText}`;
   ws.getCell("A3").value = `Delivery Fee: ${o.deliveryFee}`;
   ws.getCell("A4").value = `Principal: ${o.principal}`;
   ws.getCell("A5").value = `Distributor: ${o.distributor || "-"}`;
-  const put = (r, c, v) => {
-    ws.getCell(r, c).value = v == null || v === "" ? null : v;
+  for (let r = 1; r <= 5; r++) ws.getCell(r, 1).font = { bold: r === 4 };
+  const hint = (k, text2) => {
+    if (at(k)) {
+      const c = ws.getCell(6, at(k));
+      c.value = text2;
+      c.font = { italic: true, size: 8, color: { argb: "FF555555" } };
+      c.alignment = { wrapText: true, vertical: "top" };
+    }
   };
-  items.forEach((it, i) => {
-    const r = FIRST_ROW + i;
-    put(r, COL.erp, it.erp_code);
-    put(r, COL.name, it.item_name);
-    put(r, COL.brand, it.brand);
-    put(r, COL.ref, it.catalog_no);
-    put(r, COL.status, it.item_status);
-    put(r, COL.remarks, it.remarks);
-    if (!o.forPrincipal) {
-      put(r, COL.mouQty, it.mou_qty);
-      put(r, COL.mouHna, it.mou_hna);
-      put(r, COL.mouDisc, it.mou_disc);
-    }
-    put(r, COL.rfqQty, it.rfq_qty);
-    put(r, COL.rfqHna, it.rfq_hna);
-    put(r, COL.rfqDisc, it.rfq_disc);
-    if (!o.forPrincipal || o.showCounterOffer) put(r, COL.coDisc, it.co_disc);
-    put(r, COL.fb1Disc, it.fb1_disc);
-    if (!o.forPrincipal) put(r, COL.onDisc, it.on_disc);
-    if (r > FORMULA_ROWS) {
-      const L = (c) => ws.getColumn(c).letter;
-      const price = (q, h, d, abs = false) => {
-        const qa = abs ? `$${L(h)}${r}` : `${L(h)}${r}`, qq = abs ? `$${L(q)}${r}` : `${L(q)}${r}`;
-        return { formula: `IFERROR(IF(${qa}="","",${qa}/${qq}*(1-${L(d)}${r})*1.11),"")` };
-      };
-      if (!o.forPrincipal) ws.getCell(r, COL.mouPrice).value = price(COL.mouQty, COL.mouHna, COL.mouDisc);
-      ws.getCell(r, COL.rfqPrice).value = price(COL.rfqQty, COL.rfqHna, COL.rfqDisc);
-      ws.getCell(r, COL.coPrice).value = price(COL.rfqQty, COL.rfqHna, COL.coDisc, true);
-      ws.getCell(r, COL.fb1Price).value = price(COL.rfqQty, COL.rfqHna, COL.fb1Disc, true);
-      ws.getCell(r, COL.onPrice).value = price(COL.rfqQty, COL.rfqHna, COL.onDisc, true);
-    }
+  hint("status", "Active atau Discontinue. Discontinue wajib dengan surat DC (lampirkan di portal).");
+  hint("rfqQty", `Jumlah pcs per kemasan. Basis HNA kolom ${L.rfqHna}.`);
+  hint("rfqHna", `HNA per satuan pembelian (kolom ${L.rfqQty}), sebelum PPN.`);
+  hint("rfqDisc", "Angka 0 sampai 100 (15 = 15%). Maksimal 2 desimal.");
+  hint("reason", "Wajib bila harga per pcs naik dari MOU. Pilih dari daftar.");
+  if (at("fb1Disc")) hint("fb1Disc", "Angka 0 sampai 100 (15 = 15%).");
+  ws.getRow(6).height = 44;
+  let prev = "";
+  let start = 1;
+  const sectionRow = 5;
+  void sectionRow;
+  void prev;
+  void start;
+  cols.forEach((c, i) => {
+    const cell2 = ws.getCell(HEADER_ROW, i + 1);
+    cell2.value = c.header;
+    cell2.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell2.alignment = { wrapText: true, vertical: "middle" };
+    cell2.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c.input ? "FF1F6F5C" : c.staffOnly ? "FF5B6770" : "FF3A4A5A" } };
+    ws.getColumn(i + 1).width = c.width;
   });
-  if (o.forPrincipal) {
-    ws.getCell("G6").value = "";
-    for (const c of [COL.mouQty, COL.mouHna, COL.mouDisc, COL.mouPrice]) {
-      ws.getColumn(c).hidden = true;
+  ws.getRow(HEADER_ROW).height = 34;
+  const vat = 1 + o.ppn;
+  const put = (r, k, v) => {
+    if (at(k)) ws.getCell(r, at(k)).value = v == null || v === "" ? null : v;
+  };
+  const noPriceFormula = o.binding === "Nett to Disc";
+  const priceFormula = (r, discKey, qtyKey, hnaKey) => ({ formula: `IFERROR(IF(${L[hnaKey]}${r}="","",${L[hnaKey]}${r}/${L[qtyKey]}${r}*(1-N(${L[discKey]}${r})/100)*${vat}),"")` });
+  for (let r = FIRST_ROW; r <= LAST_ROW; r++) {
+    const it = items[r - FIRST_ROW];
+    if (it) {
+      put(r, "erp", it.erp_code);
+      put(r, "name", it.item_name);
+      put(r, "brand", it.brand);
+      put(r, "ref", it.catalog_no);
+      put(r, "ai", it.active_ingredient);
+      put(r, "status", it.item_status);
+      put(r, "remarks", it.remarks);
+      put(r, "rfqQty", it.rfq_qty);
+      put(r, "rfqHna", it.rfq_hna);
+      const pctOf = (v) => v == null ? null : Math.round(v * 1e4) / 100;
+      put(r, "rfqDisc", pctOf(it.rfq_disc));
+      put(r, "reason", it.price_reason ? REASONS.find((x) => x.key === String(it.price_reason).split(" \u2014 ")[0])?.label || it.price_reason : null);
+      if (!o.forPrincipal) {
+        put(r, "mouQty", it.mou_qty);
+        put(r, "mouHna", it.mou_hna);
+        put(r, "mouDisc", pctOf(it.mou_disc));
+        put(r, "coNote", it.co_note);
+        put(r, "onDisc", pctOf(it.on_disc));
+        put(r, "onNett", pctOf(it.on_disc_nett));
+        put(r, "onDiscScheme", pctOf(it.on_disc_disc));
+      }
+      if (!o.forPrincipal || o.showCounterOffer) put(r, "coDisc", pctOf(it.co_disc));
+      put(r, "fb1Disc", pctOf(it.fb1_disc));
     }
-    if (!o.showCounterOffer) for (const c of [COL.coDisc, COL.coPrice]) ws.getColumn(c).hidden = true;
-    for (const c of [COL.onDisc, COL.onPrice]) ws.getColumn(c).hidden = true;
+    if (!noPriceFormula) {
+      if (!o.forPrincipal) put(r, "mouPrice", priceFormula(r, "mouDisc", "mouQty", "mouHna"));
+      put(r, "rfqPrice", priceFormula(r, "rfqDisc", "rfqQty", "rfqHna"));
+      const hnaK = "rfqHna", qtyK = "rfqQty";
+      const abs = (c) => `$${L[c]}${r}`;
+      const af = (d) => ({ formula: `IFERROR(IF(OR(${abs(hnaK)}="",${L[d]}${r}=""),"",${abs(hnaK)}/${abs(qtyK)}*(1-${L[d]}${r}/100)*${vat}),"")` });
+      put(r, "coPrice", af("coDisc"));
+      put(r, "fb1Price", af("fb1Disc"));
+      if (!o.forPrincipal) put(r, "onPrice", af("onDisc"));
+    } else if (it && !o.forPrincipal) {
+      put(r, "rfqPrice", it.rfq_unit_price);
+      put(r, "coPrice", it.co_unit_price);
+      put(r, "fb1Price", it.fb1_unit_price);
+      put(r, "onPrice", it.on_unit_price);
+      put(r, "mouPrice", it.mou_unit_price);
+    }
   }
+  const rng = (k) => `${L[k]}${FIRST_ROW}:${L[k]}${LAST_ROW}`;
+  for (const c of cols) {
+    const colIdx = at(c.key);
+    for (let r = FIRST_ROW; r <= LAST_ROW; r++) {
+      const cell2 = ws.getCell(r, colIdx);
+      if (c.kind === "disc") cell2.numFmt = '0.##"%"';
+      else if (c.kind === "money") cell2.numFmt = "#,##0.##";
+      else if (c.kind === "price") cell2.numFmt = "#,##0.00";
+      else if (c.kind === "qty") cell2.numFmt = "0";
+      if (c.input) cell2.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF4FBF8" } };
+      if (c.kind === "price") cell2.font = { color: { argb: "FF777777" } };
+    }
+    if (c.kind === "price" || !c.input && !c.staffOnly) continue;
+  }
+  const dv = (k, def) => {
+    if (!at(k)) return;
+    for (let r = FIRST_ROW; r <= LAST_ROW; r++) ws.getCell(r, at(k)).dataValidation = def;
+  };
+  dv("status", { type: "list", allowBlank: true, formulae: ['"Active,Discontinue"'], showErrorMessage: true, errorTitle: "Item Status", error: "Pilih Active atau Discontinue." });
+  dv("rfqQty", { type: "whole", operator: "greaterThanOrEqual", allowBlank: true, formulae: [1], showErrorMessage: true, errorTitle: "Qty/PO Unit", error: "Isi bilangan bulat minimal 1." });
+  dv("rfqHna", { type: "decimal", operator: "greaterThan", allowBlank: true, formulae: [0], showErrorMessage: true, errorTitle: "HNA", error: "HNA harus lebih dari 0." });
+  for (const k of ["rfqDisc", "fb1Disc"]) dv(k, { type: "decimal", operator: "between", allowBlank: true, formulae: [0, 99.99], showErrorMessage: true, errorTitle: "Diskon", error: "Isi angka 0 sampai 99,99 (15 = 15%)." });
+  dv("reason", { type: "list", allowBlank: true, formulae: [`"${REASONS.map((x) => x.label).join(",")}"`], showErrorMessage: true, errorTitle: "Alasan", error: "Pilih salah satu alasan dari daftar." });
+  void rng;
+  ws.views = [{ state: "frozen", xSplit: 2, ySplit: HEADER_ROW, topLeftCell: `C${FIRST_ROW}`, activeCell: `C${FIRST_ROW}` }];
+  ws.autoFilter = { from: { row: HEADER_ROW, column: 1 }, to: { row: HEADER_ROW, column: cols.length } };
+  if (o.forPrincipal) ws.getCell("A6").value = "Isi kolom hijau. Kolom abu-abu dihitung otomatis.";
+  ws.getCell("A6").font = { italic: true, size: 9 };
   return wb;
 }
-function text(v) {
+var percentScaled = (fmt) => !!fmt && /%/.test(fmt.replace(/"[^"]*"/g, "").replace(/\\./g, ""));
+function text(v, fmt, isDisc = false) {
   if (v == null) return "";
   if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "number") return isDisc && percentScaled(fmt) ? `${Math.round(v * 1e4) / 100}%` : String(v);
   if (typeof v === "object") {
     const o = v;
-    if (o.result !== void 0) return text(o.result);
+    if (o.result !== void 0) return text(o.result, fmt, isDisc);
     if (o.richText) return o.richText.map((t) => t.text).join("");
     if (o.text !== void 0) return String(o.text);
     return "";
@@ -235,7 +550,7 @@ async function readTemplate(buffer) {
   let headerRow = 0;
   const headers = {};
   for (let r = 1; r <= 20 && !headerRow; r++) {
-    ws.getRow(r).eachCell((c, n) => {
+    ws.getRow(r).eachCell((c) => {
       if (text(c.value).toLowerCase() === "erp code") headerRow = r;
     });
   }
@@ -253,24 +568,34 @@ async function readTemplate(buffer) {
     name: at(["Item Name"]),
     brand: at(["Brand / Manufacturer", "Brand"]),
     ref: at(["Catalog No. (REF)", "Catalog No"]),
+    ai: at(["Active Ingredient"]),
     status: at(["Item Status", "Status"]),
     remarks: at(["Remarks"]),
     rfqQty: at(["RFQ_Qty/PO Unit"]),
     rfqHna: at(["RFQ_HNA/PO Unit (excl. PPN)"]),
     rfqDisc: at(["RFQ_Disc%"]),
+    reason: at(["Alasan Kenaikan Harga"]),
     coDisc: at(["CO_Disc%"]),
+    coNote: at(["CO_Note (Siloam)", "CO_Note"]),
     fb1Disc: at(["FB1_Disc%"]),
-    onDisc: at(["ON_Disc%"])
+    onDisc: at(["ON_Disc%"]),
+    onNett: at(["ON_Disc% (skema Nett)"]),
+    onDiscScheme: at(["ON_Disc% (skema Disc)"])
   };
+  const discKeys = /* @__PURE__ */ new Set(["rfqDisc", "coDisc", "fb1Disc", "onDisc", "onNett", "onDiscScheme"]);
   const rows = [];
   for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const get = (k) => cols[k] ? text(row.getCell(cols[k]).value) : "";
+    const get = (k) => {
+      if (!cols[k]) return "";
+      const c = row.getCell(cols[k]);
+      return text(c.value, c.numFmt, discKeys.has(k));
+    };
     const erp = get("erp");
     if (!erp && !get("name")) continue;
     const cells = {};
     for (const k of Object.keys(cols)) if (k !== "erp" && k !== "name") cells[k] = get(k);
-    rows.push({ row: r, erp_code: erp.toUpperCase(), item_name: get("name"), cells });
+    rows.push({ row: r, erp_code: erp.trim().toUpperCase(), item_name: get("name"), cells });
   }
   return rows;
 }
@@ -278,14 +603,19 @@ var STATUS_WORDS = { active: "Active", aktif: "Active", discontinue: "Discontinu
 var FIELD_META = {
   brand: { header: "Brand / Manufacturer", field: "brand", kind: "text" },
   ref: { header: "Catalog No. (REF)", field: "catalog_no", kind: "text" },
+  ai: { header: "Active Ingredient", field: "active_ingredient", kind: "text" },
   status: { header: "Item Status", field: "item_status", kind: "status" },
   remarks: { header: "Remarks", field: "remarks", kind: "text" },
   rfqQty: { header: "RFQ_Qty/PO Unit", field: "rfq_qty", kind: "qty" },
   rfqHna: { header: "RFQ_HNA/PO Unit", field: "rfq_hna", kind: "money" },
   rfqDisc: { header: "RFQ_Disc%", field: "rfq_disc", kind: "disc" },
+  reason: { header: "Alasan Kenaikan Harga", field: "price_reason", kind: "reason" },
   coDisc: { header: "CO_Disc%", field: "co_disc", kind: "disc" },
+  coNote: { header: "CO_Note", field: "co_note", kind: "text" },
   fb1Disc: { header: "FB1_Disc%", field: "fb1_disc", kind: "disc" },
-  onDisc: { header: "ON_Disc%", field: "on_disc", kind: "disc" }
+  onDisc: { header: "ON_Disc%", field: "on_disc", kind: "disc" },
+  onNett: { header: "ON_Disc% (skema Nett)", field: "on_disc_nett", kind: "disc" },
+  onDiscScheme: { header: "ON_Disc% (skema Disc)", field: "on_disc_disc", kind: "disc" }
 };
 function checkRow(cells, allowed) {
   const changes = [];
@@ -295,34 +625,187 @@ function checkRow(cells, allowed) {
     if (raw === "") continue;
     const m = FIELD_META[key];
     if (!m) continue;
+    const bad = (message) => errors.push({ column: m.header, value: raw, message });
     if (m.kind === "text") {
       changes.push({ field: m.field, header: m.header, value: raw.slice(0, 300) });
       continue;
     }
     if (m.kind === "status") {
       const v = STATUS_WORDS[raw.toLowerCase()];
-      if (!v) errors.push(`${m.header}: use Active or Discontinue`);
+      if (!v) bad("pakai Active atau Discontinue");
       else changes.push({ field: m.field, header: m.header, value: v });
       continue;
     }
-    const n = toNumber(raw);
+    if (m.kind === "reason") {
+      const hit = REASONS.find((x) => x.label.toLowerCase() === raw.toLowerCase() || x.key === raw.toLowerCase());
+      changes.push({ field: m.field, header: m.header, value: hit ? hit.key : raw.slice(0, 300) });
+      continue;
+    }
+    if (m.kind === "disc") {
+      const d = parseDiscount(raw);
+      if (d.error) bad(d.error);
+      else if (d.value != null) changes.push({ field: m.field, header: m.header, value: d.value });
+      continue;
+    }
+    const n = parseMoney(raw);
     if (n == null) {
-      errors.push(`${m.header}: "${raw}" is not a number`);
+      bad("bukan angka");
       continue;
     }
     if (m.kind === "qty") {
-      if (n < 1 || !Number.isFinite(n)) errors.push(`${m.header}: must be at least 1`);
+      if (n < 1 || !Number.isFinite(n)) bad("minimal 1");
       else changes.push({ field: m.field, header: m.header, value: Math.round(n) });
-    } else if (m.kind === "money") {
-      if (n <= 0) errors.push(`${m.header}: must be more than 0`);
-      else changes.push({ field: m.field, header: m.header, value: n });
-    } else {
-      const frac = raw.includes("%") ? n / 100 : n;
-      if (frac < 0 || frac >= 1) errors.push(`${m.header}: a discount must be between 0% and 100% (a cell showing 15 means 1500%)`);
-      else changes.push({ field: m.field, header: m.header, value: frac });
-    }
+    } else if (n <= 0) bad("harus lebih dari 0");
+    else changes.push({ field: m.field, header: m.header, value: n });
   }
   return { changes, errors };
+}
+
+// bak.ts
+import ExcelJS3 from "exceljs";
+import JSZip from "jszip";
+import { Document, Packer, Paragraph, Table, TableRow, TableCell, TextRun, WidthType, AlignmentType, HeadingLevel, BorderStyle } from "docx";
+var r2 = (n) => Math.round(n * 100) / 100;
+var fmtIdr = (n, d = 2) => n == null ? "-" : n.toLocaleString("id-ID", { minimumFractionDigits: d, maximumFractionDigits: d });
+var fmtPctText = (frac) => `${(Math.round(frac * 1e4) / 100).toLocaleString("id-ID", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+var fmtLong = (iso) => {
+  if (!iso) return "-";
+  const m = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+  const [y, mo, d] = iso.slice(0, 10).split("-").map(Number);
+  return y ? `${d} ${m[mo - 1]} ${y}` : "-";
+};
+function confRow(no, name, code, uom, baseUnit, hna, disc, ppn) {
+  const up = hna / uom * (1 - disc);
+  return { no, name, code, uom, base_unit: baseUnit, hna, disc, unit_price: r2(up), unit_price_vat: r2(up * (1 + ppn)) };
+}
+async function buildConfirmationWorkbook(meta, rows) {
+  const wb = new ExcelJS3.Workbook();
+  const ws = wb.addWorksheet("Confirmation");
+  ws.addRow([`Agreed prices: ${meta.principal}`]).font = { bold: true, size: 13 };
+  ws.addRow([`Contract ${meta.contract_start} to ${meta.contract_end} \xB7 Binding ${meta.binding} \xB7 Scheme ${meta.scheme}`]);
+  ws.addRow([]);
+  const head = ws.addRow(["No", "Item Name", "ERP Code", "UOM", "Base Unit", "HNA", "Disc", "Unit Price", "Unit Price (+VAT)"]);
+  head.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  head.eachCell((c) => {
+    c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF3A4A5A" } };
+  });
+  for (const r of rows) ws.addRow([r.no, r.name, r.code, r.uom, r.base_unit, r2(r.hna), r.disc, r.unit_price, r.unit_price_vat]);
+  const first = 5;
+  for (let i = first; i < first + rows.length; i++) {
+    ws.getCell(i, 6).numFmt = "#,##0.00";
+    ws.getCell(i, 7).numFmt = "0.00%";
+    ws.getCell(i, 8).numFmt = "#,##0.00";
+    ws.getCell(i, 9).numFmt = "#,##0.00";
+  }
+  [6, 44, 14, 8, 10, 16, 10, 16, 18].forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+  });
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  return wb;
+}
+var cell = (text2, bold = false, align = AlignmentType.LEFT) => new TableCell({ children: [new Paragraph({ alignment: align, children: [new TextRun({ text: text2, bold, size: 18 })] })], margins: { top: 40, bottom: 40, left: 60, right: 60 } });
+var p = (text2, opts = {}) => new Paragraph({ heading: opts.heading ? HeadingLevel.HEADING_1 : void 0, alignment: opts.center ? AlignmentType.CENTER : AlignmentType.LEFT, spacing: { after: 120 }, children: [new TextRun({ text: text2, bold: opts.bold, size: opts.size })] });
+function priceTable(rows) {
+  const head = ["No", "Nama Barang", "Kode ERP", "UOM", "HNA", "Disc", "Harga Satuan", "Harga Satuan (+PPN)"];
+  const body = rows.map((r) => new TableRow({ children: [cell(String(r.no)), cell(r.name), cell(r.code), cell(`${r.uom} ${r.base_unit}`), cell(fmtIdr(r.hna), false, AlignmentType.RIGHT), cell(fmtPctText(r.disc), false, AlignmentType.RIGHT), cell(fmtIdr(r.unit_price), false, AlignmentType.RIGHT), cell(fmtIdr(r.unit_price_vat), false, AlignmentType.RIGHT)] }));
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: { top: { style: BorderStyle.SINGLE, size: 4, color: "999999" }, bottom: { style: BorderStyle.SINGLE, size: 4, color: "999999" }, left: { style: BorderStyle.SINGLE, size: 4, color: "999999" }, right: { style: BorderStyle.SINGLE, size: 4, color: "999999" }, insideHorizontal: { style: BorderStyle.SINGLE, size: 2, color: "CCCCCC" }, insideVertical: { style: BorderStyle.SINGLE, size: 2, color: "CCCCCC" } },
+    rows: [new TableRow({ tableHeader: true, children: head.map((h) => cell(h, true)) }), ...body]
+  });
+}
+function schemeText(meta) {
+  return meta.scheme === "Nett" ? "Skema Nett: harga satuan dihitung dari HNA yang disepakati dikurangi diskon, ditambah PPN." : "Skema Disc: harga satuan dihitung dari HNA formularium Siloam dikurangi diskon yang disepakati, ditambah PPN.";
+}
+async function buildBakDocx(meta, rows) {
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const doc = new Document({
+    sections: [{
+      children: [
+        p("DRAFT - BERITA ACARA KESEPAKATAN HARGA (BAK)", { bold: true, center: true, size: 26 }),
+        p(`Skema ${meta.scheme}`, { center: true, bold: true }),
+        p(`Tanggal: ${fmtLong(today)}`),
+        p(`Pada hari ini telah dilaksanakan negosiasi harga antara Siloam Hospitals dan ${meta.principal}${meta.distributor ? ` (distributor: ${meta.distributor})` : ""} untuk kategori ${meta.category}.`),
+        p(`Periode kontrak: ${fmtLong(meta.contract_start)} s/d ${fmtLong(meta.contract_end)}. Biaya pengiriman: ${meta.delivery_fee}.`),
+        p(schemeText(meta)),
+        p(`Negosiasi online: ${meta.meeting_at ? fmtLong(meta.meeting_at) : "-"}. Peserta Siloam: ${meta.attendees_siloam || "-"}. Peserta principal: ${meta.attendees_principal || "-"}.`),
+        p("Kesepakatan harga untuk SKU berikut:", { bold: true }),
+        priceTable(rows),
+        p(""),
+        p(`Jumlah SKU: ${meta.sku_count}. Harga sudah termasuk PPN ${Math.round(meta.ppn * 100)}% pada kolom Harga Satuan (+PPN). Lampiran: Excel Confirmation.`),
+        ...meta.notes ? [p("Catatan negosiasi:", { bold: true }), p(meta.notes)] : [],
+        ...meta.followups?.length ? [p("Tindak lanjut:", { bold: true }), ...meta.followups.map((f) => p(`- ${f.text}${f.owner ? ` (${f.owner})` : ""}${f.due ? `, paling lambat ${fmtLong(f.due)}` : ""}`))] : [],
+        p(""),
+        p("Demikian berita acara ini dibuat untuk dijadikan dasar pembuatan Perjanjian Kerja Sama."),
+        p(""),
+        new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ children: [cell("Siloam Hospitals", true, AlignmentType.CENTER), cell(meta.principal, true, AlignmentType.CENTER)] }), new TableRow({ children: [cell("\n\n\n(.........................)", false, AlignmentType.CENTER), cell("\n\n\n(.........................)", false, AlignmentType.CENTER)] })] })
+      ]
+    }]
+  });
+  return Buffer.from(await Packer.toBuffer(doc));
+}
+async function buildPksDocx(meta, rows) {
+  const clauses = [
+    ["Pasal 1 - Ruang Lingkup", `${meta.principal} menyediakan barang kategori ${meta.category} kepada Siloam Hospitals sesuai daftar harga pada Lampiran (hasil BAK), sebanyak ${meta.sku_count} SKU.`],
+    ["Pasal 2 - Jangka Waktu", `Perjanjian berlaku ${fmtLong(meta.contract_start)} s/d ${fmtLong(meta.contract_end)}.`],
+    ["Pasal 3 - Harga", `${schemeText(meta)} Harga yang berlaku adalah harga pada Lampiran. Perubahan harga hanya sah dengan addendum tertulis.`],
+    ["Pasal 4 - Pengiriman", `Biaya pengiriman: ${meta.delivery_fee}.`],
+    ["Pasal 5 - Pembayaran", "Ketentuan pembayaran mengikuti kebijakan pembayaran Siloam Hospitals. (isi sesuai standar Legal)"],
+    ["Pasal 6 - Penyelesaian Perselisihan", "Perselisihan diselesaikan secara musyawarah. (isi sesuai standar Legal)"]
+  ];
+  const doc = new Document({
+    sections: [{
+      children: [
+        p("DRAFT - PERJANJIAN KERJA SAMA (PKS)", { bold: true, center: true, size: 26 }),
+        p(`Antara Siloam Hospitals dan ${meta.principal}`, { center: true }),
+        p("Draft ini dibuat otomatis dari hasil BAK dan perlu ditinjau oleh Legal sebelum ditandatangani.", { size: 18 }),
+        ...clauses.flatMap(([h, t]) => [p(h, { bold: true }), p(t)]),
+        p("Lampiran - Daftar Harga", { bold: true }),
+        priceTable(rows)
+      ]
+    }]
+  });
+  return Buffer.from(await Packer.toBuffer(doc));
+}
+async function fillDocxTemplate(buf, meta, rows) {
+  const zip = await JSZip.loadAsync(buf);
+  const f = zip.file("word/document.xml");
+  if (!f) throw new Error("Template Word tidak valid (tidak ada word/document.xml).");
+  let xml = await f.async("string");
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const vals = {
+    principal: meta.principal,
+    distributor: meta.distributor || "-",
+    kategori: meta.category,
+    binding: meta.binding,
+    skema: meta.scheme,
+    tanggal: fmtLong(today),
+    kontrak_mulai: fmtLong(meta.contract_start),
+    kontrak_selesai: fmtLong(meta.contract_end),
+    biaya_kirim: meta.delivery_fee,
+    jumlah_sku: String(meta.sku_count),
+    nilai_po_setahun: fmtIdr(meta.po_value_year, 0),
+    cost_impact: fmtIdr(meta.cost_impact, 0),
+    tanggal_meeting: fmtLong(meta.meeting_at),
+    peserta_siloam: meta.attendees_siloam || "-",
+    peserta_principal: meta.attendees_principal || "-",
+    catatan: meta.notes || "-",
+    ppn: `${Math.round(meta.ppn * 100)}%`
+  };
+  const table = rows.map((r) => `${r.no}. ${r.name} (${r.code}) | ${r.uom} ${r.base_unit} | HNA ${fmtIdr(r.hna)} | Disc ${fmtPctText(r.disc)} | ${fmtIdr(r.unit_price)} | +PPN ${fmtIdr(r.unit_price_vat)}`);
+  xml = xml.replace(/<w:p[ >][\s\S]*?<\/w:p>/g, (para) => {
+    const plain = [...para.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("");
+    if (!plain.includes("{{")) return para;
+    const open = para.match(/^<w:p[^>]*>/)[0];
+    const pPr = (para.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [""])[0];
+    const rPr = (para.match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || [""])[0];
+    const mk = (t) => `${open}${pPr}<w:r>${rPr}<w:t xml:space="preserve">${t}</w:t></w:r></w:p>`;
+    if (plain.includes("{{tabel_harga}}")) return table.map((l) => mk(esc(l))).join("");
+    return mk(plain.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, k) => esc(vals[k] ?? `{{${k}}}`)));
+  });
+  zip.file("word/document.xml", xml);
+  return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
 }
 
 // server.ts
@@ -438,17 +921,6 @@ function daysBetween(fromIso, toIso) {
 function nowIso() {
   return (/* @__PURE__ */ new Date()).toISOString().slice(0, 19) + "Z";
 }
-function matchUoMQty(text2) {
-  if (!text2) return null;
-  const s = String(text2).trim();
-  const multi = s.match(/(\d+)\s*(?:strip|blister|alu|tube|botol|vial|amp\w*|sachet|bag)\s*(?:@|x|isi|\*)\s*(\d+)/i);
-  if (multi) return Math.max(1, parseInt(multi[1], 10) * parseInt(multi[2], 10));
-  const m = s.match(/(?:@|\/|isi\s*|x\s*|:\s*|=\s*|of\s*)(\d+)/i) || s.match(/\b(\d+)\s*(?:pcs|pc|tab\w*|cap\w*|amp\w*|vial\w*|strip\w*|roll\w*|test\w*|pair\w*|bag\w*|btl|botol|sachet|syringe|unit|lembar|set)/i);
-  return m ? Math.max(1, parseInt(m[1], 10)) : null;
-}
-function parseUoMQty(text2) {
-  return matchUoMQty(text2) ?? 1;
-}
 function inferClinicalUnit(text2, itemName) {
   const combined = `${text2 || ""} ${itemName || ""}`.toLowerCase();
   if (/\bvial\b/.test(combined)) return "vial";
@@ -483,13 +955,16 @@ var SETTINGS_DEFS = [
   { key: "anomaly_po_deviation", label: "PO price vs MOU difference that raises a flag", group: "Principal negotiations", default: 0.1, kind: "fraction", min: 0.01, max: 1, help: "", optional: false },
   { key: "anomaly_outlier_z", label: "Outlier strictness for largest/smallest changes (robust z)", group: "Principal negotiations", default: 3.5, kind: "number", min: 1, max: 10, help: "Lower flags more items. 3.5 is the usual robust cut-off.", optional: false },
   { key: "anomaly_review_top_n", label: "Always review this many largest increases and decreases", group: "Principal negotiations", default: 3, kind: "int", min: 0, max: 50, help: "", optional: false },
-  { key: "check_drop", label: "Ask the principal to confirm a price drop larger than", group: "Principal negotiations", default: 0.4, kind: "fraction", min: 0.05, max: 1, help: "", optional: false },
+  { key: "hna_confirm", label: "Ask the principal to confirm an HNA per piece that moves (up or down) by more than", group: "Principal negotiations", default: 0.5, kind: "fraction", min: 0.05, max: 5, help: "Compared with the formulary HNA, else the MOU. Up 50% or down 50% asks for confirmation.", optional: false },
+  { key: "anomaly_up", label: "Unit price up by more than this is an anomaly (finding)", group: "Principal negotiations", default: 0.5, kind: "fraction", min: 0.05, max: 10, help: "Against the comparison price: Nett Price formulary, else MOU, else the average PO price.", optional: false },
+  { key: "anomaly_down", label: "RFQ unit price down by more than this is an anomaly (finding)", group: "Principal negotiations", default: 5e-3, kind: "fraction", min: 0, max: 1, help: "A drop of 62% usually means a wrong HNA or pack.", optional: false },
   { key: "check_high_disc", label: "Ask the principal to confirm a discount above", group: "Principal negotiations", default: 0.6, kind: "fraction", min: 0.05, max: 0.99, help: "", optional: false },
   { key: "principal_link_days", label: "Principal link stays valid for (days)", group: "Principal negotiations", default: 14, kind: "int", min: 1, max: 90, help: "", optional: false },
   { key: "co_max_extra", label: "Counter offer asks at most this many extra discount points over the quote", group: "Principal negotiations", default: 0.25, kind: "fraction", min: 0, max: 0.9, help: "Keeps the counter credible; anything beyond goes to Online Nego.", optional: false },
   { key: "anomaly_benchmark_deviation", label: "Price above the market benchmark that raises a flag", group: "Principal negotiations", default: 0.05, kind: "fraction", min: 0, max: 1, help: "", optional: false },
   { key: "anomaly_group_spread", label: "Price above the cheapest equivalent brand that raises a flag", group: "Principal negotiations", default: 0.2, kind: "fraction", min: 0, max: 5, help: "Items with the same generic name or group (Admin > Master data) are compared per piece.", optional: false },
-  { key: "escalation_impact", label: "Escalate when agreed prices cost more than the MOU by (Rp a year)", group: "Principal negotiations", default: 0, kind: "number", min: 0, max: 1e13, help: "0 = any net increase needs sign-off.", optional: false },
+  { key: "escalation_pct", label: "Escalate when the agreed cost impact is above this share of the principal's yearly PO value (+PPN)", group: "Principal negotiations", default: 0.05, kind: "fraction", min: 0, max: 1, help: "Cost impact (FIN) vs the yearly PO value. 0 = off. Either limit passed means escalation.", optional: false },
+  { key: "escalation_rp", label: "Escalate when the agreed cost impact is above (Rp a year)", group: "Principal negotiations", default: 5e7, kind: "number", min: 0, max: 1e13, help: "0 = off. Either limit passed means escalation.", optional: false },
   { key: "whatsapp_after_days", label: "Send the WhatsApp nudge when a principal hasn't acted for this many days", group: "Principal negotiations", default: 2, kind: "int", min: 0, max: 30, help: "", optional: false },
   { key: "reminders_on", label: "Send deadline reminders to principals", group: "Principal negotiations", default: true, kind: "bool", min: null, max: null, help: "Through Power Automate, when automatic sending is set up.", optional: false },
   { key: "reminder_first_days", label: "First reminder, days before the deadline", group: "Principal negotiations", default: 3, kind: "int", min: 0, max: 30, help: "", optional: false },
@@ -500,8 +975,10 @@ var SETTINGS_DEFS = [
   { key: "llm_fallback", label: "Send questions the built-in parser can't understand to Claude", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false }
 ];
 var settingsValues = Object.fromEntries(SETTINGS_DEFS.map((s) => [s.key, s.default]));
+var HIDDEN_SETTINGS = /* @__PURE__ */ new Set(["anomaly_increase_tolerance", "anomaly_po_deviation", "anomaly_outlier_z", "anomaly_review_top_n", "check_high_disc_unused", "co_max_extra", "anomaly_benchmark_deviation", "anomaly_group_spread", "whatsapp_after_days", "reminders_on", "reminder_first_days", "reminder_second_days", "mou_alert_weekday", "llm_fallback"]);
+var HIDDEN_GROUPS = /* @__PURE__ */ new Set(["Targets", "Money", "Rebates", "Renewals & alerts"]);
 function describeSettings() {
-  return SETTINGS_DEFS.map((s) => ({
+  return SETTINGS_DEFS.filter((s) => !HIDDEN_GROUPS.has(s.group) && !HIDDEN_SETTINGS.has(s.key)).map((s) => ({
     key: s.key,
     label: s.label,
     group: s.group,
@@ -1226,6 +1703,7 @@ function computeCalendar(minDays, maxDays) {
 var STEPS = [
   { key: "prepare", label: "Prepare", who: "admin" },
   { key: "rfq", label: "RFQ & Identification", who: "principal" },
+  { key: "review_rfq", label: "Review RFQ", who: "admin", optional: true },
   { key: "counter_offer", label: "Counter Offer", who: "admin" },
   { key: "feedback1", label: "Feedback I", who: "principal" },
   { key: "online_nego", label: "Online Nego", who: "admin" },
@@ -1274,7 +1752,7 @@ var periodDataMap = /* @__PURE__ */ new Map();
 function periodDataFor(id) {
   let d = periodDataMap.get(id);
   if (!d) {
-    d = { po: [], formulary: [], skus: [], tagging: [], files: {} };
+    d = { po: [], formulary: [], skus: [], tagging: [], benchmarks: [], files: {}, reports: {} };
     periodDataMap.set(id, d);
   }
   return d;
@@ -1283,10 +1761,12 @@ function syncPeriodCounts(per) {
   const d = periodDataFor(per.id);
   per.po_rows_count = d.po.length;
   per.formulary_count = d.formulary.length;
-  per.sku_master_count = d.skus.length;
+  per.sku_master_count = 0;
+  per.benchmark_count = d.benchmarks.length;
   per.sku_tagging_count = d.tagging.length;
 }
 var mouStore = /* @__PURE__ */ new Map();
+var bucketList = [];
 var usersList = [
   { id: 1, email: "admin@siloamhospitals.com", name: "Administrator", role: "admin", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
   { id: 2, email: "negotiator@siloamhospitals.com", name: "Heldra Procurement", role: "negotiator", active: 1, created_at: nowIso(), created_by: "system", last_login: nowIso(), has_password: true },
@@ -1325,161 +1805,107 @@ function parseCookies(req) {
   }
   return list;
 }
-function calcUnitPrice(hna, qty, disc, ppn = 0.11, binding = "Nett", formularyHna = null, lastPoPrice = null) {
-  if (qty == null || qty <= 0) return null;
-  if (binding === "Nett to Disc") {
-    const baseHna = formularyHna != null && formularyHna > 0 ? formularyHna : lastPoPrice != null && lastPoPrice > 0 ? lastPoPrice : hna;
-    if (baseHna == null) return null;
-    return baseHna / qty * (1 - (disc || 0)) * (1 + ppn);
-  }
-  if (hna == null) return null;
+function calcUnitPrice(hna, qty, disc, ppn = 0.11) {
+  if (hna == null || qty == null || qty <= 0) return null;
   return hna / qty * (1 - (disc || 0)) * (1 + ppn);
 }
 var cycleOf = (cid) => cyclesList.find((x) => x.id === cid);
-function enrichCycleItem(item, ppn = 0.11, cycle) {
-  const it = { ...item };
-  const binding = cycle?.binding || it.binding || "Nett";
-  const negoType = cycle?.nego_type || it.nego_type || "Renewal";
-  const monthsElapsed = cycle?.months_elapsed || 12;
-  const perPo = it.mou_qty || it.rfq_qty || parseUoMQty(it.po_unit_text) || 1;
-  it.po_unit_pcs = perPo;
-  it.mou_unit_price = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn, binding, it.formulary_hna, it.last_po_price);
-  it.rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn, binding, it.formulary_hna, it.last_po_price);
-  it.co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
-  it.fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
-  it.on_unit_price = it.on_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.on_disc, ppn, binding, it.formulary_hna, it.last_po_price) : null;
-  it.po_unit_price = it.last_po_price ? it.last_po_price / perPo * (1 + ppn) : null;
-  const poQtyYtd = it.po_qty_12m || 0;
-  const poValueYtd = it.po_value_12m || 0;
-  it.annual_pcs = poQtyYtd ? poQtyYtd * perPo * 12 / monthsElapsed : null;
-  it.po_annualized_value = poValueYtd * 12 / monthsElapsed;
-  const benchFormulary = it.formulary_hna ? it.formulary_hna / perPo * (1 + ppn) : null;
-  const benchMou = it.mou_unit_price;
-  const benchPo = it.po_unit_price;
-  const primaryBench = benchFormulary || benchMou || benchPo || null;
-  const benchTag = primaryBench ? benchFormulary ? "Formularium" : benchMou ? "MOU" : "PO YTD" : "tanpa acuan";
-  it.bench_tag = benchTag;
-  it.primary_bench = primaryBench;
-  const basePrice = negoType === "Force Majeure" && benchMou ? benchMou : primaryBench;
-  it.base_price = basePrice;
-  it.base_from = benchTag;
-  let latestStage = null;
-  let latestPrice = null;
-  for (const st of ["on", "fb1", "co", "rfq"]) {
-    if (it[`${st}_unit_price`] != null) {
-      latestStage = st;
-      latestPrice = it[`${st}_unit_price`];
-      break;
-    }
-  }
-  it.latest_stage = latestStage;
-  it.latest_price = latestPrice;
-  it.change_pct = latestPrice != null && basePrice ? latestPrice / basePrice - 1 : null;
-  const impactFor = (price) => {
-    if (price == null || !it.annual_pcs) return null;
-    if (negoType === "Force Majeure" && benchMou) return (price - benchMou) * it.annual_pcs;
-    if (it.po_annualized_value) return price * it.annual_pcs - it.po_annualized_value;
-    return basePrice ? (price - basePrice) * it.annual_pcs : null;
-  };
-  it.impact_rfq = impactFor(it.rfq_unit_price);
-  it.impact_co = impactFor(it.co_unit_price);
-  it.impact_fb1 = impactFor(it.fb1_unit_price);
-  it.impact_on = impactFor(it.on_unit_price);
-  it.impact = impactFor(latestPrice);
-  const hnaPerPc = it.rfq_hna ? it.rfq_hna / perPo : it.mou_hna ? it.mou_hna / perPo : it.formulary_hna ? it.formulary_hna / perPo : it.last_po_price ? it.last_po_price / perPo : null;
-  const baseMarginPrice = hnaPerPc != null ? hnaPerPc * (1 + ppn) : basePrice || null;
-  it.hna_per_pc = hnaPerPc;
-  it.base_margin_price = baseMarginPrice;
-  it.margin_pc_rfq = baseMarginPrice && it.rfq_unit_price != null ? baseMarginPrice - it.rfq_unit_price : null;
-  it.margin_pc_co = baseMarginPrice && it.co_unit_price != null ? baseMarginPrice - it.co_unit_price : null;
-  it.margin_pc_fb1 = baseMarginPrice && it.fb1_unit_price != null ? baseMarginPrice - it.fb1_unit_price : null;
-  it.margin_pc_on = baseMarginPrice && it.on_unit_price != null ? baseMarginPrice - it.on_unit_price : null;
-  const formPrice = benchFormulary || benchMou;
-  it.formulary_unit_price = formPrice;
-  it.margin_pc_formulary = baseMarginPrice && formPrice != null ? baseMarginPrice - formPrice : null;
-  it.margin_pc_po = baseMarginPrice && benchPo != null ? baseMarginPrice - benchPo : null;
-  it.margin_pc = baseMarginPrice && latestPrice != null ? baseMarginPrice - latestPrice : null;
-  it.margin_pct = baseMarginPrice && it.margin_pc != null ? it.margin_pc / baseMarginPrice : null;
-  it.margin_annual_rfq = it.margin_pc_rfq != null && it.annual_pcs ? it.margin_pc_rfq * it.annual_pcs : null;
-  it.margin_annual_co = it.margin_pc_co != null && it.annual_pcs ? it.margin_pc_co * it.annual_pcs : null;
-  it.margin_annual_fb1 = it.margin_pc_fb1 != null && it.annual_pcs ? it.margin_pc_fb1 * it.annual_pcs : null;
-  it.margin_annual_on = it.margin_pc_on != null && it.annual_pcs ? it.margin_pc_on * it.annual_pcs : null;
-  it.margin_annual_formulary = it.margin_pc_formulary != null && it.annual_pcs ? it.margin_pc_formulary * it.annual_pcs : null;
-  it.margin_annual_po = it.margin_pc_po != null && it.annual_pcs ? it.margin_pc_po * it.annual_pcs : null;
-  it.margin_annual = it.margin_pc != null && it.annual_pcs ? it.margin_pc * it.annual_pcs : null;
-  it.margin_impact_rfq_vs_formulary = it.margin_annual_rfq != null && it.margin_annual_formulary != null ? it.margin_annual_rfq - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.rfq_unit_price != null ? (formPrice - it.rfq_unit_price) * it.annual_pcs : null;
-  it.margin_impact_rfq_vs_po = it.margin_annual_rfq != null && it.margin_annual_po != null ? it.margin_annual_rfq - it.margin_annual_po : it.annual_pcs && benchPo != null && it.rfq_unit_price != null ? (benchPo - it.rfq_unit_price) * it.annual_pcs : null;
-  it.margin_impact_co_vs_formulary = it.margin_annual_co != null && it.margin_annual_formulary != null ? it.margin_annual_co - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.co_unit_price != null ? (formPrice - it.co_unit_price) * it.annual_pcs : null;
-  it.margin_impact_co_vs_po = it.margin_annual_co != null && it.margin_annual_po != null ? it.margin_annual_co - it.margin_annual_po : it.annual_pcs && benchPo != null && it.co_unit_price != null ? (benchPo - it.co_unit_price) * it.annual_pcs : null;
-  it.margin_impact_fb1_vs_formulary = it.margin_annual_fb1 != null && it.margin_annual_formulary != null ? it.margin_annual_fb1 - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.fb1_unit_price != null ? (formPrice - it.fb1_unit_price) * it.annual_pcs : null;
-  it.margin_impact_fb1_vs_po = it.margin_annual_fb1 != null && it.margin_annual_po != null ? it.margin_annual_fb1 - it.margin_annual_po : it.annual_pcs && benchPo != null && it.fb1_unit_price != null ? (benchPo - it.fb1_unit_price) * it.annual_pcs : null;
-  it.margin_impact_on_vs_formulary = it.margin_annual_on != null && it.margin_annual_formulary != null ? it.margin_annual_on - it.margin_annual_formulary : it.annual_pcs && formPrice != null && it.on_unit_price != null ? (formPrice - it.on_unit_price) * it.annual_pcs : null;
-  it.margin_impact_on_vs_po = it.margin_annual_on != null && it.margin_annual_po != null ? it.margin_annual_on - it.margin_annual_po : it.annual_pcs && benchPo != null && it.on_unit_price != null ? (benchPo - it.on_unit_price) * it.annual_pcs : null;
-  it.margin_vs_formulary = it.margin_annual != null && it.margin_annual_formulary != null ? it.margin_annual - it.margin_annual_formulary : it.annual_pcs && formPrice != null && latestPrice != null ? (formPrice - latestPrice) * it.annual_pcs : null;
-  it.margin_vs_po = it.margin_annual != null && it.margin_annual_po != null ? it.margin_annual - it.margin_annual_po : it.annual_pcs && benchPo != null && latestPrice != null ? (benchPo - latestPrice) * it.annual_pcs : null;
-  it.margin_impact_vs_formulary = it.margin_vs_formulary;
-  it.margin_impact_vs_po = it.margin_vs_po;
-  return it;
+var STEP_ORDER = ["prepare", "rfq", "review_rfq", "counter_offer", "feedback1", "online_nego", "submission", "closed"];
+var stepIdx = (k) => STEP_ORDER.indexOf(k);
+var FIELD_STEP = {
+  mou_qty: "prepare",
+  mou_hna: "prepare",
+  mou_disc: "prepare",
+  brand: "rfq",
+  catalog_no: "rfq",
+  item_status: "rfq",
+  remarks: "rfq",
+  rfq_qty: "rfq",
+  rfq_hna: "rfq",
+  rfq_disc: "rfq",
+  price_reason: "rfq",
+  co_disc: "counter_offer",
+  co_note: "counter_offer",
+  fb1_disc: "feedback1",
+  on_disc: "online_nego",
+  on_disc_nett: "online_nego",
+  on_disc_disc: "online_nego"
+};
+var FIELD_LABEL = {
+  mou_qty: "MOU Qty",
+  mou_hna: "MOU HNA",
+  mou_disc: "MOU Disc",
+  brand: "Brand",
+  catalog_no: "REF",
+  item_status: "Status",
+  remarks: "Remarks",
+  rfq_qty: "RFQ Qty",
+  rfq_hna: "RFQ HNA",
+  rfq_disc: "RFQ Disc",
+  price_reason: "Alasan kenaikan",
+  co_disc: "CO Disc",
+  co_note: "CO remarks",
+  fb1_disc: "FB1 Disc",
+  on_disc: "ON Disc",
+  on_disc_nett: "ON Disc (skema Nett)",
+  on_disc_disc: "ON Disc (skema Disc)",
+  proceed_bak: "Lanjut ke BAK",
+  bucket: "Bucket",
+  sbp: "SBP",
+  need_sbp: "Perlu SBP setelah nego",
+  notes: "Notes",
+  active_ingredient: "Active ingredient"
+};
+function lockedStepFor(cycle, field) {
+  const owner = FIELD_STEP[field];
+  if (!owner) return null;
+  return stepIdx(cycle.current_step) > stepIdx(owner) ? owner : null;
 }
-function summarizeCycleItems(enriched) {
-  const stages = [
-    ["rfq", "RFQ"],
-    ["co", "Counter offer"],
-    ["fb1", "Feedback I"],
-    ["on", "Online nego"]
-  ].map(([key, label]) => {
-    const rows = enriched.filter((i) => i.item_status !== "Discontinue" && i[`${key}_unit_price`] != null);
-    const deltas = rows.map((i) => i[`impact_${key}`]).filter((v) => v != null);
-    const marginFormDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_formulary != null || i.formulary_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_formulary`] ?? (i.formulary_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
-    const marginPoDeltas = rows.filter((i) => i.annual_pcs && (i.margin_impact_vs_po != null || i.po_unit_price != null && i[`${key}_unit_price`] != null)).map((i) => i[`margin_impact_${key}_vs_po`] ?? (i.po_unit_price - i[`${key}_unit_price`]) * i.annual_pcs);
-    return {
-      key,
-      label,
-      items: rows.length,
-      increases: rows.filter((i) => i.base_price && i[`${key}_unit_price`] > i.base_price * 1.0005).length,
-      decreases: rows.filter((i) => i.base_price && i[`${key}_unit_price`] < i.base_price * 0.9995).length,
-      impact: deltas.length ? deltas.reduce((a, b) => a + b, 0) : null,
-      margin_impact_vs_formulary: marginFormDeltas.length ? marginFormDeltas.reduce((a, b) => a + b, 0) : null,
-      margin_impact_vs_po: marginPoDeltas.length ? marginPoDeltas.reduce((a, b) => a + b, 0) : null
-    };
-  });
-  const latestImpacts = enriched.filter((i) => i.impact != null).map((i) => i.impact);
-  const activeItems = enriched.filter((i) => i.item_status !== "Discontinue");
-  const rfqFilledActive = activeItems.filter((i) => i.rfq_hna != null);
-  const marginFormularyTotal = enriched.some((i) => i.margin_impact_vs_formulary != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_formulary || 0), 0) : null;
-  const marginPoTotal = enriched.some((i) => i.margin_impact_vs_po != null) ? enriched.reduce((s, i) => s + (i.margin_impact_vs_po || 0), 0) : null;
-  return {
-    items: enriched.length,
-    active: activeItems.length,
-    discontinued: enriched.filter((i) => i.item_status === "Discontinue").length,
-    with_mou: enriched.filter((i) => i.mou_unit_price != null).length,
-    with_po: enriched.filter((i) => i.po_qty_12m != null).length,
-    // "Spend" is what Siloam actually pays: the PO value, annualized (YTD x 12 / months elapsed).
-    po_value_12m: enriched.reduce((s, i) => s + (i.po_annualized_value || 0), 0),
-    baseline_spend: enriched.reduce((s, i) => s + (i.po_annualized_value || 0), 0),
-    stages,
-    rfq_filled: rfqFilledActive.length,
-    rfq_active_pct: activeItems.length ? rfqFilledActive.length / activeItems.length : 0,
-    latest_impact: latestImpacts.length ? latestImpacts.reduce((a, b) => a + b, 0) : null,
-    margin_vs_formulary: marginFormularyTotal,
-    margin_vs_po: marginPoTotal,
-    margin_impact_vs_formulary: marginFormularyTotal,
-    margin_impact_vs_po: marginPoTotal
-  };
+var sameVal = (a, b) => typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-9 : (a ?? null) === (b ?? null);
+function recordChange(it, changes, how) {
+  const at = nowIso();
+  const by = how.by || actingUser().email;
+  const changed = [];
+  for (const [f, v] of Object.entries(changes)) {
+    const old = it[f] ?? null;
+    const nv = v === void 0 ? null : v;
+    if (sameVal(old, nv)) continue;
+    (it.history ||= []).unshift({ at, by, field: f, label: FIELD_LABEL[f] || f, from: old, to: nv, source: how.source, reason: how.reason || null });
+    it[f] = nv;
+    changed.push(f);
+  }
+  if (it.history && it.history.length > 300) it.history.length = 300;
+  if (changed.length) {
+    it.version = (it.version || 0) + 1;
+    it.updated_at = at;
+    it.updated_by = by;
+  }
+  return changed;
+}
+function logCycle(cid, action, detail = null, by) {
+  const evs = cycleEventsMap.get(cid) || [];
+  evs.unshift({ id: (evs[0]?.id || evs.length) + 1, cycle_id: cid, at: nowIso(), user_email: by || actingUser().email, action, detail });
+  cycleEventsMap.set(cid, evs);
+}
+function marketPrice(cycle, code) {
+  const pd = periodDataFor(cycle?.period_id || 1);
+  let best = null;
+  for (const b of pd.benchmarks) if (b.code === code && (!best || b.price_pp < best.price_pp)) best = b;
+  return best;
 }
 function scanCycleAnomalies(cid) {
   const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const upLimit = Number(settingsValues.anomaly_up) || 0.5;
+  const downLimit = Number(settingsValues.anomaly_down) || 5e-3;
   const enriched = items.map((i) => enrichCycleItem(i, ppn, c));
   const existing = cycleAnomaliesMap.get(cid) || [];
   const existingDecisions = /* @__PURE__ */ new Map();
-  for (const a of existing) {
-    existingDecisions.set(`${a.item_id}:${a.rule}`, a);
-  }
+  for (const a of existing) existingDecisions.set(`${a.item_id}:${a.rule}`, a);
   const findings = [];
   let nextAid = 1;
-  const pushFinding = (it, rule, label, severity, message, field, suggestion, suggestion_text) => {
+  const pushFinding = (it, rule, label, severity, message, extra = {}) => {
     const prev = existingDecisions.get(`${it.id}:${rule}`);
     findings.push({
       id: nextAid++,
@@ -1491,9 +1917,16 @@ function scanCycleAnomalies(cid) {
       label,
       severity,
       message,
-      field: field || null,
-      suggestion: suggestion ?? null,
-      suggestion_text: suggestion_text || null,
+      field: extra.field || null,
+      suggestion: extra.suggestion ?? null,
+      suggestion_text: extra.suggestion_text || null,
+      compare_price: extra.compare_price ?? null,
+      compare_tag: extra.compare_tag || null,
+      price: extra.price ?? null,
+      // What the principal answered (confirmation and reason), so Siloam sees it next to the finding.
+      principal_reason: it.price_reason || null,
+      principal_confirmed: (it.principal_confirmed || "").split(",").filter(Boolean),
+      principal_comment: extra.principal_comment || null,
       status: prev ? prev.status : "open",
       decided_by: prev?.decided_by || null,
       decided_at: prev?.decided_at || null,
@@ -1503,101 +1936,92 @@ function scanCycleAnomalies(cid) {
   for (let idx = 0; idx < items.length; idx++) {
     const raw = items[idx];
     const en = enriched[idx];
-    const primaryBench = en.primary_bench;
-    const benchTag = en.bench_tag || "acuan";
-    const poPack = matchUoMQty(raw.po_unit_text);
-    const packRefs = [];
-    if (raw.mou_qty) packRefs.push([raw.mou_qty, "MOU UOM"]);
-    if (poPack) packRefs.push([poPack, `isi kemasan PO (${raw.po_unit_text})`]);
-    const packBad = raw.rfq_qty ? packRefs.find(([q]) => q !== raw.rfq_qty) : null;
-    if (packBad) {
-      pushFinding(
-        raw,
-        "pack_mismatch:rfq_qty",
-        "Qty/PO unit mismatch",
-        "medium",
-        `Qty/PO unit mismatch: RFQ Qty (${raw.rfq_qty}) berbeda dengan ${packBad[1]} (${packBad[0]}). Periksa konversi kemasan.`,
-        "rfq_qty",
-        packBad[0],
-        `Samakan dengan ${packBad[1]} (${packBad[0]})`
-      );
+    const comments = (raw.comments || []).filter((m) => m.by === "principal" && !m.resolved);
+    if (comments.length) {
+      const last = comments[comments.length - 1];
+      pushFinding(raw, "principal_comment", "Pengajuan koreksi dari principal", "medium", `Principal mengajukan koreksi: "${last.text}"`, { principal_comment: last.text });
     }
-    if (raw.rfq_disc != null && raw.rfq_disc > 1) {
+    if (raw.item_status === "Discontinue") continue;
+    const acuan = en.primary_bench;
+    const tag = en.bench_tag;
+    if (raw.rfq_disc != null && raw.rfq_disc >= 1) {
       pushFinding(
         raw,
         "disc_format:rfq_disc",
-        "Format diskon tidak realistis",
+        "Format diskon salah",
         "high",
-        `Diskon RFQ diisi ${raw.rfq_disc}. Format harus desimal 0-1 (contoh: 0.15 untuk 15%).`,
-        "rfq_disc",
-        raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc / 100 : 0.15,
-        `Koreksi ke ${raw.rfq_disc > 1 && raw.rfq_disc <= 100 ? raw.rfq_disc + "%" : "15%"}`
+        `Diskon RFQ terbaca ${(raw.rfq_disc * 100).toLocaleString("id-ID")}%. Isi angka 0 sampai 100 (contoh 15 untuk 15%).`,
+        { field: "rfq_disc", suggestion: raw.rfq_disc <= 100 ? raw.rfq_disc / 100 : null, suggestion_text: raw.rfq_disc <= 100 ? `Koreksi ke ${raw.rfq_disc}%` : "Minta principal mengisi ulang" }
       );
     }
-    if (en.latest_price != null && primaryBench && primaryBench > 0) {
-      const priceIncreaseRatio = en.latest_price / primaryBench - 1;
-      if (priceIncreaseRatio > 0.5) {
-        const gross = raw.rfq_hna && raw.rfq_qty ? raw.rfq_hna / raw.rfq_qty * (1 + ppn) : en.latest_price;
-        const targetDisc = gross > primaryBench ? Math.max(0, Math.min(0.95, 1 - primaryBench / gross)) : 0;
+    if (en.latest_price != null && acuan && acuan > 0) {
+      const ratio = en.latest_price / acuan - 1;
+      if (ratio > upLimit) {
+        const gross = en.latest_price / Math.max(1e-9, 1 - (raw[`${en.latest_stage === "on" ? "on" : en.latest_stage}_disc`] ?? 0));
+        const targetDisc = gross > acuan ? Math.max(0, Math.min(0.95, 1 - acuan / gross)) : 0;
         pushFinding(
           raw,
           "price_increase_high",
-          "Kenaikan harga >50% vs acuan",
+          `Harga naik >${Math.round(upLimit * 100)}%`,
           "high",
-          `Harga nett/pc naik ${(priceIncreaseRatio * 100).toFixed(1)}% (>50%) di atas acuan ${benchTag} (${rp(en.latest_price)} vs ${rp(primaryBench)}).`,
-          "co_disc",
-          Number(targetDisc.toFixed(4)),
-          `Counter diskon ${(targetDisc * 100).toFixed(1)}% untuk tahan harga ${benchTag}`
+          `Unit Price naik ${(ratio * 100).toFixed(1)}% vs ${tag} (${rp(en.latest_price)} vs ${rp(acuan)}). Cek HNA dan isi kemasan ke principal.`,
+          { field: "co_disc", suggestion: Number(targetDisc.toFixed(4)), suggestion_text: `Counter diskon ${(targetDisc * 100).toFixed(1)}% untuk menahan harga ${tag}`, compare_price: acuan, compare_tag: tag, price: en.latest_price }
         );
       }
     }
-    if (en.rfq_unit_price != null && primaryBench && primaryBench > 0) {
-      const priceDecreaseRatio = (primaryBench - en.rfq_unit_price) / primaryBench;
-      if (priceDecreaseRatio > 5e-3) {
+    if (en.rfq_unit_price != null && acuan && acuan > 0) {
+      const drop = (acuan - en.rfq_unit_price) / acuan;
+      if (drop > downLimit) {
         pushFinding(
           raw,
           "price_decrease_rfq",
-          "Penurunan harga RFQ >0.5%",
-          "low",
-          `Harga penawaran RFQ lebih hemat ${(priceDecreaseRatio * 100).toFixed(1)}% vs acuan ${benchTag} (${rp(en.rfq_unit_price)} vs ${rp(primaryBench)}).`,
-          void 0,
-          void 0,
-          `Pertahankan harga penawaran ini`
+          `Harga RFQ turun >${(downLimit * 100).toString().replace(".", ",")}%`,
+          "high",
+          `Unit Price RFQ turun ${(drop * 100).toFixed(1)}% vs ${tag} (${rp(en.rfq_unit_price)} vs ${rp(acuan)}). Pastikan HNA dan isi kemasan benar.`,
+          { compare_price: acuan, compare_tag: tag, price: en.rfq_unit_price, suggestion_text: "Minta principal memastikan harga ini" }
         );
       }
     }
   }
   cycleAnomaliesMap.set(cid, findings);
+  const open = findings.filter((f) => f.status === "open");
   return {
-    open: findings.filter((f) => f.status === "open").length,
+    open: open.length,
     fixed: findings.filter((f) => f.status === "fixed").length,
     kept: findings.filter((f) => f.status === "kept").length,
-    high: findings.filter((f) => f.status === "open" && f.severity === "high").length,
-    medium: findings.filter((f) => f.status === "open" && f.severity === "medium").length,
-    low: findings.filter((f) => f.status === "open" && f.severity === "low").length
+    high: open.filter((f) => f.severity === "high").length,
+    open_high: open.filter((f) => f.severity === "high").length,
+    medium: open.filter((f) => f.severity === "medium").length,
+    low: open.filter((f) => f.severity === "low").length
   };
+}
+function overdueDaysOf(c) {
+  if (!c || c.status !== "open" || !c.step_due) return 0;
+  const owner = STEPS.find((x) => x.key === c.current_step);
+  if (!owner || owner.who !== "principal" || (c.submitted_steps || {})[c.current_step]) return 0;
+  const d = daysBetween(c.step_due, (/* @__PURE__ */ new Date()).toISOString().slice(0, 10));
+  return d > 0 ? d : 0;
 }
 function getCycleSummaryCard(c) {
   const items = cycleItemsMap.get(c.id) || [];
   const anoms = cycleAnomaliesMap.get(c.id) || [];
+  const links = cycleLinksMap.get(c.id) || [];
+  const activeLink = links.find((l) => !l.revoked_at) || null;
   return {
     ...c,
     step_label: STEP_LABEL[c.current_step] || c.current_step,
     items: items.length,
-    open_anomalies: anoms.filter((a) => a.status === "open").length
+    open_anomalies: anoms.filter((a) => a.status === "open").length,
+    overdue_days: overdueDaysOf(c),
+    active_token: activeLink?.token || null
   };
 }
 var CATEGORY_TOKENS = {
   drugs: "Drugs",
   drug: "Drugs",
-  obat: "Drugs",
-  pharma: "Drugs",
-  pharmaceuticals: "Drugs",
   cnc: "CnC",
   consumables: "CnC",
   consumable: "CnC",
-  reagents: "CnC",
-  reagent: "CnC",
   "consumables & chemicals": "CnC"
 };
 function normalizeCategory(v) {
@@ -1626,50 +2050,68 @@ function normalizeNegoType(v) {
   if (!t) return "Renewal";
   return NEGO_TYPES.find((n) => n.toLowerCase() === t) || null;
 }
-function parseItemCodes(v) {
-  const list = Array.isArray(v) ? v : String(v ?? "").split(/[,;\n\r\t ]+/);
-  return [...new Set(list.map((x) => String(x).trim().toUpperCase()).filter(Boolean))];
-}
-function cleanPrincipalFields(b, partial = false) {
+function checkPrincipalFields(b, partial = false) {
   const f = {};
+  const errors = [];
   if (!partial || b.name !== void 0) {
-    const name = String(b.name ?? "").trim();
-    if (!name) return { error: "Principal name is required" };
-    f.name = name;
+    const name = normalizePrincipalName(b.name);
+    if (!name) errors.push("Principal name is required");
+    else f.name = name;
   }
   if (!partial || b.category !== void 0) {
     const cat = normalizeCategory(b.category);
-    if (!cat) return { error: "Category must be Drugs, CnC, or both" };
-    f.category = cat;
+    if (!cat) errors.push(`Category "${String(b.category ?? "").trim()}" is not valid. Use Drugs, CnC, or both`);
+    else f.category = cat;
   }
   if (!partial || b.nego_type !== void 0) {
     const nt = normalizeNegoType(b.nego_type);
-    if (!nt) return { error: `Negotiation type must be one of: ${NEGO_TYPES.join(", ")}` };
-    f.nego_type = nt;
+    if (!nt) errors.push(`Negotiation type "${String(b.nego_type ?? "").trim()}" is not valid. Use one of: ${NEGO_TYPES.join(", ")}`);
+    else f.nego_type = nt;
   }
   if (!partial || b.binding !== void 0) {
     const bd = normalizeBinding(b.binding);
-    if (!bd) return { error: `Binding must be one of: ${BINDINGS.join(", ")}` };
-    f.binding = bd;
+    if (!bd) errors.push(`Binding "${String(b.binding ?? "").trim()}" is not valid. Use one of: ${BINDINGS.join(", ")}`);
+    else f.binding = bd;
   }
   for (const k of ["distributor", "contact_name", "contact_email", "contact_phone", "notes"]) {
     if (!partial || b[k] !== void 0) f[k] = String(b[k] ?? "").trim();
   }
-  if (!partial || b.item_codes !== void 0) f.item_codes = parseItemCodes(b.item_codes);
+  if (f.contact_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.contact_email)) errors.push(`Email "${f.contact_email}" is not a valid email address`);
   for (const k of ["mou_start", "mou_end"]) {
     if (!partial || b[k] !== void 0) {
       const raw = String(b[k] ?? "").trim();
       const iso = raw ? toIsoDate(raw) : null;
-      if (raw && !iso) return { error: `${k === "mou_start" ? "Current MOU start" : "Current MOU end"} is not a valid date` };
+      if (raw && !iso) errors.push(`${k === "mou_start" ? "Current MOU start" : "Current MOU end"} "${raw}" is not a valid date`);
       f[k] = iso;
     }
   }
-  return { fields: f };
+  if (f.mou_start && f.mou_end && f.mou_end < f.mou_start) errors.push("Current MOU end is before the start");
+  return { fields: f, errors };
 }
-function buildItemsForPrincipal(p, pd, mouRows) {
-  const pname = String(p.name).trim().toLowerCase();
-  const tagged = new Set(parseItemCodes(p.item_codes));
-  for (const t of pd.tagging) if (t.principal.trim().toLowerCase() === pname) tagged.add(t.code);
+function cleanPrincipalFields(b, partial = false) {
+  const r = checkPrincipalFields(b, partial);
+  return r.errors.length ? { error: r.errors[0] } : { fields: r.fields };
+}
+function cleanMouRows(mouRows) {
+  const byCode = /* @__PURE__ */ new Map();
+  mouRows.forEach((m, i) => {
+    const code = normalizeCode(pick(m, "ERP Code", "Kode Barang", "Item Number", "Item Code"));
+    if (!code) return;
+    byCode.set(code, [...byCode.get(code) || [], { row: m, line: i + 2 }]);
+  });
+  const good = [];
+  const errors = [];
+  for (const [code, list] of byCode) {
+    if (list.length > 1) {
+      for (const x of list) errors.push({ row: x.line, code, message: `MOU dobel untuk ${code} (baris ${list.map((y) => y.line).join(", ")}). Semua barisnya ditolak, perbaiki file MOU.` });
+    } else good.push({ code, row: list[0].row });
+  }
+  return { good, errors };
+}
+function buildItemsForPrincipal(p2, pd, mouRows, per) {
+  const pname = normName(p2.name);
+  const tagged = /* @__PURE__ */ new Set();
+  for (const t of pd.tagging) if (normName(t.principal) === pname) tagged.add(t.code);
   const sku = new Map(pd.skus.map((x) => [x.code, x]));
   const byCode = /* @__PURE__ */ new Map();
   const source = {};
@@ -1684,26 +2126,37 @@ function buildItemsForPrincipal(p, pd, mouRows) {
     mou_hna: null,
     mou_disc: null,
     formulary_hna: null,
+    form_conv: null,
+    form_disc: null,
+    form_price_given: null,
+    form_base_price_given: null,
+    hna_sbp: null,
+    form_kind: "",
+    active_ingredient: "",
+    bucket: "",
+    sbp: null,
+    need_sbp: null,
+    notes: "",
     po_unit_text: "",
     po_qty_12m: 0,
     po_value_12m: 0,
-    last_po_price: null
+    po_avg_price: null,
+    last_po_price: null,
+    po_years: {}
   });
-  for (const m of mouRows) {
-    const code = pick(m, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
-    if (!code) continue;
+  const mou = cleanMouRows(mouRows);
+  for (const { code, row: m } of mou.good) {
     const it = blank(code, pick(m, "Item Name", "Nama Barang", "Item Description"));
     it.brand = pick(m, "Brand", "Brand / Manufacturer", "Merk");
     it.catalog_no = pick(m, "Catalog No. (REF)", "Catalog No", "REF");
-    it.mou_qty = toNumber(pick(m, "MOU_Qty/PO Unit", "MOU Qty/PO Unit", "Qty/PO Unit")) || 1;
-    it.mou_hna = toNumber(pick(m, "MOU_HNA/PO Unit (excl. PPN)", "MOU HNA/PO Unit", "HNA/PO Unit"));
-    it.mou_disc = toNumber(pick(m, "MOU_Disc%", "MOU Disc%", "Disc%")) ?? 0;
-    if (it.mou_disc > 1) it.mou_disc = it.mou_disc / 100;
+    it.mou_qty = parseMoney(pick(m, "MOU_Qty/PO Unit", "MOU Qty/PO Unit", "Qty/PO Unit")) || 1;
+    it.mou_hna = parseMoney(pick(m, "MOU_HNA/PO Unit (excl. PPN)", "MOU HNA/PO Unit", "HNA/PO Unit"));
+    it.mou_disc = parseDiscLenient(pick(m, "MOU_Disc%", "MOU Disc%", "Disc%")) ?? 0;
     byCode.set(code, it);
     source[code] = "mou";
   }
   for (const f of pd.formulary) {
-    const mine = f.principal.trim().toLowerCase() === pname || tagged.has(f.code);
+    const mine = normName(f.principal) === pname || tagged.has(f.code);
     if (!mine) continue;
     let it = byCode.get(f.code);
     if (!it) {
@@ -1714,15 +2167,22 @@ function buildItemsForPrincipal(p, pd, mouRows) {
     if (!it.item_name) it.item_name = f.name;
     if (!it.brand) it.brand = f.brand;
     if (source[f.code] === "formulary" && f.status.toLowerCase() === "inactive") it.item_status = "Discontinue";
-    if (f.uom) it.po_unit_text = f.uom;
-    if (f.hna != null) it.formulary_hna = f.hna;
-    if (it.mou_qty == null) it.mou_qty = matchUoMQty(f.uom) || null;
+    if (f.uom) it.po_unit_text = normalizeUom(f.uom);
+    it.formulary_hna = f.hna;
+    it.form_conv = f.conv || matchUoMQty(f.uom) || null;
+    it.form_disc = f.disc;
+    it.form_price_given = f.price;
+    it.form_base_price_given = f.base_price;
+    it.hna_sbp = f.hna_sbp;
+    it.form_kind = f.kind;
+    if (f.active_ingredient) it.active_ingredient = f.active_ingredient;
   }
   let used = 0;
   const poUnits = /* @__PURE__ */ new Map();
   let from = "", to = "";
+  const perYear = /* @__PURE__ */ new Map();
   for (const r of pd.po) {
-    const mine = r.vendor.trim().toLowerCase() === pname || tagged.has(r.code);
+    const mine = normName(r.vendor) === pname || tagged.has(r.code);
     if (!mine || !r.code) continue;
     used++;
     if (r.date && (!from || r.date < from)) from = r.date;
@@ -1733,25 +2193,54 @@ function buildItemsForPrincipal(p, pd, mouRows) {
       byCode.set(r.code, it);
       source[r.code] = "po";
     }
-    it.po_qty_12m += r.qty;
-    it.po_value_12m += r.amount;
     if (r.price > 0) it.last_po_price = r.price;
     if (r.unit) {
       it.po_unit_text = r.unit;
       if (!poUnits.has(r.code)) poUnits.set(r.code, /* @__PURE__ */ new Set());
       poUnits.get(r.code).add(r.unit);
     }
+    const year = (r.date || "").slice(0, 4) || "0000";
+    if (!perYear.has(r.code)) perYear.set(r.code, /* @__PURE__ */ new Map());
+    const ym = perYear.get(r.code);
+    const slot = ym.get(year) || { qty: 0, value: 0, posQty: 0, posValue: 0 };
+    slot.qty += r.qty;
+    slot.value += r.amount;
+    if (r.qty > 0) {
+      slot.posQty += r.qty;
+      slot.posValue += r.amount;
+    }
+    ym.set(year, slot);
   }
+  const curYear = String(per?.year || (/* @__PURE__ */ new Date()).getFullYear());
+  for (const [code, ym] of perYear) {
+    const it = byCode.get(code);
+    if (!it) continue;
+    for (const [y, v] of ym) it.po_years[y] = { qty: v.qty, value: v.value, avg: v.posQty > 0 ? v.posValue / v.posQty : null };
+    const chosen = ym.has(curYear) ? [ym.get(curYear)] : [...ym.values()];
+    it.po_qty_12m = chosen.reduce((s, v) => s + v.qty, 0);
+    it.po_value_12m = chosen.reduce((s, v) => s + v.value, 0);
+    const pq = chosen.reduce((s, v) => s + v.posQty, 0), pv = chosen.reduce((s, v) => s + v.posValue, 0);
+    it.po_avg_price = pq > 0 ? pv / pq : null;
+    it.po_year_used = ym.has(curYear) ? curYear : "all";
+    it.po_cur_year = curYear;
+  }
+  const bucket = new Map(bucketList.map((b) => [b.code, b]));
   for (const it of byCode.values()) {
     const m = sku.get(it.erp_code);
     if (m) {
       if (!it.item_name) it.item_name = m.name;
       if (!it.brand) it.brand = m.brand;
       if (!it.catalog_no) it.catalog_no = m.catalog_no;
-      if (!it.po_unit_text) it.po_unit_text = m.uom;
+      if (!it.po_unit_text) it.po_unit_text = normalizeUom(m.uom);
     }
-    if (it.mou_qty == null) it.mou_qty = matchUoMQty(it.po_unit_text);
+    const b = bucket.get(it.erp_code);
+    if (b) {
+      it.bucket = b.bucket;
+      if (b.sbp != null) it.sbp = b.sbp;
+    }
     if (!it.po_unit_text) it.po_unit_text = it.mou_qty ? `BOX@${it.mou_qty}` : "";
+    it.po_unit_text = normalizeUom(it.po_unit_text);
+    if (!it.form_conv) it.form_conv = matchUoMQty(it.po_unit_text);
   }
   const items = [...byCode.values()].sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
   const by_source = { po: 0, formulary: 0, mou: 0 };
@@ -1762,63 +2251,111 @@ function buildItemsForPrincipal(p, pd, mouRows) {
       items: items.length,
       by_source,
       po: { period_from: from || null, period_to: to || null, po_lines_used: used, po_lines: pd.po.length },
-      several_po_units: [...poUnits.entries()].filter(([, u]) => u.size > 1).map(([c]) => c)
+      several_po_units: [...poUnits.entries()].filter(([, u]) => u.size > 1).map(([c]) => c),
+      mou_errors: mou.errors
     }
   };
 }
 function loadSamplePeriodData() {
-  const pd = periodDataFor(1);
-  pd.po = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "po_export.csv")).map((r) => normalizePoRow(r)).filter((x) => !!x);
-  pd.formulary = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "formulary.csv")).map((r) => normalizeFormularyRow(r)).filter((x) => !!x);
-  pd.tagging = pd.formulary.filter((f) => f.principal).map((f) => ({ code: f.code, principal: f.principal }));
+  const po = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "po_export.csv")).map((r) => normalizePoRow(r)).filter((x) => !!x);
+  const formulary = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "formulary.csv")).map((r) => normalizeFormularyRow(r)).filter((x) => !!x);
   const stamp = { at: nowIso(), by: "sample data" };
-  pd.files = {
-    po_export: { name: "po_export.csv", rows: pd.po.length, ...stamp },
-    formulary: { name: "formulary.csv", rows: pd.formulary.length, ...stamp },
-    sku_tagging: { name: "formulary.csv (Principal column)", rows: pd.tagging.length, ...stamp }
-  };
-  syncPeriodCounts(periodsList[0]);
+  for (const per of periodsList) {
+    const pd = periodDataFor(per.id);
+    pd.po = po.map((x) => ({ ...x }));
+    pd.formulary = formulary.map((x) => ({ ...x }));
+    pd.tagging = formulary.filter((f) => f.principal).map((f) => ({ code: f.code, principal: f.principal }));
+    pd.skus = [];
+    pd.benchmarks = [];
+    pd.reports = {};
+    pd.files = {
+      po_export: { name: "po_export.csv", rows: pd.po.length, ...stamp },
+      formulary: { name: "formulary.csv", rows: pd.formulary.length, ...stamp },
+      sku_tagging: { name: "formulary.csv (Principal column)", rows: pd.tagging.length, ...stamp }
+    };
+    syncPeriodCounts(per);
+  }
   mouStore.clear();
   for (const m of readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "mou_tracker.csv"))) {
-    const key = String(m.Principal || "").trim().toLowerCase();
+    const key = normName(m.Principal);
     if (!key) continue;
     mouStore.set(key, [...mouStore.get(key) || [], m]);
   }
 }
-function normalizePoRow(r) {
-  const code = pick(r, "Item Number", "ERP Code", "Kode Barang", "Item Code").toUpperCase();
-  const vendor = pick(r, "Vendor Name", "Vendor", "Principal", "Supplier");
+function cleanNumber(raw, field, fix) {
+  const n = parseMoney(raw);
+  if (n != null && fix && raw.trim() !== String(n)) fix(field, raw, String(n));
+  return n;
+}
+function normalizePoRow(r, fix) {
+  const codeRaw = pick(r, "Item Number", "ERP Code", "Kode Barang", "Item Code");
+  const code = normalizeCode(codeRaw);
   if (!code) return null;
-  const qty = toNumber(pick(r, "Quantity", "Qty")) ?? 0;
-  const price = toNumber(pick(r, "Unit Price", "Harga Satuan", "Price")) ?? 0;
-  const amount = toNumber(pick(r, "Line Amount", "Amount", "Nilai", "Total")) ?? qty * price;
+  if (fix && codeRaw !== code) fix("Kode barang", codeRaw, code);
+  const vendorRaw = pick(r, "Vendor Name", "Vendor", "Principal", "Supplier");
+  const vendor = vendorRaw.replace(/\s+/g, " ").trim();
+  if (fix && vendorRaw !== vendor) fix("Vendor", vendorRaw, vendor);
+  const qty = cleanNumber(pick(r, "Quantity", "Qty"), "Quantity", fix) ?? 0;
+  const price = cleanNumber(pick(r, "Unit Price", "Harga Satuan", "Price"), "Unit Price", fix) ?? 0;
+  const amountRaw = pick(r, "Line Amount", "Amount", "Nilai", "Total");
+  const amount = amountRaw ? cleanNumber(amountRaw, "Line Amount", fix) ?? qty * price : qty * price;
+  const unitRaw = pick(r, "Purch Unit", "Purchase Unit", "UOM", "Satuan");
+  const unit = normalizeUom(unitRaw);
+  if (fix && unitRaw && unit !== unitRaw) fix("Satuan", unitRaw, unit);
   return {
     date: toIsoDate(pick(r, "PO Date", "Date", "Tanggal")) || "",
     hospital: pick(r, "Hospital", "Rumah Sakit", "Unit"),
     vendor,
     code,
     desc: pick(r, "Item Description", "Item Name", "Nama Barang"),
-    unit: pick(r, "Purch Unit", "Purchase Unit", "UOM", "Satuan"),
+    unit,
     qty,
     price,
     amount
   };
 }
-function normalizeFormularyRow(r) {
-  const code = pick(r, "Kode Barang", "ERP Code", "Item Number", "Item Code").toUpperCase();
+function normalizeFormularyRow(r, fix) {
+  const codeRaw = pick(r, "Kode Barang", "ERP Code", "Item Number", "Item Code");
+  const code = normalizeCode(codeRaw);
   if (!code) return null;
+  if (fix && codeRaw !== code) fix("Kode barang", codeRaw, code);
+  const principalRaw = pick(r, "Principal", "Vendor", "Vendor Name");
+  const principal = normalizePrincipalName(principalRaw);
+  if (fix && principalRaw && principalRaw !== principal) fix("Principal", principalRaw, principal);
+  const hnaRaw = pick(r, "HNA", "Formulary HNA", "HNA Formularium", "Harga");
+  const discRaw = pick(r, "Disc", "Disc%", "Diskon", "Disc Formularium");
+  const uomRaw = pick(r, "Satuan", "UOM", "Purch Unit");
+  const num = (...names) => {
+    const v = pick(r, ...names);
+    return v ? parseMoney(v) : null;
+  };
   return {
     code,
     name: pick(r, "Nama Barang", "Item Name", "Item Description"),
-    principal: pick(r, "Principal", "Vendor", "Vendor Name"),
+    principal,
     brand: pick(r, "Merk", "Brand"),
     status: pick(r, "Status") || "Active",
-    uom: pick(r, "Satuan", "UOM", "Purch Unit"),
-    hna: toNumber(pick(r, "HNA", "Formulary HNA", "HNA Formularium", "Harga"))
+    uom: normalizeUom(uomRaw),
+    hna: hnaRaw ? cleanNumber(hnaRaw, "HNA", fix) : null,
+    conv: num("Konversi", "Conversion", "Isi"),
+    disc: discRaw ? parseDiscLenient(discRaw) : null,
+    price: num("Price", "Nett Price", "Harga Nett"),
+    base_price: num("Base Price"),
+    hna_sbp: num("HNA for SBP", "HNA SBP"),
+    kind: pick(r, "Jenis", "Type", "Kategori", "Tipe"),
+    active_ingredient: pick(r, "Active Ingredient", "Zat Aktif", "Bahan Aktif")
   };
+}
+var categoriesOf = (p2) => String(p2.category || "").includes("&") ? ["Drugs", "CnC"] : [String(p2.category || "CnC")];
+var cycleCategoryOf = (p2) => categoriesOf(p2)[0];
+function activePeriodFor(category) {
+  return periodsList.find((x) => x.category === category && x.active) || periodsList.find((x) => x.category === category) || periodsList[0];
 }
 function seedNegoSample() {
   const pRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "principals.csv"));
+  periodsList.forEach((x) => {
+    x.active = true;
+  });
   loadSamplePeriodData();
   principalsList.length = 0;
   cyclesList.length = 0;
@@ -1835,7 +2372,6 @@ function seedNegoSample() {
       distributor: r.Distributor || r.distributor || "",
       category: normalizeCategory(r.Category || r.category) || "CnC",
       nego_type: "Renewal",
-      item_codes: [],
       binding: r.Binding || r.binding || "Nett",
       mou_start: r["MOU Start"] || r.mou_start || "2024-01-31",
       mou_end: r["MOU End"] || r.mou_end || "2027-01-30",
@@ -1850,20 +2386,23 @@ function seedNegoSample() {
   const openNames = ["PT Medika Nusantara", "PT Farmasi Sejahtera", "PT Bio Diagnostik"];
   let cid = 1;
   for (const name of openNames) {
-    const p = principalsList.find((x) => x.name === name);
-    if (!p) continue;
+    const p2 = principalsList.find((x) => x.name === name);
+    if (!p2) continue;
     const isFirst = name === "PT Medika Nusantara";
+    const cat = cycleCategoryOf(p2);
+    const per = activePeriodFor(cat);
     const cycleObj = {
       id: cid++,
-      principal_id: p.id,
-      principal: { ...p },
+      principal_id: p2.id,
+      principal: { ...p2 },
       contract_start: "2027-02-01",
       contract_end: "2030-01-31",
-      binding: p.binding,
+      binding: p2.binding,
       delivery_fee: "Free for all Siloam Hospitals units",
       status: "open",
-      period_id: 1,
-      months_elapsed: 12,
+      category: cat,
+      period_id: per.id,
+      months_elapsed: per.months_elapsed,
       nego_type: "Renewal",
       current_step: isFirst ? "counter_offer" : "prepare",
       step_due: null,
@@ -1875,22 +2414,9 @@ function seedNegoSample() {
       created_by: "admin@siloamhospitals.com"
     };
     cyclesList.push(cycleObj);
-    const sortedItems = buildItemsForPrincipal(p, periodDataFor(1), mouStore.get(name.toLowerCase()) || []).items;
+    const sortedItems = buildItemsForPrincipal(p2, periodDataFor(per.id), mouStore.get(normName(name)) || [], per).items;
     const finalItems = sortedItems.map((it, idx) => {
-      const itemObj = {
-        id: idx + 1,
-        cycle_id: cycleObj.id,
-        sort: idx + 1,
-        ...it,
-        rfq_qty: null,
-        rfq_hna: null,
-        rfq_disc: null,
-        co_disc: null,
-        fb1_disc: null,
-        on_disc: null,
-        price_reason: null,
-        co_note: null
-      };
+      const itemObj = newCycleItem(cycleObj.id, idx, it);
       if (isFirst) {
         const mq = itemObj.mou_qty || 1;
         const mh = itemObj.mou_hna || 5e4;
@@ -1923,7 +2449,7 @@ function seedNegoSample() {
           brand: itemObj.brand,
           catalog_no: itemObj.catalog_no,
           uom: itemObj.po_unit_text,
-          tags: p.category,
+          tags: p2.category,
           status: idx % 3 === 0 ? "reviewed" : "new",
           source: "negotiation",
           first_seen: nowIso(),
@@ -1937,57 +2463,8 @@ function seedNegoSample() {
     scanCycleAnomalies(cycleObj.id);
     cycleEventsMap.set(cycleObj.id, [
       { id: 2, cycle_id: cycleObj.id, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "cycle.prepare", detail: { items: finalItems.length } },
-      { id: 1, cycle_id: cycleObj.id, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "cycle.create", detail: { principal: p.name } }
+      { id: 1, cycle_id: cycleObj.id, at: nowIso(), user_email: "admin@siloamhospitals.com", action: "cycle.create", detail: { principal: p2.name } }
     ]);
-    const inaprocRows = readCsvFile(path.join(DATA_NEGO_SAMPLE_DIR, "inaproc_sample.csv"));
-    const bmMatches = [];
-    let bmId = 1;
-    for (const it of finalItems) {
-      const itRef = (it.catalog_no || "").trim().toLowerCase();
-      const itWords = (it.item_name || "").toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
-      for (const row of inaprocRows) {
-        const rowRef = (row["Catalog No"] || row["REF"] || "").trim().toLowerCase();
-        const rowName = row["Product Name"] || row["Nama Produk"] || row["Item Name"] || "";
-        const rowUnit = row["Unit"] || row["Satuan"] || "pc";
-        const rawPrice = parseFloat(row["Price"] || row["Harga"] || "0") || 0;
-        if (!rawPrice) continue;
-        const unitPcs = parseUoMQty(rowUnit);
-        const pricePp = rawPrice / Math.max(1, unitPcs);
-        let confidence = 0;
-        let method = "name";
-        if (itRef && rowRef && itRef === rowRef) {
-          confidence = 0.96;
-          method = "ref";
-        } else if (itWords.length >= 2) {
-          const rLower = rowName.toLowerCase();
-          const hits = itWords.filter((w) => rLower.includes(w)).length;
-          if (hits >= 2 && hits / itWords.length >= 0.6) {
-            confidence = Math.min(0.88, 0.55 + hits / itWords.length * 0.35);
-            method = "name";
-          }
-        }
-        if (confidence >= 0.65) {
-          bmMatches.push({
-            id: bmId++,
-            cycle_id: cycleObj.id,
-            item_id: it.id,
-            erp_code: it.erp_code,
-            item_name: it.item_name,
-            item_brand: it.brand,
-            source: "INAPROC e-Katalog",
-            bm_name: rowName,
-            bm_brand: row["Brand"] || row["Merk"] || "",
-            bm_unit: rowUnit,
-            price_pp: pricePp,
-            confidence,
-            method,
-            status: confidence >= 0.9 ? "confirmed" : "suggested"
-          });
-          break;
-        }
-      }
-    }
-    cycleBenchmarksMap.set(cycleObj.id, bmMatches);
   }
 }
 seedNegoSample();
@@ -2012,35 +2489,36 @@ for (const c of cyclesList) {
 function getPrincipalsPayload() {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const alertMonths = Number(settingsValues.mou_alert_months) || 6;
-  const rows = principalsList.map((p) => {
-    const cyc = cyclesList.find((c) => c.principal_id === p.id);
-    const daysLeft = p.mou_end ? daysBetween(today, p.mou_end) : null;
-    const openCycle = cyc && cyc.status === "open";
-    const within6m = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths);
-    const mouAlert = Boolean(within6m && !openCycle);
-    return {
-      ...p,
-      mou_days_left: daysLeft,
-      within_6m: within6m,
-      mou_alert: mouAlert,
-      overdue_days: null,
-      cycle: cyc ? getCycleSummaryCard(cyc) : null
-    };
-  });
-  const expiringWithin6m = rows.filter((p) => p.within_6m);
-  const expiringOpen = expiringWithin6m.filter((p) => p.cycle && p.cycle.status === "open").length;
-  const expiringUnopened = expiringWithin6m.length - expiringOpen;
-  const openWithFindings = rows.filter((p) => p.cycle && p.cycle.status === "open" && p.cycle.open_anomalies > 0).length;
+  const rows = [];
+  for (const p2 of principalsList) {
+    const daysLeft = p2.mou_end ? daysBetween(today, p2.mou_end) : null;
+    for (const cat of categoriesOf(p2)) {
+      const cyc = cyclesList.filter((c) => c.principal_id === p2.id && (c.category || categoriesOf(p2)[0]) === cat).sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1) || b.id - a.id)[0];
+      const openCycle = cyc && cyc.status === "open";
+      const within6m = Boolean(daysLeft != null && daysLeft / 30.44 <= alertMonths);
+      rows.push({
+        ...p2,
+        row_key: `${p2.id}:${cat}`,
+        row_category: cat,
+        mou_days_left: daysLeft,
+        within_6m: within6m,
+        mou_alert: Boolean(within6m && !openCycle),
+        overdue_days: cyc ? overdueDaysOf(cyc) : null,
+        cycle: cyc ? getCycleSummaryCard(cyc) : null
+      });
+    }
+  }
+  const expiringWithin6m = rows.filter((p2) => p2.within_6m);
+  const expiringOpen = expiringWithin6m.filter((p2) => p2.cycle && p2.cycle.status === "open").length;
+  const openWithFindings = rows.filter((p2) => p2.cycle && p2.cycle.status === "open" && p2.cycle.open_anomalies > 0).length;
+  const overdue = rows.filter((p2) => p2.overdue_days > 0).length;
   return {
     principals: rows,
     alert_months: alertMonths,
     steps: STEPS,
-    kpi_mou_6m: {
-      total: expiringWithin6m.length,
-      open: expiringOpen,
-      unopened: expiringUnopened
-    },
-    principals_with_findings: openWithFindings
+    kpi_mou_6m: { total: expiringWithin6m.length, open: expiringOpen, unopened: expiringWithin6m.length - expiringOpen },
+    principals_with_findings: openWithFindings,
+    overdue_count: overdue
   };
 }
 var INTENT_RULES = [
@@ -2064,7 +2542,7 @@ function parseChatText(rawText) {
   let intent = "unknown";
   let confidence = 0;
   for (const [intKey, phrases] of INTENT_RULES) {
-    if (phrases.some((p) => t.includes(p))) {
+    if (phrases.some((p2) => t.includes(p2))) {
       intent = intKey;
       confidence = 0.85;
       break;
@@ -2130,7 +2608,11 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const cookieSid = parseCookies(req)["nego_session"];
+  const sid = cookieSid || bearerToken || headerToken;
   const uid = sid ? sessions.get(sid) : void 0;
   const user = uid ? usersList.find((u) => u.id === uid && u.active) || null : null;
   req.user = user;
@@ -2141,21 +2623,21 @@ app.use((req, res, next) => {
 var NEGOTIATOR_ADMIN_PATHS = /^\/admin\/(master|documents)(\/|\.|$)|^\/admin\/nego\/(cycles|benchmarks|notify|assist)(\/|\.|$)/;
 app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
-  const p = req.path;
-  if (p.startsWith("/auth/")) return next();
+  const p2 = req.path;
+  if (p2.startsWith("/auth/")) return next();
   const isRead = req.method === "GET" || req.method === "HEAD";
   if (!isRead && req.headers["x-requested-with"] !== "nego") {
     return res.status(403).json({ error: "Missing app header" });
   }
-  if (p.startsWith("/p/")) return next();
+  if (p2.startsWith("/p/")) return next();
   const user = req.user;
   if (!user) return res.status(401).json({ error: "Sign in required" });
   if (user.role === "admin") return next();
-  if (p.startsWith("/admin/") || p === "/admin") {
-    if (user.role === "negotiator" && NEGOTIATOR_ADMIN_PATHS.test(p)) return next();
+  if (p2.startsWith("/admin/") || p2 === "/admin") {
+    if (user.role === "negotiator" && NEGOTIATOR_ADMIN_PATHS.test(p2)) return next();
     return res.status(403).json({ error: "Administrator access required" });
   }
-  if (user.role === "viewer" && !isRead && p !== "/chat" && p !== "/ai/chat") {
+  if (user.role === "viewer" && !isRead && p2 !== "/chat" && p2 !== "/ai/chat") {
     return res.status(403).json({ error: "Viewers have read-only access" });
   }
   next();
@@ -2170,8 +2652,7 @@ app.get("/analytics", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "analytics.html"));
 });
 function setPrincipalCookie(req, res, token) {
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${14 * 24 * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_principal=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${14 * 24 * 3600}`);
 }
 function validLink(token) {
   if (!token) return null;
@@ -2181,7 +2662,13 @@ function validLink(token) {
   return link;
 }
 app.get("/p", (req, res) => {
-  const token = req.query.token || req.query.t;
+  let token = req.query.token || req.query.t;
+  const cid = Number(req.query.cycle_id || req.query.cid);
+  if (!token && cid) {
+    const links = cycleLinksMap.get(cid) || [];
+    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
+    if (active) token = active.token;
+  }
   if (token && validLink(token)) setPrincipalCookie(req, res, token);
   res.sendFile(path.join(STATIC_DIR, "principal.html"));
 });
@@ -2235,20 +2722,25 @@ app.post("/api/auth/signin", (req, res) => {
     logAudit(found.email, "signin.failed", { reason: "bad password" });
     return res.status(401).json({ error: "Wrong password" });
   }
-  const old = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const old = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (old) sessions.delete(old);
   const sid = crypto.randomBytes(24).toString("base64url");
   sessions.set(sid, found.id);
   found.last_login = nowIso();
-  const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`);
+  res.setHeader("Set-Cookie", `nego_session=${sid}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${SESSION_HOURS * 3600}`);
   logAudit(found.email, "signin");
-  res.json({ user: found });
+  res.json({ user: found, token: sid });
 });
 app.post("/api/auth/signout", (req, res) => {
-  const sid = parseCookies(req)["nego_session"];
+  const authHeader = req.headers["authorization"] || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const headerToken = req.headers["x-nego-token"] || "";
+  const sid = parseCookies(req)["nego_session"] || bearerToken || headerToken;
   if (sid) sessions.delete(sid);
-  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  res.setHeader("Set-Cookie", "nego_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0");
   res.json({ ok: true });
 });
 app.get("/api/auth/setup", (_req, res) => {
@@ -2331,6 +2823,126 @@ app.post("/api/chat", (req, res) => {
   const text2 = String(req.body?.text || "").slice(0, 500);
   res.json(parseChatText(text2));
 });
+var fmtDateId = (iso) => iso ? (/* @__PURE__ */ new Date(iso + "T00:00:00Z")).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }) : "-";
+function globalFacts() {
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const alertMonths = Number(settingsValues.mou_alert_months) || 6;
+  const expiring = principalsList.filter((p2) => p2.mou_end && daysBetween(today, p2.mou_end) >= 0 && daysBetween(today, p2.mou_end) / 30.44 <= alertMonths);
+  const periods = periodsList.map((per) => {
+    const d = periodDataFor(per.id);
+    return `  \u2022 ${per.name} (${per.category}, ${per.active ? "aktif" : "tidak aktif"}): PO ${d.po.length} baris, formularium ${d.formulary.length} baris, tagging ${d.tagging.length} baris, benchmark ${d.benchmarks.length} baris`;
+  }).join("\n");
+  return `DATA APP (sumber kebenaran satu-satunya):
+\u2022 Tanggal hari ini: ${today}
+\u2022 Jumlah principal terdaftar: ${principalsList.length}
+\u2022 MOU berakhir dalam ${alertMonths} bulan (${expiring.length}): ${expiring.map((p2) => `${p2.name} (${p2.mou_end})`).join(", ") || "tidak ada"}
+\u2022 Periode negosiasi:
+${periods}
+\u2022 Negosiasi berjalan: ${cyclesList.filter((c) => c.status === "open").map((c) => `${c.principal.name} [${c.category || "-"}] di step ${STEP_LABEL[c.current_step]}`).join("; ") || "tidak ada"}`;
+}
+function buildAiChatContext(role, cycleId) {
+  let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+  const global = globalFacts();
+  if (!cyc) return `${global}
+Tidak ada negosiasi yang sedang dibuka di layar. Untuk data per SKU, minta pengguna membuka salah satu negosiasi.`;
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const rawItems = cycleItemsMap.get(cyc.id) || [];
+  const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
+  const enriched = rawItems.map((i) => enrichCycleItem(i, ppn, cyc));
+  const summary = summarizeCycleItems(enriched);
+  const esc = computeEscalation(cyc.id);
+  const m = (v) => v == null ? "-" : rp(v);
+  const d = (v) => v == null ? "-" : fmtPct(v);
+  const stageText = summary.stages.map((st) => `  \u2022 ${st.label}: ${st.items} SKU, cost impact ${m(st.impact)}, margin impact vs Form ${m(st.margin_impact_vs_formulary)}, vs PO ${m(st.margin_impact_vs_po)}`).join("\n");
+  const rank = [...enriched].sort((a, b) => anoms.filter((x) => x.item_id === b.id).length - anoms.filter((x) => x.item_id === a.id).length || Math.abs(b.impact || 0) - Math.abs(a.impact || 0));
+  const itemsText = rank.slice(0, 40).map((it) => `- [${it.erp_code}] ${it.item_name} | status ${it.item_status} | PO rata-rata ${m(it.po_unit_price)}/pcs | MOU ${m(it.mou_unit_price)} | formularium Nett ${m(it.form_nett_price)} | RFQ ${m(it.rfq_unit_price)} (disc ${d(it.rfq_disc)}) | CO ${m(it.co_unit_price)} | FB1 ${m(it.fb1_unit_price)} | FIN ${m(it.on_unit_price)} (disc ${d(it.on_disc)}) | cost impact ${m(it.impact)} | pembanding ${it.bench_tag}`).join("\n");
+  const anomText = anoms.length ? anoms.slice(0, 40).map((a) => `\u2022 [${a.severity.toUpperCase()}] ${a.erp_code} ${a.item_name}: ${a.message}`).join("\n") : "Tidak ada temuan terbuka.";
+  return `${global}
+
+NEGOSIASI AKTIF: ${cyc.principal.name} (${cyc.category || "-"}, binding ${cyc.binding}, step ${STEP_LABEL[cyc.current_step]}, batas waktu ${cyc.step_due || "belum ada"}), periode kontrak ${cyc.contract_start} s/d ${cyc.contract_end}, biaya kirim ${cyc.delivery_fee}
+\u2022 SKU: ${summary.items} (aktif ${summary.active}, discontinue ${summary.discontinued}); RFQ diterima ${summary.rfq_filled}/${summary.active}
+\u2022 Nilai PO setahun (+PPN): ${m(summary.po_value_12m)}; cost impact terkini ${m(summary.latest_impact)}; margin impact vs Form ${m(summary.margin_vs_formulary)}, vs PO ${m(summary.margin_vs_po)}
+\u2022 Eskalasi: ${esc.status} (impact FIN ${m(esc.impact)}, batas ${fmtPct(esc.limit_pct)} atau ${m(esc.limit_rp)})
+\u2022 Per step:
+${stageText}
+\u2022 Temuan terbuka (${anoms.length}):
+${anomText}
+\u2022 SKU (${enriched.length} total, 40 teratas menurut temuan dan cost impact):
+${itemsText}`;
+}
+function answerAdminFromData(message, cycleId) {
+  const q = message.toLowerCase();
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  if (/\b(daftarkan|tambahkan|tambah|buatkan|buat principal|hapus|ubah|ganti|kirim(kan)?|pindahkan|setujui|approve)\b/.test(q) && /(principal|negosiasi|step|link|harga|disc|eskalasi|periode|user)/.test(q) && !/(draft|notulen|bak|ringkas|rangkum|analisa|analisis)/.test(q)) {
+    return "Saya tidak bisa menjalankan aksi di app, jadi tidak ada yang saya daftarkan atau ubah. Lakukan lewat menu yang sesuai (misalnya Admin > Principals > Add principal untuk mendaftarkan principal). Saya bisa membantu menjelaskan data yang ada di app.";
+  }
+  if (/mou/.test(q) && /(habis|berakhir|akhir|expire|jatuh tempo)/.test(q)) {
+    const mm = q.match(/(\d+)\s*bulan/);
+    const months = mm ? Number(mm[1]) : Number(settingsValues.mou_alert_months) || 6;
+    const rows = principalsList.filter((p2) => p2.mou_end && daysBetween(today, p2.mou_end) >= 0 && daysBetween(today, p2.mou_end) / 30.44 <= months).sort((a, b) => a.mou_end.localeCompare(b.mou_end));
+    if (!rows.length) return `Tidak ada principal yang MOU-nya berakhir dalam ${months} bulan ke depan (per ${fmtDateId(today)}).`;
+    return `Ada ${rows.length} principal dengan MOU berakhir dalam ${months} bulan ke depan (per ${fmtDateId(today)}):
+${rows.map((p2) => `- ${p2.name}: ${fmtDateId(p2.mou_end)} (${daysBetween(today, p2.mou_end)} hari lagi)`).join("\n")}`;
+  }
+  if (/(baris|rows|jumlah).*(po|formularium|formulary|tagging|benchmark)|(po|formularium|formulary).*(baris|rows|berapa)/.test(q)) {
+    const kind = /formularium|formulary/.test(q) ? "formulary" : /tagging/.test(q) ? "tagging" : /benchmark/.test(q) ? "benchmark" : "po";
+    const per = periodsList.find((p2) => q.includes(p2.name.toLowerCase())) || (cyc ? periodsList.find((p2) => p2.id === cyc.period_id) : null);
+    const label = { po: "PO", formulary: "formularium", tagging: "tagging SKU", benchmark: "benchmark" }[kind];
+    const count = (p2) => {
+      const d = periodDataFor(p2.id);
+      return { po: d.po.length, formulary: d.formulary.length, tagging: d.tagging.length, benchmark: d.benchmarks.length }[kind];
+    };
+    if (per) return `Data ${label} periode ${per.name}: ${count(per).toLocaleString("id-ID")} baris yang tersimpan di app.`;
+    return `Data ${label} per periode:
+${periodsList.map((p2) => `- ${p2.name}: ${count(p2).toLocaleString("id-ID")} baris`).join("\n")}`;
+  }
+  const code = message.match(/\b([A-Za-z]{2,4}\d{5,8})\b/);
+  if (code && /(harga|price|po|rfq|mou)/.test(q)) {
+    const c0 = normalizeCode(code[1]);
+    const pool = cyc ? [cyc] : cyclesList;
+    for (const c of pool) {
+      const it = (cycleItemsMap.get(c.id) || []).find((i) => i.erp_code === c0);
+      if (!it) continue;
+      const en = enrichCycleItem(it, ppn, c);
+      const m = (v) => v == null ? "belum ada" : rp(v);
+      return `${en.erp_code} ${en.item_name} (negosiasi ${c.principal.name}):
+- Harga PO rata-rata per pcs (+PPN): ${m(en.po_unit_price)}
+- Harga MOU per pcs: ${m(en.mou_unit_price)}
+- Nett Price formularium per pcs: ${m(en.form_nett_price)}
+- Harga RFQ per pcs: ${m(en.rfq_unit_price)}
+- Counter offer: ${m(en.co_unit_price)}, Feedback I: ${m(en.fb1_unit_price)}, FIN: ${m(en.on_unit_price)}`;
+    }
+    return `SKU ${c0} tidak ditemukan di negosiasi yang ada di app, jadi saya tidak punya harganya.`;
+  }
+  if (cyc) {
+    const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
+    const enriched = (cycleItemsMap.get(cyc.id) || []).map((i) => enrichCycleItem(i, ppn, cyc));
+    if (/(perlu perhatian|prioritas|paling penting|yang harus dicek|before.*counter|sebelum.*counter)/.test(q)) {
+      if (!anoms.length) return `Tidak ada temuan terbuka di negosiasi ${cyc.principal.name}. Semua SKU yang sudah mengisi RFQ sesuai pembanding.`;
+      const byItem = /* @__PURE__ */ new Map();
+      for (const a of anoms) byItem.set(a.item_id, [...byItem.get(a.item_id) || [], a]);
+      const rank = [...byItem.entries()].map(([id, list]) => ({ en: enriched.find((e) => e.id === id), list })).sort((a, b) => b.list.length - a.list.length || Math.abs(b.en.impact || 0) - Math.abs(a.en.impact || 0)).slice(0, 6);
+      return `SKU yang perlu dicek dulu di ${cyc.principal.name} (dari ${anoms.length} temuan terbuka):
+${rank.map((r) => `- ${r.en.erp_code} ${r.en.item_name}: ${r.list.map((a) => a.message).join(" ")}`).join("\n")}`;
+    }
+    if (/(notulen|bak|berita acara)/.test(q) && /(draft|buat|susun|poin)/.test(q)) {
+      const agreed = enriched.filter((e) => e.item_status !== "Discontinue" && e.on_unit_price != null);
+      if (!agreed.length) return "Belum ada harga sepakat (FIN) di negosiasi ini, jadi draft notulen dan BAK belum bisa dibuat. Isi Online Nego dulu.";
+      const esc = computeEscalation(cyc.id);
+      return `Draft poin notulen dan BAK ${cyc.principal.name} (${cyc.category || ""}, binding ${cyc.binding}):
+- Periode kontrak: ${fmtDateId(cyc.contract_start)} s/d ${fmtDateId(cyc.contract_end)}. Biaya kirim: ${cyc.delivery_fee}.
+- Rapat online: ${cyc.meeting?.at ? cyc.meeting.at.replace("T", " ") : "belum dicatat"}.
+- Kesepakatan ${agreed.length} SKU:
+${agreed.slice(0, 30).map((e) => `  \u2022 ${e.erp_code} ${e.item_name}: disc ${fmtPct(e.on_disc)}, harga ${rp(e.on_unit_price)}/pcs (+PPN)`).join("\n")}${agreed.length > 30 ? `
+  \u2022 ... dan ${agreed.length - 30} SKU lain` : ""}
+- Dampak biaya FIN vs PO setahun: ${esc.impact == null ? "-" : rp(esc.impact)} (status eskalasi: ${esc.status}).
+Butir lain (penalti, ketentuan pembayaran) tidak ada di data app, isi manual.`;
+    }
+  }
+  return null;
+}
 app.post("/api/ai/chat", async (req, res) => {
   const message = String(req.body?.message || "").trim();
   const role = req.user?.role === "admin" ? "admin" : "negotiator";
@@ -2339,82 +2951,67 @@ app.post("/api/ai/chat", async (req, res) => {
   if (!message) {
     return res.status(400).json({ error: "Message is required" });
   }
-  const normMsg = message.toLowerCase().trim();
-  if (normMsg.includes("margin") || normMsg.includes("hitung margin") || normMsg.includes("bisa hitung margin")) {
-    let cycleMarginDetail = "";
-    if (cycleId) {
-      const cyc = cyclesList.find((c) => c.id === cycleId);
-      if (cyc) {
-        const items = cycleItemsMap.get(cyc.id) || [];
-        const ppn = Number(settingsValues.ppn_rate) || 0.11;
-        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
-        const summary = summarizeCycleItems(enriched);
-        cycleMarginDetail = `
-
-\u{1F4CC} **Data Negosiasi Saat Ini (${cyc.principal.name})**:
-\u2022 Total Margin Impact vs Formularium: **${rp(summary.margin_impact_vs_formulary)}**
-\u2022 Total Margin Impact vs PO: **${rp(summary.margin_impact_vs_po)}**
-(Buka drawer item untuk melihat tabel Margin/pc di setiap step negosiasi).`;
-      }
-    }
-    return res.json({
-      reply: `Fitur **Calculated Margin per Item** sudah aktif di sistem! Berikut cara perhitungannya:
-
-1. **Base Price**: \`HNA/pc \xD7 1,11\` (HNA/pc + PPN 11%)
-2. **Margin/pc per Step**: \`Base Price - Harga/pc\` (tersedia per step: RFQ, Counter Offer, Feedback I, Online Nego)
-3. **Margin Impact**: \`\u03A3 (Qty Annualized \xD7 Margin/pc Step) - Margin Saat Ini\`, disajikan dalam 2 versi:
-   \u2022 **Versi vs Formularium**: Membandingkan margin step terhadap harga acuan Formularium/MOU
-   \u2022 **Versi vs PO**: Membandingkan margin step terhadap harga PO riil 12 bulan terakhir${cycleMarginDetail}`,
-      role
-    });
-  }
-  if (normMsg.includes("cost impact") || normMsg.includes("rumus cost") || normMsg.includes("rumus") && normMsg.includes("impact") && !normMsg.includes("margin")) {
-    return res.json({
-      reply: "Rumus **Cost Impact** penawaran:\n\n**Cost Impact = \u03A3 ((Harga Satuan Step \xD7 Qty Tahunan) - Total Nilai PO Tahunan)**\n\n\u2022 **Nilai Negatif (-)**: **Saving** (Penghematan belanja bagi RS).\n\u2022 **Nilai Positif (+)**: **Cost Increase** (Beban biaya naik yang perlu dinegosiasikan ulang).\n\n\u{1F4A1} *Tips*: Pastikan satuan kemasan (UOM/pack size) telah cocok dengan Master Formulary sebelum menyetujui harga satuan.",
-      role
-    });
-  }
-  if (normMsg === "halo" || normMsg === "hai" || normMsg === "hi" || normMsg === "hello") {
-    return res.json({
-      reply: "Halo! Saya asisten **AI Negotiation Intelligence**. Ada yang bisa saya bantu terkait analisa harga, verifikasi penawaran, aturan diskon, atau persiapan counter offer?",
-      role
-    });
-  }
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const ppnPct = (ppn * 100).toFixed(0);
+  const direct = answerAdminFromData(message, cycleId);
+  if (direct) return res.json({ reply: direct, role, grounded: true });
   let systemInstruction = "";
   if (role === "principal") {
-    systemInstruction = `You are the Vendor & Principal Assistant for healthcare procurement negotiations.
-Communicate professionally and politely in Indonesian.
-Assist vendors and principals with: RFQ submissions (Qty, HNA, Discount, Catalog Number, Brand), packaging conversions, UOM, and portal guidance.
-CRITICAL CONFIDENTIALITY: NEVER disclose hospital internal benchmarks, PO history, or target prices.
-Keep answers concise, direct, and under 3 sentences in Indonesian.`;
-  } else if (role === "admin") {
-    systemInstruction = `You are the Procurement Admin Intelligence Assistant for hospital procurement.
-Assist Procurement Administrators with: Period data management, PO exports, Master Formulary, Master SKU, and engine financial settings.
-Keep answers concise, direct, and under 3 sentences in Indonesian.`;
+    systemInstruction = `Anda adalah Asisten Resmi Vendor & Principal Portal Negosiasi RS Siloam.
+Tugas Anda adalah memandu principal/vendor mengisi data penawaran (RFQ), menanggapi counter offer, atau mengunggah dokumen legalitas.
+Jawab dengan ramah, sopan, ringkas, dan jelas dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya berbahasa Inggris).
+
+Petunjuk Teknis untuk Principal:
+1. Format Diskon: isi angka 0 sampai 100 (contoh 15 untuk 15%, 27,5 untuk 27,5%). Tanda % ditambahkan otomatis.
+2. HNA (Harga Netto Apotek): Diisi sebelum PPN per kemasan.
+3. Isi Kemasan (Pieces/Pack): Jumlah satuan terkecil per kemasan yang ditawarkan.
+4. Status Item: Pilih "Active" atau "Discontinue".
+5. Kenaikan Harga: Jika harga naik dibanding kontrak sebelumnya, wajib memilih alasan dan memberikan keterangan singkat.
+6. Counter Offer: Pada tahap Feedback I, principal dapat menekan "Terima" atau mengisi diskon alternatif beserta alasannya.
+7. Pengiriman (Send Response): Pengisian tersimpan otomatis. Tekan "Kirim Tanggapan" bila seluruh SKU sudah selesai diisi.
+
+KEBIJAKAN KERAHASIAAN KETAT:
+Anda TIDAK BOLEH membagikan data internal Rumah Sakit, harga beli rumah sakit lain, harga acuan internal, target harga maksimal rumah sakit, atau data vendor pesaing. Jika ditanya mengenai hal tersebut, tolak dengan sopan bahwa data tersebut bersifat rahasia internal Siloam.`;
   } else {
-    let cycleInfo = "";
-    if (cycleId) {
-      const cyc = cyclesList.find((c) => c.id === cycleId);
-      if (cyc) {
-        const items = cycleItemsMap.get(cyc.id) || [];
-        const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
-        const ppn = Number(settingsValues.ppn_rate) || 0.11;
-        const enriched = items.map((i) => enrichCycleItem(i, ppn, cyc));
-        const summary = summarizeCycleItems(enriched);
-        cycleInfo = `Current Cycle: ${cyc.principal.name} (${cyc.principal.category}), Step: ${cyc.current_step}, Active Items: ${summary.active}, Open Findings: ${anoms.length}, Total Spend: ${rp(summary.po_value_12m)}`;
-      }
-    }
-    systemInstruction = `You are the Negotiation Intelligence Strategist for hospital procurement negotiators.
-Help negotiators analyze price increases, counter-offers, binding contracts, and cost impact.
-Cost impact formula: SUM per item ((harga step x qty) - nilai PO). Negative is savings!
-Margin formula: (HNA x 1.11) - step price.
-Keep answers crisp, direct, and under 3-4 sentences in Indonesian. Use bold formatting (**bold**) for key numbers or terms.
-${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
+    systemInstruction = `Anda adalah AI Strategist Negosiasi Pengadaan Siloam (Negotiation Intelligence).
+Tugas Anda adalah membantu tim pengadaan / negosiator rumah sakit menganalisa harga penawaran principal, menghitung margin per item, mengevaluasi cost impact, mengidentifikasi temuan anomali, dan menyusun strategi counter offer secara tajam, akurat, dan berbasis data riil.
+
+RUMUS RESMI PENGADAAN SILOAM:
+1. PPN: ${ppnPct}% (faktor pengali 1,${ppnPct}).
+2. Base Price (Harga Acuan Dasar): HNA/pc \xD7 1,11 (HNA per pcs sebelum diskon + PPN).
+3. Harga Satuan (Harga/pc): (HNA / Pack_Size) \xD7 (1 - Diskon) \xD7 1,11.
+4. Margin/pc per Step: Base Price - Harga Satuan pada step tersebut.
+   Dihitung untuk setiap step: RFQ, Counter Offer, Feedback I, dan Online Nego.
+5. Margin Impact: \u03A3 [ Qty Tahunan \xD7 Margin/pc Step ] - Margin Saat Ini.
+   Disajikan dalam 2 versi:
+   \u2022 Versi vs Formularium: Membandingkan margin penawaran step terhadap margin Formularium/MOU.
+   \u2022 Versi vs PO: Membandingkan margin penawaran step terhadap margin harga PO riil 12 bulan terakhir.
+6. Cost Impact: \u03A3 [ (Harga Satuan Step \xD7 Qty Tahunan) - Total Belanja PO 12 Bulan ].
+   \u2022 Nilai Negatif (-) = SAVING (Penghematan belanja bagi RS).
+   \u2022 Nilai Positif (+) = COST INCREASE (Kenaikan beban biaya belanja RS yang harus dinegosiasikan ulang).
+7. Binding Kontrak:
+   \u2022 "nett_to_disc": Persentase diskon dikunci sebagai batas bawah. Kenaikan list price (HNA) tidak boleh mengikis margin atau menaikkan harga beli bersih RS.
+   \u2022 "nett_to_nett": Harga bersih per pcs dikunci mutlak.
+8. 7 Tahap Negosiasi: Prepare -> RFQ -> Counter Offer -> Feedback I -> Online Nego -> Submission -> Closed.
+
+${buildAiChatContext(role, cycleId)}
+
+ATURAN DATA (WAJIB):
+- Jawab HANYA dari "DATA APP" dan data negosiasi di atas. Jangan mengarang nama, jumlah, harga, atau tanggal.
+- Jika datanya tidak ada di atas, jawab "Data itu tidak ada di app" dan sebutkan menu tempat melihatnya. Jangan menebak.
+- Anda tidak bisa mengubah data atau menjalankan aksi (mendaftarkan principal, mengirim, menyetujui). Jangan pernah mengaku sudah melakukannya.
+- Penalti, ketentuan pembayaran, dan klausul lain yang tidak ada di data tidak boleh dikarang.
+
+PEDOMAN MENJAWAB:
+- Jawab secara akurat, lugas, profesional, dan solutif dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya menggunakan Bahasa Inggris).
+- Jika pengguna menanyakan angka atau data spesifik (misal margin, harga item, atau temuan), SEBUTKAN data angka riil dari konteks di atas secara langsung dan transparan.
+- Gunakan format Markdown yang menarik: gunakan **tebal** untuk angka dan poin penting, bullet points untuk rincian, dan tabel/blok kode bila menjelaskan rumus atau perbandingan.
+- Berikan analisis strategis: tunjukkan di mana letak inefisiensi, SKU mana yang memberikan peluang saving terbesar, dan taktik counter offer yang paling efektif.`;
   }
   try {
     const contents = [];
-    for (const h of history.slice(-4)) {
-      if (h.role && h.text) {
+    for (const h of history.slice(-6)) {
+      if (h?.role && h?.text) {
         contents.push({
           role: h.role === "assistant" || h.role === "model" ? "model" : "user",
           parts: [{ text: String(h.text) }]
@@ -2426,16 +3023,14 @@ ${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
       parts: [{ text: message }]
     });
     const callPromise = ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
+      model: "gemini-3.8-flash",
       contents,
       config: {
-        systemInstruction,
-        temperature: 0.3,
-        maxOutputTokens: 300
+        systemInstruction
       }
     });
     const timeoutPromise = new Promise(
-      (_, reject) => setTimeout(() => reject(new Error("AI response timeout")), 3500)
+      (_, reject) => setTimeout(() => reject(new Error("AI response timeout")), 25e3)
     );
     const response = await Promise.race([callPromise, timeoutPromise]);
     const reply = response.text || "Saya siap membantu proses negosiasi dan verifikasi penawaran harga.";
@@ -2444,9 +3039,24 @@ ${cycleInfo ? "\nActive Context: " + cycleInfo : ""}`;
     console.error("Gemini AI chat notice:", err?.message || err);
     let fallbackText = "";
     if (role === "principal") {
-      fallbackText = "Untuk penawaran RFQ, pastikan format diskon dimasukkan antara 0 dan 1 (contoh: 0.15 untuk 15%) dan cek kesesuaian kemasan (UOM) dengan katalog resmi.";
+      fallbackText = "Isi diskon sebagai angka 0 sampai 100 (contoh 15 untuk 15%) dan cek kesesuaian isi per kemasan (pcs per pack).";
     } else {
-      fallbackText = `Terkait pertanyaan Anda: Silakan tinjau rincian item aktif, perbandingan harga step terhadap nilai PO tahunan, dan selesaikan temuan (findings) pada tabel negosiasi di atas.`;
+      let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+      if (!cyc && cyclesList.length > 0) cyc = cyclesList.find((c) => c.status === "open") || cyclesList[0];
+      if (cyc) {
+        const rawItems = cycleItemsMap.get(cyc.id) || [];
+        const summary = summarizeCycleItems(rawItems.map((i) => enrichCycleItem(i, ppn, cyc)));
+        const imp = summary.latest_impact != null ? summary.latest_impact < 0 ? `Saving ${rp(Math.abs(summary.latest_impact))}` : `Kenaikan Biaya ${rp(summary.latest_impact)}` : "Belum dihitung";
+        fallbackText = `**Data Negosiasi ${cyc.principal.name} (${cyc.current_step.toUpperCase()})**:
+\u2022 Total Spend PO 12m: **${rp(summary.po_value_12m)}**
+\u2022 Status Cost Impact: **${imp}**
+\u2022 Margin vs Formularium: **${summary.margin_vs_formulary != null ? rp(summary.margin_vs_formulary) : "\u2014"}**
+\u2022 Margin vs PO: **${summary.margin_vs_po != null ? rp(summary.margin_vs_po) : "\u2014"}**
+
+*Rumus*: Margin/pc = (HNA/pc \xD7 1,11) - Harga Satuan. Cost Impact = \u03A3 (Harga Satuan \xD7 Qty) - Nilai PO.`;
+      } else {
+        fallbackText = "Sistem Negotiation Intelligence siap membantu menganalisa harga, margin, dan cost impact per item.";
+      }
     }
     res.json({ reply: fallbackText, role, fallback: true });
   }
@@ -2692,9 +3302,9 @@ app.get("/api/nego/principals", (_req, res) => {
   res.json(getPrincipalsPayload());
 });
 app.get("/api/nego/principals/:pid", (req, res) => {
-  const p = principalsList.find((x) => x.id === Number(req.params.pid));
-  if (!p) return res.status(404).json({ error: "No such principal" });
-  res.json(p);
+  const p2 = principalsList.find((x) => x.id === Number(req.params.pid));
+  if (!p2) return res.status(404).json({ error: "No such principal" });
+  res.json(p2);
 });
 app.get("/api/nego/mou-board", (req, res) => {
   const maxDays = req.query.max_days ? Number(req.query.max_days) : null;
@@ -2704,6 +3314,7 @@ app.get("/api/nego/mou-board", (req, res) => {
     identification: "with_principal",
     current_mou: "with_principal",
     rfq: "with_principal",
+    review_rfq: "negotiating",
     counter_offer: "negotiating",
     feedback1: "negotiating",
     online_nego: "negotiating",
@@ -2711,13 +3322,13 @@ app.get("/api/nego/mou-board", (req, res) => {
     closed: "renewed"
   };
   const calRenewals = computeCalendar(0, 3650).renewals;
-  const mous = d.principals.filter((p) => maxDays == null || p.mou_days_left != null && p.mou_days_left <= maxDays).map((p) => {
-    const stage = !p.cycle ? "not_started" : p.cycle.status === "open" ? stageMap[p.cycle.current_step] || "preparing" : "renewed";
+  const mous = d.principals.filter((p2) => maxDays == null || p2.mou_days_left != null && p2.mou_days_left <= maxDays).map((p2) => {
+    const stage = !p2.cycle ? "not_started" : p2.cycle.status === "open" ? stageMap[p2.cycle.current_step] || "preparing" : "renewed";
     const matchedRows = calRenewals.slice(0, 8);
     return {
-      ...p,
+      ...p2,
       stage,
-      new_mou_end: stage === "renewed" && p.cycle ? p.cycle.contract_end : null,
+      new_mou_end: stage === "renewed" && p2.cycle ? p2.cycle.contract_end : null,
       price_targets: {
         skus: new Set(matchedRows.map((r) => r.sku)).size,
         contract_value: matchedRows.reduce((s, r) => s + r.contract_value, 0),
@@ -2742,13 +3353,40 @@ app.get("/api/nego/mou-board", (req, res) => {
     kpis: {
       mous: mous.length,
       by_stage: byStage,
-      alerts: mous.filter((p) => p.mou_alert).length,
+      alerts: mous.filter((p2) => p2.mou_alert).length,
       overdue: 0,
-      lapsed: mous.filter((p) => p.mou_days_left != null && p.mou_days_left < 0 && p.stage !== "renewed").length,
-      saving_at_target: mous.filter((p) => p.stage !== "renewed").reduce((s, p) => s + p.price_targets.saving_at_target, 0)
+      lapsed: mous.filter((p2) => p2.mou_days_left != null && p2.mou_days_left < 0 && p2.stage !== "renewed").length,
+      saving_at_target: mous.filter((p2) => p2.stage !== "renewed").reduce((s, p2) => s + p2.price_targets.saving_at_target, 0)
     }
   });
 });
+function computeEscalation(cid) {
+  const c = cycleOf(cid);
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const active = (cycleItemsMap.get(cid) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c));
+  const agreed = active.filter((i) => i.on_unit_price != null);
+  const impacts = agreed.map((i) => i.impact_on).filter((v) => v != null);
+  const impact = impacts.length ? impacts.reduce((a, b) => a + b, 0) : null;
+  const poValue = active.reduce((sum2, i) => sum2 + (i.po_annualized_value_ppn || 0), 0);
+  const pctLimit = Number(settingsValues.escalation_pct) || 0;
+  const rpLimit = Number(settingsValues.escalation_rp) || 0;
+  const e = escalationFor(impact, poValue, pctLimit, rpLimit);
+  const approval = c?.escalation_approval || null;
+  return {
+    items_agreed: agreed.length,
+    active: active.length,
+    impact,
+    impact_pct: e.pct,
+    po_value: poValue,
+    limit_pct: pctLimit,
+    limit_rp: rpLimit,
+    needed: e.needed,
+    reasons: e.reasons,
+    approved: !!approval,
+    approval,
+    status: !agreed.length ? "none" : !e.needed ? "ok" : approval ? "approved" : "needed"
+  };
+}
 app.get("/api/nego/cycles/:cid", (req, res) => {
   const cid = Number(req.params.cid);
   const c = cyclesList.find((x) => x.id === cid);
@@ -2762,17 +3400,20 @@ app.get("/api/nego/cycles/:cid", (req, res) => {
     steps: STEPS,
     kpis: summarizeCycleItems(enriched),
     anomalies: counts,
-    events: cycleEventsMap.get(cid) || [],
+    events: (cycleEventsMap.get(cid) || []).slice(0, 300),
     period: (() => {
       const per = periodsList.find((x) => x.id === (c.period_id || 1));
-      return per ? { id: per.id, name: per.name, months_elapsed: per.months_elapsed, po_rows: per.po_rows_count, formulary: per.formulary_count, sku_master: per.sku_master_count, sku_tagging: per.sku_tagging_count } : null;
+      return per ? { id: per.id, name: per.name, category: per.category, months_elapsed: per.months_elapsed, po_rows: per.po_rows_count, formulary: per.formulary_count, sku_tagging: per.sku_tagging_count } : null;
     })(),
-    has_mou_file: mouStore.has(String(c.principal?.name || "").trim().toLowerCase()),
+    has_mou_file: mouStore.has(normName(c.principal?.name)),
     ppn,
     columns: COLUMNS,
     sections: SECTION_TITLES,
-    escalation: { items_agreed: 0, impact: null, increases: 0, needed: false, reasons: [], limit: 0 },
-    documents: 0,
+    escalation: computeEscalation(cid),
+    meeting: c.meeting || null,
+    final_scheme: c.final_scheme || null,
+    return_note: c.return_note || null,
+    documents: (cycleDocumentsMap.get(cid) || []).length,
     benchmark_review: 0
   });
 });
@@ -2795,18 +3436,12 @@ app.get("/api/nego/cycles/:cid/items", (req, res) => {
     if (!openByItem.has(a.item_id)) openByItem.set(a.item_id, []);
     openByItem.get(a.item_id).push({ id: a.id, rule: a.rule, label: a.label, severity: a.severity });
   }
-  const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
-  const bestBmByItem = /* @__PURE__ */ new Map();
-  for (const b of bms) {
-    const prev = bestBmByItem.get(b.item_id);
-    if (!prev || b.price_pp < prev.price_pp) bestBmByItem.set(b.item_id, b);
-  }
   let rows = rawItems.map((i) => {
-    const bm = bestBmByItem.get(i.id);
+    const bm = marketPrice(cycleOf(cid), i.erp_code);
     return {
       ...enrichCycleItem(i, ppn, cycleOf(cid)),
       bench_pp: bm ? bm.price_pp : null,
-      bench_source: bm ? `${bm.source}: ${bm.bm_name}` : null,
+      bench_source: bm ? `${bm.source}${bm.link ? `: ${bm.link}` : ""}` : null,
       flags: openByItem.get(i.id) || []
     };
   });
@@ -2826,7 +3461,7 @@ app.get("/api/nego/cycles/:cid/items", (req, res) => {
   if (filter === "anomalies") rows = rows.filter((r) => r.flags.length > 0);
   else if (filter === "increase") rows = rows.filter((r) => (r.change_pct || 0) > 5e-4);
   else if (filter === "decrease") rows = rows.filter((r) => (r.change_pct || 0) < -5e-4);
-  else if (filter === "no_mou") rows = rows.filter((r) => !r.mou_unit_price);
+  else if (filter === "no_mou") rows = rows.filter((r) => !r.in_mou);
   else if (filter === "no_rfq") rows = rows.filter((r) => r.rfq_hna == null && r.item_status !== "Discontinue");
   else if (filter === "has_rfq") rows = rows.filter((r) => r.rfq_hna != null);
   else if (filter === "discontinued") rows = rows.filter((r) => r.item_status === "Discontinue");
@@ -2898,7 +3533,11 @@ app.get("/api/nego/cycles/:cid/items/:iid", (req, res) => {
   const out = enrichCycleItem(it, ppn, cycleOf(cid));
   out.anomalies = (cycleAnomaliesMap.get(cid) || []).filter((a) => a.item_id === iid);
   out.history = it.history || [];
-  out.benchmarks = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.item_id === iid);
+  const mk = marketPrice(cycleOf(cid), it.erp_code);
+  out.benchmarks = mk ? [{ source: mk.source, price_pp: mk.price_pp, link: mk.link }] : [];
+  out.history = (it.history || []).slice(0, 100);
+  out.comments = it.comments || [];
+  out.version = it.version || 0;
   const masterRec = itemMasterMap.get(it.erp_code);
   out.generic_name = it.generic_name || masterRec?.generic_name || null;
   out.group_key = it.group_key || masterRec?.group_key || null;
@@ -2980,67 +3619,55 @@ app.get("/api/nego/cycles/:cid/groups", (req, res) => {
     spread_threshold: spreadThreshold
   });
 });
-app.get("/api/nego/cycles/:cid/benchmarks", (req, res) => {
-  const cid = Number(req.params.cid);
-  const status = String(req.query.status || "");
-  const all = cycleBenchmarksMap.get(cid) || [];
-  const matches = status ? all.filter((m) => m.status === status) : all;
-  res.json({ matches });
-});
-app.post("/api/admin/nego/cycles/:cid/benchmarks/match", (req, res) => {
-  const cid = Number(req.params.cid);
-  const all = cycleBenchmarksMap.get(cid) || [];
-  const confirmed = all.filter((m) => m.status === "confirmed").length;
-  const toReview = all.filter((m) => m.status === "suggested").length;
-  res.json({ items_matched: confirmed, to_review: toReview });
-});
-app.post("/api/admin/nego/cycles/:cid/benchmarks/:mid", (req, res) => {
-  const cid = Number(req.params.cid);
-  const mid = Number(req.params.mid);
-  const decision = String(req.body?.decision || "confirm");
-  const all = cycleBenchmarksMap.get(cid) || [];
-  const m = all.find((x) => x.id === mid);
-  if (!m) return res.status(404).json({ error: "No such benchmark match" });
-  m.status = decision === "confirm" ? "confirmed" : "rejected";
-  res.json({ match: m });
-});
 app.get("/api/nego/benchmarks", (_req, res) => {
-  res.json({ sources: [{ source: "INAPROC e-Katalog", count: 116, latest: "2026-08-15" }] });
+  res.json({ periods: periodsList.map((per) => {
+    const d = periodDataFor(per.id);
+    return { period: per.name, rows: d.benchmarks.length, file: d.files.benchmark || null };
+  }) });
 });
 function computeCoPlan(cid) {
   const c = cyclesList.find((x) => x.id === cid);
   const items = cycleItemsMap.get(cid) || [];
-  const bms = (cycleBenchmarksMap.get(cid) || []).filter((b) => b.status === "confirmed");
-  const bestBmByItem = /* @__PURE__ */ new Map();
-  for (const b of bms) {
-    const prev = bestBmByItem.get(b.item_id);
-    if (!prev || b.price_pp < prev.price_pp) bestBmByItem.set(b.item_id, b);
-  }
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const upLimit = Number(settingsValues.anomaly_up) || 0.5;
+  const downLimit = Number(settingsValues.anomaly_down) || 5e-3;
   let coImpactVsRfq = 0;
   const all = items.filter((i) => i.rfq_hna != null && i.rfq_qty && i.item_status !== "Discontinue").map((i) => {
     const en = enrichCycleItem(i, ppn, c);
-    const bm = bestBmByItem.get(i.id);
+    const mk = marketPrice(c, i.erp_code);
     const candidates = [
+      en.form_nett_price ? { price: en.form_nett_price, label: "Nett Price formularium" } : null,
       en.mou_unit_price ? { price: en.mou_unit_price, label: "MOU" } : null,
-      en.po_unit_price ? { price: en.po_unit_price, label: "last PO" } : null,
-      bm ? { price: bm.price_pp, label: bm.source } : null
+      en.po_unit_price ? { price: en.po_unit_price, label: "rata-rata PO" } : null,
+      mk ? { price: mk.price_pp, label: `Benchmark ${mk.source}` } : null
     ].filter(Boolean);
     candidates.sort((a, b) => a.price - b.price);
-    const best = candidates[0] || { price: en.rfq_unit_price || 0, label: "RFQ" };
-    const gross = i.rfq_hna / i.rfq_qty * (1 + ppn);
-    const co = best.price && gross ? Math.max(i.rfq_disc || 0, Math.min(0.95, 1 - best.price / gross)) : i.rfq_disc || 0;
-    const coDiscRounded = Number(co.toFixed(4));
-    const coUnitPrice = calcUnitPrice(i.rfq_hna, i.rfq_qty, coDiscRounded, ppn, c?.binding, i.formulary_hna, i.last_po_price);
-    const isDiff = Math.abs(coDiscRounded - (i.rfq_disc || 0)) > 1e-4;
-    if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coUnitPrice != null) {
-      coImpactVsRfq += (coUnitPrice - en.rfq_unit_price) * en.annual_pcs;
+    const best = candidates[0] || null;
+    const rfqDisc = i.rfq_disc || 0;
+    const gross = en.rfq_unit_price != null ? en.rfq_unit_price / (1 - rfqDisc) : null;
+    const co = best && gross ? Math.max(rfqDisc, Math.min(0.95, 1 - best.price / gross)) : rfqDisc;
+    const coDisc = Math.round(co * 1e4) / 1e4;
+    const coPrice = gross != null ? gross * (1 - coDisc) : null;
+    const isDiff = Math.abs(coDisc - rfqDisc) > 1e-4;
+    if (isDiff && en.annual_pcs && en.rfq_unit_price != null && coPrice != null) coImpactVsRfq += (coPrice - en.rfq_unit_price) * en.annual_pcs;
+    let remarks = "";
+    const acuan = en.primary_bench;
+    if (acuan && en.rfq_unit_price != null) {
+      const r = en.rfq_unit_price / acuan;
+      if (r - 1 > upLimit) remarks = `Unit Price RFQ ${r.toFixed(1).replace(".", ",")}x ${en.bench_tag}, cek HNA dan isi kemasan ke principal`;
+      else if (1 - r > downLimit && 1 - r > 0.2) remarks = `Unit Price RFQ turun ${((1 - r) * 100).toFixed(0)}% vs ${en.bench_tag}, cek HNA dan isi kemasan ke principal`;
     }
     return {
       item_id: i.id,
-      co_disc: coDiscRounded,
-      co_unit_price: coUnitPrice,
-      note: `Match ${best.label} reference (${rp(best.price || 0)}/pc).`,
+      erp_code: i.erp_code,
+      item_name: i.item_name,
+      rfq_disc: rfqDisc,
+      co_disc: coDisc,
+      co_unit_price: coPrice,
+      compare_price: best?.price ?? null,
+      compare_source: best?.label ?? null,
+      remarks,
+      note: best ? `Samakan dengan ${best.label} (${rp(best.price)}/pcs).` : "Tanpa pembanding.",
       before: i.co_disc,
       diff_from_rfq: isDiff
     };
@@ -3062,22 +3689,25 @@ app.get("/api/nego/cycles/:cid/co-plan", (req, res) => {
 });
 app.post("/api/admin/nego/cycles/:cid/co", (req, res) => {
   const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  if (lockedStepFor(c, "co_disc")) return res.status(423).json({ error: "Counter offer sudah terkunci karena negosiasi sudah melewati step ini. Gunakan koreksi di detail item." });
   const items = cycleItemsMap.get(cid) || [];
   const overwrite = !!req.body?.overwrite;
+  const ids = Array.isArray(req.body?.item_ids) ? new Set(req.body.item_ids.map(Number)) : null;
+  if (!ids) return res.status(400).json({ error: "Pilih SKU yang mau dipakai (item_ids)." });
   const plan = computeCoPlan(cid);
   const byItem = new Map(plan.all.map((x) => [x.item_id, x]));
   let applied = 0;
   for (const i of items) {
+    if (!ids.has(i.id)) continue;
     const sug = byItem.get(i.id);
-    if (!sug) continue;
-    if (!sug.diff_from_rfq) {
-      if (overwrite) i.co_disc = null;
-      continue;
-    }
+    if (!sug || !sug.diff_from_rfq) continue;
     if (!overwrite && i.co_disc != null) continue;
-    i.co_disc = sug.co_disc;
+    recordChange(i, { co_disc: sug.co_disc, co_note: sug.remarks || null }, { source: "counter offer plan" });
     applied++;
   }
+  logCycle(cid, "co.apply", { applied, selected: ids.size });
   res.json({ applied, scan: scanCycleAnomalies(cid) });
 });
 app.post("/api/admin/nego/cycles/:cid/on-fill", (req, res) => {
@@ -3085,29 +3715,32 @@ app.post("/api/admin/nego/cycles/:cid/on-fill", (req, res) => {
   const items = cycleItemsMap.get(cid) || [];
   let filled = 0;
   for (const i of items) {
+    if (i.item_status === "Discontinue") continue;
     const d = i.fb1_disc ?? i.co_disc ?? i.rfq_disc;
-    if (d != null) {
-      i.on_disc = d;
-      filled++;
-    }
+    if (d != null && recordChange(i, { on_disc: d }, { source: "isi dari FB1/CO" }).length) filled++;
   }
+  logCycle(cid, "on.fill", { filled });
   res.json({ filled, scan: scanCycleAnomalies(cid) });
 });
 app.get("/api/nego/cycles/:cid/package", (req, res) => {
+  res.json(computePackage(Number(req.params.cid)));
+});
+app.post("/api/admin/nego/cycles/:cid/bak-flags", (req, res) => {
   const cid = Number(req.params.cid);
   const items = cycleItemsMap.get(cid) || [];
-  const agreed = items.filter((i) => i.on_disc != null && i.item_status !== "Discontinue");
-  res.json({
-    agreed: agreed.length,
-    problems: agreed.length ? [] : ["Active items have no agreed (Online Nego) discount yet."],
-    ready: agreed.length > 0,
-    active: items.filter((i) => i.item_status !== "Discontinue").length,
-    discontinued: items.filter((i) => i.item_status === "Discontinue").length,
-    missing_on: items.filter((i) => i.on_disc == null).slice(0, 10).map((i) => i.erp_code)
-  });
+  const value = req.body?.value !== false;
+  const ids = Array.isArray(req.body?.item_ids) ? new Set(req.body.item_ids.map(Number)) : null;
+  let n = 0;
+  for (const i of items) {
+    if (i.item_status === "Discontinue") continue;
+    if (ids ? !ids.has(i.id) : req.body?.mode === "agreed" ? i.on_disc == null : true) continue;
+    if (recordChange(i, { proceed_bak: value }, { source: "tanda lanjut ke BAK" }).length) n++;
+  }
+  logCycle(cid, "bak.flags", { changed: n, value });
+  res.json({ changed: n, package: computePackage(cid) });
 });
 app.get("/api/admin/periods", (_req, res) => {
-  res.json({ periods: periodsList.map((p) => ({ ...p, files: periodDataFor(p.id).files })) });
+  res.json({ periods: periodsList.map((p2) => ({ ...p2, files: periodDataFor(p2.id).files })) });
 });
 app.post("/api/admin/periods", (req, res) => {
   const body = req.body || {};
@@ -3121,7 +3754,7 @@ app.post("/api/admin/periods", (req, res) => {
   if (months < 1 || months > 12) return res.status(400).json({ error: "Running months must be 1 to 12" });
   const name = `${category} ${year} ${half}`;
   if (periodsList.some((x) => x.name.toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: `${name} already exists` });
-  const p = {
+  const p2 = {
     id: Math.max(0, ...periodsList.map((x) => x.id)) + 1,
     name,
     category,
@@ -3135,21 +3768,19 @@ app.post("/api/admin/periods", (req, res) => {
     sku_master_count: 0,
     sku_tagging_count: 0
   };
-  periodsList.push(p);
+  periodsList.push(p2);
   logAudit(actingUser().email, "period.create", { name });
-  res.json(p);
+  res.json(p2);
 });
 app.post("/api/admin/periods/:id/activate", (req, res) => {
   const pid = Number(req.params.id);
-  if (!periodsList.some((p) => p.id === pid)) return res.status(404).json({ error: "Period not found" });
-  for (const per of periodsList) {
-    per.active = per.id === pid;
-  }
-  const activePeriod = periodsList.find((p) => p.id === pid);
-  res.json({ active_period: activePeriod, periods: periodsList });
+  const target = periodsList.find((p2) => p2.id === pid);
+  if (!target) return res.status(404).json({ error: "Period not found" });
+  for (const per of periodsList) if (per.category === target.category) per.active = per.id === pid;
+  res.json({ active_period: target, periods: periodsList });
 });
 app.patch("/api/admin/periods/:id", (req, res) => {
-  const per = periodsList.find((p) => p.id === Number(req.params.id));
+  const per = periodsList.find((p2) => p2.id === Number(req.params.id));
   if (!per) return res.status(404).json({ error: "Period not found" });
   const months = Math.round(Number(req.body?.months_elapsed));
   if (!(months >= 1 && months <= 12)) return res.status(400).json({ error: "Running months must be 1 to 12" });
@@ -3159,12 +3790,97 @@ app.patch("/api/admin/periods/:id", (req, res) => {
 });
 var PERIOD_KINDS = {
   po_export: { label: "PO export", need: [["Vendor Name", "Vendor", "Principal", "Supplier"], ["Item Number", "ERP Code", "Kode Barang", "Item Code"], ["Quantity", "Qty"]], names: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital" },
-  formulary: { label: "Formulary", need: [["Kode Barang", "ERP Code", "Item Number", "Item Code"], ["Nama Barang", "Item Name", "Item Description"]], names: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA (optional)" },
-  sku_master: { label: "Master SKU", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Item Name", "Nama Barang", "Item Description"]], names: "ERP Code, Item Name, Generic Name, Brand, Catalog No. (REF), UOM" },
-  sku_tagging: { label: "SKU - principal tagging", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Principal", "Vendor", "Vendor Name"]], names: "ERP Code, Principal" }
+  formulary: { label: "Formulary", need: [["Kode Barang", "ERP Code", "Item Number", "Item Code"], ["Nama Barang", "Item Name", "Item Description"]], names: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA, Konversi, Disc, Price, Base Price, HNA for SBP, Jenis (CnC Reguler, CnC BPJS, Drugs)" },
+  sku_tagging: { label: "SKU - principal tagging", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Principal", "Vendor", "Vendor Name"]], names: "ERP Code, Principal" },
+  benchmark: { label: "Market benchmark (competitor prices)", need: [["ERP Code", "Kode Barang", "Item Number", "Item Code"], ["Price/PCS", "Price per PCS", "Harga/PCS", "Harga"]], names: "ERP Code, Source, Price/PCS (incl. PPN), Link" }
 };
+function ingestPeriodRows(kind, rows, pd, per, file) {
+  const spec = PERIOD_KINDS[kind];
+  const rep = { kind, label: spec.label, file, at: nowIso(), by: actingUser().email, total: rows.length, ok: 0, errors: [], ignored: [], fixed: [] };
+  const seen = /* @__PURE__ */ new Set();
+  if (kind === "po_export") {
+    const out = [];
+    rows.forEach((r, i) => {
+      const line = i + 2;
+      const code0 = normalizeCode(pick(r, "Item Number", "ERP Code", "Kode Barang", "Item Code"));
+      const x = normalizePoRow(r, (field, from, to) => rep.fixed.push({ row: line, code: code0, field, from: String(from), to: String(to) }));
+      if (!x) {
+        rep.errors.push({ row: line, code: code0, message: "Kode barang kosong" });
+        return;
+      }
+      if (!x.vendor) {
+        rep.errors.push({ row: line, code: x.code, message: "Vendor kosong" });
+        return;
+      }
+      out.push(x);
+    });
+    pd.po = out;
+    rep.ok = out.length;
+  } else if (kind === "formulary") {
+    const out = [];
+    rows.forEach((r, i) => {
+      const line = i + 2;
+      const code0 = normalizeCode(pick(r, "Kode Barang", "ERP Code", "Item Number", "Item Code"));
+      const x = normalizeFormularyRow(r, (field, from, to) => rep.fixed.push({ row: line, code: code0, field, from: String(from), to: String(to) }));
+      if (!x) {
+        rep.errors.push({ row: line, code: code0, message: "Kode barang kosong" });
+        return;
+      }
+      if (seen.has(x.code)) {
+        rep.errors.push({ row: line, code: x.code, message: "Kode dobel di formularium. Baris ini diabaikan, baris pertama dipakai." });
+        return;
+      }
+      seen.add(x.code);
+      if (x.hna == null) rep.ignored.push({ row: line, code: x.code, message: "HNA kosong. Harga acuan pakai MOU atau rata-rata PO." });
+      out.push(x);
+    });
+    pd.formulary = out;
+    rep.ok = out.length;
+    if (!pd.files.sku_tagging || pd.files.sku_tagging.by === "formulary" || pd.files.sku_tagging.by === "sample data") {
+      pd.tagging = out.filter((f) => f.principal).map((f) => ({ code: f.code, principal: f.principal }));
+      pd.files.sku_tagging = { name: `${file} (kolom Principal)`, rows: pd.tagging.length, at: nowIso(), by: "formulary" };
+    }
+  } else if (kind === "sku_tagging") {
+    const out = [];
+    rows.forEach((r, i) => {
+      const line = i + 2;
+      const code = normalizeCode(pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code"));
+      const raw = pick(r, "Principal", "Vendor", "Vendor Name");
+      const principal = normalizePrincipalName(raw);
+      if (!code || !principal) {
+        rep.errors.push({ row: line, code, message: !code ? "Kode barang kosong" : "Principal kosong" });
+        return;
+      }
+      if (raw !== principal) rep.fixed.push({ row: line, code, field: "Principal", from: raw, to: principal });
+      const key = `${code}|${principal}`;
+      if (seen.has(key)) {
+        rep.ignored.push({ row: line, code, message: "Pasangan SKU dan principal dobel, diabaikan." });
+        return;
+      }
+      seen.add(key);
+      out.push({ code, principal });
+    });
+    pd.tagging = out;
+    rep.ok = out.length;
+  } else if (kind === "benchmark") {
+    const out = [];
+    rows.forEach((r, i) => {
+      const line = i + 2;
+      const code = normalizeCode(pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code"));
+      const price = parseMoney(pick(r, "Price/PCS", "Price per PCS", "Harga/PCS", "Harga"));
+      if (!code || price == null || price <= 0) {
+        rep.errors.push({ row: line, code, message: !code ? "Kode barang kosong" : "Harga per PCS kosong atau bukan angka" });
+        return;
+      }
+      out.push({ code, source: pick(r, "Source", "Sumber", "Competitor", "Kompetitor") || "Siloam benchmark file", price_pp: price, link: pick(r, "Link", "URL") });
+    });
+    pd.benchmarks = out;
+    rep.ok = out.length;
+  }
+  return rep;
+}
 app.post("/api/admin/periods/:id/upload", withFiles(fileUpload.single("file")), async (req, res) => {
-  const per = periodsList.find((p) => p.id === Number(req.params.id));
+  const per = periodsList.find((p2) => p2.id === Number(req.params.id));
   if (!per) return res.status(404).json({ error: "Period not found" });
   const kind = String(req.body?.kind || "");
   const spec = PERIOD_KINDS[kind];
@@ -3183,50 +3899,23 @@ app.post("/api/admin/periods/:id/upload", withFiles(fileUpload.single("file")), 
     return res.status(400).json({ error: `${spec.label}: missing column ${missing.join(", ")}. Expected columns: ${spec.names}. Found: ${Object.keys(rows[0]).join(", ")}` });
   }
   const pd = periodDataFor(per.id);
-  let skipped = 0;
-  if (kind === "po_export") {
-    pd.po = rows.map(normalizePoRow).filter((x) => !!x);
-    skipped = rows.length - pd.po.length;
-  } else if (kind === "formulary") {
-    pd.formulary = rows.map(normalizeFormularyRow).filter((x) => !!x);
-    skipped = rows.length - pd.formulary.length;
-  } else if (kind === "sku_master") {
-    pd.skus = [];
-    for (const r of rows) {
-      const code = pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
-      if (!code) {
-        skipped++;
-        continue;
-      }
-      pd.skus.push({ code, name: pick(r, "Item Name", "Nama Barang", "Item Description"), generic: pick(r, "Generic Name", "Generic"), brand: pick(r, "Brand", "Merk"), catalog_no: pick(r, "Catalog No. (REF)", "Catalog No", "REF"), uom: pick(r, "UOM", "Satuan", "Purch Unit") });
-    }
-    for (const x of pd.skus) {
-      if (!itemMasterMap.has(x.code)) {
-        itemMasterMap.set(x.code, { erp_code: x.code, item_name: x.name, generic_name: x.generic || null, group_key: x.generic || null, brand: x.brand, catalog_no: x.catalog_no, uom: x.uom, tags: per.category, status: x.generic ? "reviewed" : "new", source: "sku master", first_seen: nowIso(), updated_at: nowIso(), updated_by: actingUser().email });
-      }
-    }
-  } else if (kind === "sku_tagging") {
-    pd.tagging = [];
-    for (const r of rows) {
-      const code = pick(r, "ERP Code", "Kode Barang", "Item Number", "Item Code").toUpperCase();
-      const principal = pick(r, "Principal", "Vendor", "Vendor Name");
-      if (!code || !principal) {
-        skipped++;
-        continue;
-      }
-      pd.tagging.push({ code, principal });
-    }
-  }
-  pd.files[kind] = { name: file.originalname, rows: rows.length - skipped, at: nowIso(), by: actingUser().email };
+  const report = ingestPeriodRows(kind, rows, pd, per, file.originalname);
+  pd.reports[kind] = report;
+  pd.files[kind] = { name: file.originalname, rows: report.ok, at: nowIso(), by: actingUser().email };
   syncPeriodCounts(per);
-  logAudit(actingUser().email, "period.upload", { period: per.name, kind, file: file.originalname, rows: rows.length - skipped, skipped });
-  res.json({ period: per, kind, rows: rows.length - skipped, skipped });
+  logAudit(actingUser().email, "period.upload", { period: per.name, kind, file: file.originalname, rows: report.ok, errors: report.errors.length, fixed: report.fixed.length });
+  res.json({ period: per, kind, rows: report.ok, skipped: report.errors.length, report });
 });
-var PRINCIPAL_COLUMNS = ["Principal", "Distributor", "Category", "Negotiation Type", "Binding", "Items (ERP codes)", "Current MOU Start", "Current MOU End", "PIC", "Email", "WhatsApp", "Notes"];
+app.get("/api/admin/periods/:id/report/:kind", (req, res) => {
+  const rep = periodDataFor(Number(req.params.id)).reports[String(req.params.kind)];
+  if (!rep) return res.status(404).json({ error: "No upload report yet" });
+  res.json(rep);
+});
+var PRINCIPAL_COLUMNS = ["Principal", "Distributor", "Category", "Negotiation Type", "Binding", "Current MOU Start", "Current MOU End", "PIC", "Email", "WhatsApp", "Notes"];
 var PRINCIPAL_TEMPLATE_ROWS = [
-  ["PT Medika Nusantara", "PT Distributor Sejahtera", "CnC", "Renewal", "Nett to Disc", "MED000100; MED000101", "2024-02-01", "2027-01-31", "Budi Santoso", "budi@medika.com", "08123456789", "Annual renewal"],
-  ["PT Bio Diagnostik", "", "CnC", "New Vendor", "Nett", "", "", "", "Dewi Sartika", "dewi@biodiag.com", "08129876543", "New vendor: no current MOU"],
-  ["PT Farmasi Sejahtera", "PT Anugerah Pharma", "Drugs & CnC", "Addendum", "Disc", "", "2023-06-01", "2026-05-31", "Andi Pratama", "andi@farmasi.com", "08134567890", "Both categories"]
+  ["PT Medika Nusantara", "PT Distributor Sejahtera", "CnC", "Renewal", "Nett to Disc", "2024-02-01", "2027-01-31", "Budi Santoso", "budi@medika.com", "08123456789", "Annual renewal"],
+  ["PT Bio Diagnostik", "", "CnC", "New Vendor", "Nett", "", "", "Dewi Sartika", "dewi@biodiag.com", "08129876543", "New vendor: no current MOU"],
+  ["PT Farmasi Sejahtera", "PT Anugerah Pharma", "Drugs & CnC", "Addendum", "Disc", "2023-06-01", "2026-05-31", "Andi Pratama", "andi@farmasi.com", "08134567890", "Both categories"]
 ];
 app.get("/api/admin/nego/principals-template.csv", (_req, res) => {
   const q = (v) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
@@ -3236,7 +3925,7 @@ app.get("/api/admin/nego/principals-template.csv", (_req, res) => {
   res.send("\uFEFF" + csv);
 });
 app.get("/api/admin/nego/principals-template.xlsx", async (_req, res) => {
-  const wb = new ExcelJS3.Workbook();
+  const wb = new ExcelJS4.Workbook();
   const ws = wb.addWorksheet("Principals");
   ws.addRow(PRINCIPAL_COLUMNS);
   PRINCIPAL_TEMPLATE_ROWS.forEach((r) => ws.addRow(r));
@@ -3283,42 +3972,43 @@ app.post("/api/admin/nego/principals/import", withFiles(fileUpload.single("file"
   if (missing.length) return res.status(400).json({ error: `Missing column ${missing.join(", ")}. Use the template: ${PRINCIPAL_COLUMNS.join(", ")}` });
   let added = 0, updated = 0;
   const errors = [];
+  const detail = [];
+  const fixed = [];
+  const seenNames = /* @__PURE__ */ new Set();
   rows.forEach((r, i) => {
     const line = i + 2;
-    const name = pick(r, "Principal", "Principal Name", "Name");
-    if (!name) {
-      errors.push(`Row ${line}: principal name is empty`);
-      return;
-    }
-    const nt = normalizeNegoType(pick(r, "Negotiation Type", "NegoType", "Nego Type", "Jenis Negosiasi"));
-    const clean = cleanPrincipalFields({
-      name,
+    const rawName = pick(r, "Principal", "Principal Name", "Name");
+    const label = rawName || "(no name)";
+    const b = {
+      name: rawName,
       distributor: pick(r, "Distributor"),
       category: pick(r, "Category", "Kategori"),
       nego_type: pick(r, "Negotiation Type", "NegoType", "Nego Type", "Jenis Negosiasi"),
       binding: pick(r, "Binding"),
-      item_codes: pick(r, "Items (ERP codes)", "Items", "ERP Codes"),
       mou_start: pick(r, "Current MOU Start", "MOU Start"),
       mou_end: pick(r, "Current MOU End", "MOU End"),
       contact_name: pick(r, "PIC", "Contact"),
       contact_email: pick(r, "Email"),
       contact_phone: pick(r, "WhatsApp", "Phone"),
       notes: pick(r, "Notes", "Keterangan")
-    });
-    if (clean.error) {
-      errors.push(`Row ${line} (${name}): ${clean.error}`);
+    };
+    const chk = checkPrincipalFields(b);
+    const reasons = [...chk.errors];
+    const f = chk.fields;
+    if (f.name && seenNames.has(normName(f.name))) reasons.push(`${f.name} appears twice in the file`);
+    if (f.name) seenNames.add(normName(f.name));
+    if (f.nego_type && f.nego_type !== "New Vendor" && !f.mou_end && !reasons.some((x) => x.includes("MOU end"))) reasons.push("Current MOU End is required unless the type is New Vendor");
+    if (reasons.length) {
+      detail.push({ row: line, name: label, reasons });
+      errors.push(`Row ${line} (${label}): ${reasons.join("; ")}`);
       return;
     }
-    const f = clean.fields;
-    if (nt !== "New Vendor" && !f.mou_end) {
-      errors.push(`Row ${line} (${name}): Current MOU End is required unless the type is New Vendor`);
-      return;
-    }
-    if (nt === "New Vendor") {
+    if (f.nego_type === "New Vendor") {
       f.mou_start = null;
       f.mou_end = null;
     }
-    const existing = principalsList.find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (rawName.trim() !== f.name) fixed.push({ row: line, from: rawName.trim(), to: f.name });
+    const existing = principalsList.find((x) => normName(x.name) === normName(f.name));
     if (existing) {
       Object.assign(existing, f);
       updated++;
@@ -3328,7 +4018,7 @@ app.post("/api/admin/nego/principals/import", withFiles(fileUpload.single("file"
     added++;
   });
   logAudit(actingUser().email, "principals.import", { file: file.originalname, added, updated, errors: errors.length });
-  res.json({ added, updated, errors, total: principalsList.length });
+  res.json({ added, updated, errors, detail, fixed, total: principalsList.length, rows: rows.length });
 });
 function principalMouRules(f) {
   if (f.nego_type === "New Vendor") {
@@ -3347,22 +4037,22 @@ app.post("/api/admin/nego/principals", (req, res) => {
   const err = principalMouRules(f);
   if (err) return res.status(400).json({ error: err });
   if (principalsList.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) return res.status(409).json({ error: `${f.name} already exists` });
-  const p = { id: Math.max(0, ...principalsList.map((x) => x.id)) + 1, ...f, created_at: nowIso(), created_by: actingUser().email };
-  principalsList.push(p);
-  logAudit(actingUser().email, "principal.create", { name: p.name });
-  res.json(p);
+  const p2 = { id: Math.max(0, ...principalsList.map((x) => x.id)) + 1, ...f, created_at: nowIso(), created_by: actingUser().email };
+  principalsList.push(p2);
+  logAudit(actingUser().email, "principal.create", { name: p2.name });
+  res.json(p2);
 });
 app.patch("/api/admin/nego/principals/:pid", (req, res) => {
-  const p = principalsList.find((x) => x.id === Number(req.params.pid));
-  if (!p) return res.status(404).json({ error: "No such principal" });
+  const p2 = principalsList.find((x) => x.id === Number(req.params.pid));
+  if (!p2) return res.status(404).json({ error: "No such principal" });
   const clean = cleanPrincipalFields(req.body || {}, true);
   if (clean.error) return res.status(400).json({ error: clean.error });
-  const f = { nego_type: p.nego_type, mou_start: p.mou_start, mou_end: p.mou_end, ...clean.fields };
+  const f = { nego_type: p2.nego_type, mou_start: p2.mou_start, mou_end: p2.mou_end, ...clean.fields };
   const err = principalMouRules(f);
   if (err) return res.status(400).json({ error: err });
-  Object.assign(p, clean.fields, { mou_start: f.mou_start, mou_end: f.mou_end });
-  logAudit(actingUser().email, "principal.update", { name: p.name });
-  res.json(p);
+  Object.assign(p2, clean.fields, { mou_start: f.mou_start, mou_end: f.mou_end });
+  logAudit(actingUser().email, "principal.update", { name: p2.name });
+  res.json(p2);
 });
 app.post("/api/admin/nego/sample", (_req, res) => {
   seedNegoSample();
@@ -3371,29 +4061,59 @@ app.post("/api/admin/nego/sample", (_req, res) => {
     opened: cyclesList.map((c) => ({ principal: c.principal.name, cycle_id: c.id }))
   });
 });
+function newCycleItem(cid, idx, it) {
+  return {
+    id: idx + 1,
+    cycle_id: cid,
+    sort: idx + 1,
+    ...it,
+    rfq_qty: null,
+    rfq_hna: null,
+    rfq_disc: null,
+    co_disc: null,
+    fb1_disc: null,
+    on_disc: null,
+    on_disc_nett: null,
+    on_disc_disc: null,
+    price_reason: null,
+    co_note: null,
+    proceed_bak: null,
+    needs_check: false,
+    check_note: null,
+    comments: [],
+    corrections: [],
+    history: [],
+    version: 0
+  };
+}
 app.post("/api/admin/nego/cycles", (req, res) => {
   const pid = Number(req.body?.principal_id);
-  const p = principalsList.find((x) => x.id === pid);
-  if (!p) return res.status(404).json({ error: "No such principal" });
+  const p2 = principalsList.find((x) => x.id === pid);
+  if (!p2) return res.status(404).json({ error: "No such principal" });
   const cs = toIsoDate(req.body?.contract_start);
   const ce = toIsoDate(req.body?.contract_end);
   if (!cs || !ce) return res.status(400).json({ error: "Enter the new contract start and end dates" });
   if (cs >= ce) return res.status(400).json({ error: "The new contract must end after it starts" });
-  const binding = normalizeBinding(req.body?.binding || p.binding);
+  const binding = normalizeBinding(req.body?.binding || p2.binding);
   if (!binding) return res.status(400).json({ error: `Binding must be one of: ${BINDINGS.join(", ")}` });
-  if (cyclesList.some((x) => x.principal_id === p.id && x.status === "open")) return res.status(409).json({ error: `${p.name} already has an open negotiation` });
-  const activePeriod = periodsList.find((per) => per.active) || periodsList[0];
+  const category = String(req.body?.category || cycleCategoryOf(p2));
+  if (!categoriesOf(p2).includes(category)) return res.status(400).json({ error: `${p2.name} does not sell ${category}` });
+  if (cyclesList.some((x) => x.principal_id === p2.id && x.status === "open" && (x.category || categoriesOf(p2)[0]) === category)) {
+    return res.status(409).json({ error: `${p2.name} already has an open ${category} negotiation` });
+  }
+  const per = activePeriodFor(category);
   const c = {
-    id: cyclesList.length + 1,
-    principal_id: p.id,
-    principal: { ...p },
-    nego_type: req.body?.nego_type || p.nego_type || "Renewal",
+    id: Math.max(0, ...cyclesList.map((x) => x.id)) + 1,
+    principal_id: p2.id,
+    principal: { ...p2 },
+    category,
+    nego_type: req.body?.nego_type || p2.nego_type || "Renewal",
     contract_start: cs,
     contract_end: ce,
     binding,
     delivery_fee: req.body?.delivery_fee || "Free for all hospital units",
-    period_id: activePeriod?.id || 1,
-    months_elapsed: activePeriod?.months_elapsed || 12,
+    period_id: per?.id || 1,
+    months_elapsed: per?.months_elapsed || 12,
     status: "open",
     current_step: "prepare",
     step_due: null,
@@ -3406,23 +4126,156 @@ app.post("/api/admin/nego/cycles", (req, res) => {
   cycleItemsMap.set(c.id, []);
   cycleAnomaliesMap.set(c.id, []);
   cycleEventsMap.set(c.id, []);
+  logCycle(c.id, "cycle.create", { principal: p2.name, category, period: per?.name, binding });
   res.json(getCycleSummaryCard(c));
 });
+function incompleteRfq(cid) {
+  return (cycleItemsMap.get(cid) || []).filter((i) => i.item_status !== "Discontinue" && (i.rfq_hna == null || !(i.rfq_qty > 0))).map((i) => ({ erp_code: i.erp_code, item_name: i.item_name, missing: [i.rfq_qty > 0 ? "" : "Qty", i.rfq_hna != null ? "" : "HNA"].filter(Boolean) }));
+}
+function computePackage(cid) {
+  const c = cycleOf(cid);
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const items = cycleItemsMap.get(cid) || [];
+  const active = items.filter((i) => i.item_status !== "Discontinue");
+  const flagged = active.filter((i) => i.proceed_bak === true);
+  const incomplete = flagged.map((i) => {
+    const en = enrichCycleItem(i, ppn, c);
+    const missing = [i.rfq_qty > 0 ? "" : "Qty", i.rfq_hna != null ? "" : "HNA", en.on_unit_price != null ? "" : "harga FIN"].filter(Boolean);
+    return missing.length ? { erp_code: i.erp_code, item_name: i.item_name, missing } : null;
+  }).filter(Boolean);
+  const esc = computeEscalation(cid);
+  const problems = [];
+  if (!flagged.length) problems.push("Belum ada SKU yang ditandai lanjut ke BAK.");
+  if (incomplete.length) problems.push(`${incomplete.length} SKU yang ditandai belum lengkap (Qty, HNA, harga FIN).`);
+  if (esc.status === "needed") problems.push("Hasil nego perlu persetujuan eskalasi sebelum Submission.");
+  return {
+    agreed: flagged.length - incomplete.length,
+    flagged: flagged.length,
+    incomplete,
+    not_flagged: active.length - flagged.length,
+    problems,
+    ready: flagged.length > 0 && incomplete.length === 0 && esc.status !== "needed",
+    active: active.length,
+    discontinued: items.length - active.length,
+    missing_on: incomplete.slice(0, 10).map((x) => x.erp_code),
+    escalation: esc
+  };
+}
 app.post("/api/admin/nego/cycles/:cid/step", (req, res) => {
   const cid = Number(req.params.cid);
   const c = cyclesList.find((x) => x.id === cid);
   if (!c) return res.status(404).json({ error: "No such negotiation" });
   const items = cycleItemsMap.get(cid) || [];
   const nextStep = String(req.body?.step || "");
-  if (c.current_step === "prepare" && nextStep !== "prepare" && items.length === 0) {
-    return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  if (req.body?.due) {
+    const due = toIsoDate(String(req.body.due));
+    if (!due) return res.status(400).json({ error: "Batas waktu tidak valid" });
+    if (due < today) return res.status(400).json({ error: "Batas waktu tidak boleh tanggal yang sudah lewat." });
   }
-  if (req.body?.step) {
-    if (c.submitted_steps && c.submitted_steps[nextStep]) delete c.submitted_steps[nextStep];
+  if (nextStep) {
+    if (!STEP_ORDER.includes(nextStep)) return res.status(400).json({ error: "Step tidak dikenal" });
+    const from = c.current_step;
+    const advancing = stepIdx(nextStep) > stepIdx(from);
+    if (from === "prepare" && nextStep !== "prepare" && items.length === 0) {
+      return res.status(400).json({ error: "Daftar item masih kosong (0 item). Mohon tambahkan item terlebih dahulu sebelum lanjut ke tahap RFQ." });
+    }
+    if (advancing && stepIdx(from) >= stepIdx("rfq") && stepIdx(nextStep) > stepIdx("rfq") && stepIdx(from) <= stepIdx("review_rfq")) {
+      const missing = incompleteRfq(cid);
+      if (missing.length && !req.body?.confirm_incomplete) {
+        return res.status(409).json({ error: `${missing.length} SKU aktif belum punya RFQ lengkap.`, needs_confirm: true, incomplete: missing.slice(0, 100), incomplete_count: missing.length });
+      }
+    }
+    if (advancing && nextStep === "submission") {
+      const pkg = computePackage(cid);
+      if (!pkg.ready) return res.status(400).json({ error: `Submission package belum siap: ${pkg.problems.join(" ")}`, problems: pkg.problems, incomplete: pkg.incomplete.slice(0, 50) });
+    }
+    if (!advancing && nextStep !== from) {
+      const message = String(req.body?.message || "").trim().slice(0, 1e3);
+      const ids = new Set((Array.isArray(req.body?.item_ids) ? req.body.item_ids : []).map(Number));
+      if (req.body?.flag_findings) {
+        for (const a of cycleAnomaliesMap.get(cid) || []) if (a.status === "open" && a.severity === "high") ids.add(a.item_id);
+      }
+      const owner = STEPS.find((x) => x.key === nextStep);
+      if (owner?.who === "principal" && !message && !ids.size) {
+        return res.status(400).json({ error: "Tulis pesan untuk principal (alasan dikembalikan), atau tandai SKU yang perlu diperbaiki." });
+      }
+      let flagged = 0;
+      for (const i of items) {
+        if (ids.has(i.id)) {
+          i.needs_check = true;
+          i.check_note = message || "Mohon periksa kembali SKU ini.";
+          flagged++;
+        }
+      }
+      c.return_note = { at: nowIso(), by: actingUser().email, from, to: nextStep, message, flagged };
+    }
+    for (const k of Object.keys(c.submitted_steps || {})) if (stepIdx(k) >= stepIdx(nextStep)) delete c.submitted_steps[k];
     c.current_step = nextStep;
-    if (c.current_step === "closed") c.status = "closed";
+    if (nextStep === "closed") {
+      c.status = "closed";
+      c.completed_at = nowIso();
+    } else {
+      c.status = "open";
+      c.completed_at = null;
+    }
+    if (advancing) c.return_note = null;
+    logCycle(cid, "cycle.step", { from, to: nextStep, message: c.return_note?.message || null, flagged: c.return_note?.flagged || 0 });
+  }
+  if (req.body?.due) {
+    c.step_due = String(req.body.due);
+    logCycle(cid, "cycle.due", { due: c.step_due });
   }
   res.json(getCycleSummaryCard(c));
+});
+app.patch("/api/admin/nego/cycles/:cid", (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const b = req.body || {};
+  if (b.meeting_at !== void 0 || b.meeting !== void 0 || b.meeting_notes !== void 0) {
+    const m = { ...c.meeting || {} };
+    if (b.meeting_at !== void 0) m.at = b.meeting_at ? String(b.meeting_at).slice(0, 16) : null;
+    const mm = b.meeting || {};
+    if (mm.attendees_siloam !== void 0) m.attendees_siloam = String(mm.attendees_siloam || "").slice(0, 500);
+    if (mm.attendees_principal !== void 0) m.attendees_principal = String(mm.attendees_principal || "").slice(0, 500);
+    if (mm.notes !== void 0 || b.meeting_notes !== void 0) m.notes = String(mm.notes ?? b.meeting_notes ?? "").slice(0, 5e3);
+    if (Array.isArray(mm.followups)) m.followups = mm.followups.slice(0, 30).map((f) => ({ text: String(f.text || "").slice(0, 300), due: f.due ? String(f.due).slice(0, 10) : null, owner: String(f.owner || "").slice(0, 100) })).filter((f) => f.text);
+    m.saved_at = nowIso();
+    m.saved_by = actingUser().email;
+    c.meeting = m;
+    c.meeting_at = m.at || null;
+    c.meeting_notes = m.notes || null;
+    logCycle(cid, "meeting.save", { at: m.at, followups: (m.followups || []).length });
+  }
+  if (b.final_scheme !== void 0) {
+    if (b.final_scheme && !["Nett", "Disc"].includes(b.final_scheme)) return res.status(400).json({ error: "Skema final: Nett atau Disc" });
+    if (lockedStepFor(c, "on_disc")) return res.status(423).json({ error: "Online Nego sudah terkunci." });
+    c.final_scheme = b.final_scheme || null;
+    let applied = 0;
+    if (c.final_scheme) for (const i of cycleItemsMap.get(cid) || []) {
+      const v = c.final_scheme === "Nett" ? i.on_disc_nett : i.on_disc_disc;
+      if (v != null && recordChange(i, { on_disc: v }, { source: `skema final ${c.final_scheme}` }).length) applied++;
+    }
+    logCycle(cid, "scheme.final", { scheme: c.final_scheme, applied });
+  }
+  res.json({ cycle: getCycleSummaryCard(c), meeting: c.meeting || null, final_scheme: c.final_scheme || null, escalation: computeEscalation(cid) });
+});
+app.post("/api/admin/nego/cycles/:cid/escalation", (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  if (actingUser().role !== "admin") return res.status(403).json({ error: "Hanya admin yang bisa menyetujui eskalasi." });
+  if (req.body?.revoke) {
+    c.escalation_approval = null;
+    logCycle(cid, "escalation.revoke");
+    return res.json(computeEscalation(cid));
+  }
+  const note = String(req.body?.note || "").trim().slice(0, 500);
+  if (!note) return res.status(400).json({ error: "Tulis catatan persetujuan atasan." });
+  c.escalation_approval = { by: actingUser().email, at: nowIso(), note };
+  logCycle(cid, "escalation.approve", { note });
+  res.json(computeEscalation(cid));
 });
 app.post("/api/admin/nego/cycles/:cid/prepare", withFiles(fileUpload.any()), async (req, res) => {
   const cid = Number(req.params.cid);
@@ -3431,10 +4284,10 @@ app.post("/api/admin/nego/cycles/:cid/prepare", withFiles(fileUpload.any()), asy
   if (c.status !== "open") return res.status(400).json({ error: "This negotiation is closed" });
   const pd = periodDataFor(c.period_id || 1);
   const per = periodsList.find((x) => x.id === (c.period_id || 1));
-  const p = principalsList.find((x) => x.id === c.principal_id) || c.principal;
+  const p2 = principalsList.find((x) => x.id === c.principal_id) || c.principal;
   const files = req.files || [];
   const mouFile = files.find((f) => f.fieldname === "mou");
-  const key = String(p.name).trim().toLowerCase();
+  const key = normName(p2.name);
   let columns_used;
   if (mouFile) {
     let rows;
@@ -3454,27 +4307,14 @@ app.post("/api/admin/nego/cycles/:cid/prepare", withFiles(fileUpload.any()), asy
   if (!pd.po.length && !pd.formulary.length && !mouRows.length) {
     return res.status(400).json({ error: `No data for ${per?.name || "this period"} yet. An admin uploads the PO export and formulary once in Admin \u2192 Negotiation Periods.` });
   }
-  const built = buildItemsForPrincipal(p, pd, mouRows);
+  const built = buildItemsForPrincipal(p2, pd, mouRows, per);
   if (!built.items.length) {
-    return res.status(400).json({ error: `No items found for ${p.name}. Check that the PO export (Vendor Name) and formulary (Principal) use the same principal name, or tag items to the principal.` });
+    return res.status(400).json({ error: `No items found for ${p2.name}. Check that the PO export (Vendor Name) and formulary (Principal) use the same principal name, or tag items to the principal.` });
   }
-  const items = built.items.map((it, idx) => ({
-    id: idx + 1,
-    cycle_id: cid,
-    sort: idx + 1,
-    ...it,
-    rfq_qty: null,
-    rfq_hna: null,
-    rfq_disc: null,
-    co_disc: null,
-    fb1_disc: null,
-    on_disc: null,
-    price_reason: null,
-    co_note: null
-  }));
+  const items = built.items.map((it, idx) => newCycleItem(cid, idx, it));
   items.forEach((it, idx) => {
     if (!itemMasterMap.has(it.erp_code)) {
-      itemMasterMap.set(it.erp_code, { erp_code: it.erp_code, item_name: it.item_name, generic_name: null, group_key: null, brand: it.brand, catalog_no: it.catalog_no, uom: it.po_unit_text, tags: p.category, status: "new", source: "negotiation", first_seen: nowIso(), updated_at: nowIso(), updated_by: actingUser().email });
+      itemMasterMap.set(it.erp_code, { erp_code: it.erp_code, item_name: it.item_name, generic_name: null, group_key: null, brand: it.brand, catalog_no: it.catalog_no, uom: it.po_unit_text, tags: p2.category, status: "new", source: "negotiation", first_seen: nowIso(), updated_at: nowIso(), updated_by: actingUser().email });
     }
   });
   cycleItemsMap.set(cid, items);
@@ -3483,9 +4323,7 @@ app.post("/api/admin/nego/cycles/:cid/prepare", withFiles(fileUpload.any()), asy
   const scan = scanCycleAnomalies(cid);
   const summary = { ...built.summary, columns_used, scan: { found: scan.open } };
   c.prepare_summary = summary;
-  const evs = cycleEventsMap.get(cid) || [];
-  evs.unshift({ id: evs.length + 1, cycle_id: cid, at: nowIso(), user_email: actingUser().email, action: "cycle.prepare", detail: { items: items.length, period: per?.name } });
-  cycleEventsMap.set(cid, evs);
+  logCycle(cid, "cycle.prepare", { items: items.length, period: per?.name, mou_errors: built.summary.mou_errors.length });
   res.json(summary);
 });
 app.post("/api/admin/nego/cycles/:cid/scan", (req, res) => {
@@ -3493,51 +4331,66 @@ app.post("/api/admin/nego/cycles/:cid/scan", (req, res) => {
   const counts = scanCycleAnomalies(cid);
   res.json({ ...counts, counts });
 });
-var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note"];
-var ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "mou_disc"];
+var ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note", "notes", "bucket", "active_ingredient"];
+var ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "on_disc_nett", "on_disc_disc", "mou_disc"];
 var ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
+var ITEM_BOOL_FIELDS = ["proceed_bak", "sbp", "need_sbp"];
 function cleanItemChanges(input) {
   const out = {};
   for (const [k, v] of Object.entries(input || {})) {
     if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
+    else if (ITEM_BOOL_FIELDS.includes(k)) out[k] = v === null || v === "" ? null : v === true || v === "true" || v === "yes";
     else if (k === "item_status") {
       if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
       out[k] = v;
     } else if (ITEM_DISC_FIELDS.includes(k)) {
-      if (v == null || v === "") {
-        out[k] = null;
-        continue;
-      }
-      const raw = String(v).trim();
-      const n = toNumber(raw);
-      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid discount` };
-      const frac = raw.includes("%") ? n / 100 : n;
-      if (frac >= 1) return { changes: {}, error: `${k}: a discount must be between 0 and 1 (e.g. 0.15) or written as a percentage (15%)` };
-      out[k] = frac;
+      const d = parseDiscount(v);
+      if (d.error) return { changes: {}, error: `${FIELD_LABEL[k] || k}: ${d.error}` };
+      out[k] = d.value;
     } else if (ITEM_NUM_FIELDS.includes(k)) {
       if (v == null || v === "") {
         out[k] = null;
         continue;
       }
-      const n = toNumber(String(v));
-      if (n == null || n < 0) return { changes: {}, error: `${k}: not a valid number` };
+      const n = parseMoney(v);
+      if (n == null || n < 0) return { changes: {}, error: `${FIELD_LABEL[k] || k}: not a valid number` };
       out[k] = k.endsWith("qty") ? Math.round(n) : n;
     } else return { changes: {}, error: `${k} can't be edited` };
   }
   return { changes: out };
 }
+function syncFinalScheme(c, it) {
+  if (!c?.final_scheme) return;
+  const v = c.final_scheme === "Nett" ? it.on_disc_nett : it.on_disc_disc;
+  if (v != null) recordChange(it, { on_disc: v }, { source: `skema final ${c.final_scheme}` });
+}
 app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req, res) => {
   const cid = Number(req.params.cid);
   const iid = Number(req.params.iid);
+  const c = cycleOf(cid);
   const items = cycleItemsMap.get(cid) || [];
   const it = items.find((x) => x.id === iid);
-  if (!it) return res.status(404).json({ error: "No such item" });
+  if (!it || !c) return res.status(404).json({ error: "No such item" });
   const clean = cleanItemChanges(req.body?.changes || {});
   if (clean.error) return res.status(400).json({ error: clean.error });
-  Object.assign(it, clean.changes);
-  const scan = scanCycleAnomalies(cid);
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  res.json({ item: enrichCycleItem(it, ppn, cycleOf(cid)), changed: Object.keys(clean.changes), scan });
+  const baseVersion = req.body?.base_version;
+  if (baseVersion != null && Number(baseVersion) !== (it.version || 0)) {
+    return res.status(409).json({ error: `Data SKU ini sudah diubah oleh ${it.updated_by || "user lain"} (${it.updated_at ? new Date(it.updated_at).toLocaleString("en-GB") : ""}). Muat ulang untuk melihat nilai terbaru.`, conflict: true, item: enrichCycleItem(it, ppn, c), updated_by: it.updated_by, updated_at: it.updated_at });
+  }
+  const lockedHits = Object.keys(clean.changes).filter((f) => lockedStepFor(c, f) && !sameVal(it[f] ?? null, clean.changes[f]));
+  const reason = String(req.body?.correction_reason || "").trim();
+  if (lockedHits.length && !reason) {
+    return res.status(423).json({ error: `Data step ${lockedHits.map((f) => `${FIELD_LABEL[f] || f} (${STEP_LABEL[lockedStepFor(c, f)]})`).join(", ")} sudah terkunci. Koreksi hanya atas pengajuan principal, tulis alasannya.`, locked: lockedHits, needs_reason: true });
+  }
+  const changed = recordChange(it, clean.changes, { source: lockedHits.length ? "koreksi Siloam" : "detail item", reason: lockedHits.length ? reason : null });
+  if (lockedHits.length && changed.some((f) => lockedHits.includes(f))) {
+    (it.corrections ||= []).unshift({ at: nowIso(), by: actingUser().email, fields: changed.filter((f) => lockedHits.includes(f)).map((f) => FIELD_LABEL[f] || f), reason });
+    logCycle(cid, "item.correction", { erp_code: it.erp_code, fields: changed, reason });
+  } else if (changed.length) logCycle(cid, "item.edit", { erp_code: it.erp_code, fields: changed });
+  if (changed.includes("on_disc_nett") || changed.includes("on_disc_disc")) syncFinalScheme(c, it);
+  const scan = scanCycleAnomalies(cid);
+  res.json({ item: enrichCycleItem(it, ppn, c), changed, scan, version: it.version || 0 });
 });
 app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req, res) => {
   const cid = Number(req.params.cid);
@@ -3546,19 +4399,30 @@ app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req, res) => {
   const a = list.find((x) => x.id === aid);
   if (!a) return res.status(404).json({ error: "No such finding" });
   const decision = String(req.body?.decision || "keep");
+  const items = cycleItemsMap.get(cid) || [];
+  const it = items.find((x) => x.id === a.item_id);
+  const c = cycleOf(cid);
   if (decision === "fix") {
-    a.status = "fixed";
-    if (a.field && a.suggestion != null) {
-      const items = cycleItemsMap.get(cid) || [];
-      const it = items.find((x) => x.id === a.item_id);
-      if (it) it[a.field] = a.suggestion;
+    if (a.field && a.suggestion != null && it) {
+      if (lockedStepFor(c, a.field)) return res.status(423).json({ error: "Data step ini sudah terkunci. Koreksi lewat detail item dengan alasan." });
+      recordChange(it, { [a.field]: a.suggestion }, { source: "finding" });
     }
+    a.status = "fixed";
   } else if (decision === "keep") {
     a.status = "kept";
     a.reason = req.body?.reason || "";
+  } else if (decision === "return" && it) {
+    it.needs_check = true;
+    it.check_note = String(req.body?.reason || a.message || "Mohon periksa kembali SKU ini.").slice(0, 500);
+    a.status = "kept";
+    a.reason = `Dikembalikan ke principal: ${it.check_note}`;
   } else if (decision === "reopen") {
     a.status = "open";
   }
+  a.decided_by = actingUser().email;
+  a.decided_at = nowIso();
+  if (a.rule === "principal_comment" && it && decision !== "reopen") for (const m of it.comments || []) m.resolved = true;
+  logCycle(cid, "finding.decide", { erp_code: a.erp_code, rule: a.rule, decision });
   res.json({ anomaly: a, counts: scanCycleAnomalies(cid) });
 });
 app.get("/api/admin/nego/cycles/:cid/links", (req, res) => {
@@ -3656,16 +4520,77 @@ app.post("/api/admin/nego/cycles/:cid/links/:lid/revoke", (req, res) => {
 app.get("/api/admin/nego/cycles/:cid/messages", (_req, res) => {
   res.json({ messages: [], automation: { configured: false, channel: "webhook" } });
 });
-app.get("/api/admin/nego/cycles/:cid/documents", (req, res) => {
-  const cid = Number(req.params.cid);
-  const docs = cycleDocumentsMap.get(cid) || [];
-  res.json({ documents: docs, required: ["nib", "npwp", "pakta_integritas"] });
-});
 app.get("/api/admin/nego/notify", (_req, res) => {
-  res.json({ configured: false, channel: "webhook" });
+  const emailUrl = process.env.POWER_AUTOMATE_EMAIL_URL || "";
+  const waUrl = process.env.POWER_AUTOMATE_WA_URL || "";
+  const missing = [];
+  if (!emailUrl) missing.push("POWER_AUTOMATE_EMAIL_URL");
+  if (!waUrl) missing.push("POWER_AUTOMATE_WA_URL");
+  const enabled = Boolean(emailUrl || waUrl);
+  res.json({
+    enabled,
+    configured: enabled,
+    channel: "webhook",
+    missing
+  });
 });
 app.get("/api/admin/nego/assist", (_req, res) => {
-  res.json({ enabled: Boolean(settingsValues.llm_assist), available: false });
+  res.json({ enabled: true, available: true, setting: true, api_key: true });
+});
+app.post("/api/admin/nego/cycles/:cid/assist", (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const kind = String(req.body?.kind || "");
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const en = (cycleItemsMap.get(cid) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c));
+  const esc = computeEscalation(cid);
+  const line = (e, price, disc) => `- ${e.erp_code} ${e.item_name}: disc ${fmtPct(disc)}, harga ${price == null ? "-" : rp(price)}/pcs (+PPN)`;
+  let text2 = "";
+  const facts = {};
+  if (kind === "co_cover") {
+    const withCo = en.filter((e) => e.co_disc != null);
+    facts.sku_co = withCo.length;
+    text2 = `Yth. ${c.principal.contact_name || "Bapak/Ibu"} dari ${c.principal.name},
+
+Terima kasih atas penawaran RFQ yang telah dikirim. Berdasarkan evaluasi Siloam Hospitals, kami mengajukan counter offer untuk ${withCo.length} SKU dengan rincian berikut:
+${withCo.slice(0, 40).map((e) => line(e, e.co_unit_price, e.co_disc)).join("\n")}${withCo.length > 40 ? `
+... dan ${withCo.length - 40} SKU lain (lihat portal)` : ""}
+
+Mohon tanggapan Anda di portal sebelum ${c.step_due ? fmtDateId(c.step_due) : "batas waktu yang ditentukan"}.
+
+Salam,
+Tim Pengadaan Siloam Hospitals`;
+  } else if (kind === "meeting_summary") {
+    const agreed = en.filter((e) => e.on_unit_price != null);
+    facts.sku_sepakat = agreed.length;
+    const m = c.meeting || {};
+    text2 = `NOTULEN ONLINE NEGO - ${c.principal.name}
+Tanggal: ${m.at ? m.at.replace("T", " ") : "(belum dicatat)"}
+Peserta Siloam: ${m.attendees_siloam || "-"}
+Peserta principal: ${m.attendees_principal || "-"}
+
+Kesepakatan per SKU (${agreed.length}):
+${agreed.slice(0, 60).map((e) => line(e, e.on_unit_price, e.on_disc)).join("\n") || "(belum ada)"}
+
+Dampak biaya setahun vs PO (+PPN): ${esc.impact == null ? "-" : rp(esc.impact)} (status eskalasi: ${esc.status}).
+
+Catatan: ${m.notes || "-"}
+
+Tindak lanjut:
+${(m.followups || []).map((f) => `- ${f.text}${f.owner ? ` (${f.owner})` : ""}${f.due ? `, tenggat ${fmtDateId(f.due)}` : ""}`).join("\n") || "-"}`;
+  } else if (kind === "bak_points") {
+    const r = answerAdminFromData("draft notulen dan poin bak", cid);
+    text2 = r || "Belum ada harga sepakat.";
+    facts.sku = en.filter((e) => e.on_unit_price != null).length;
+  } else if (kind === "escalation_note") {
+    facts.status = esc.status;
+    text2 = `CATATAN ESKALASI - ${c.principal.name}
+Cost impact FIN: ${esc.impact == null ? "-" : rp(esc.impact)} (${esc.impact_pct == null ? "-" : fmtPct(esc.impact_pct)} dari nilai PO setahun ${rp(esc.po_value)}).
+Batas: ${fmtPct(esc.limit_pct)} atau ${rp(esc.limit_rp)}. Status: ${esc.status === "needed" ? "melewati batas, perlu persetujuan atasan" : esc.status === "approved" ? "disetujui" : "dalam batas"}.
+${(esc.reasons || []).includes("pct") ? "- Melewati batas persentase.\n" : ""}${(esc.reasons || []).includes("rp") ? "- Melewati batas nominal.\n" : ""}`;
+  } else return res.status(400).json({ error: "Jenis draft tidak dikenal" });
+  res.json({ text: text2, model: "data nego (tanpa model)", facts });
 });
 app.get("/api/admin/uploads", (_req, res) => {
   res.json({
@@ -3760,6 +4685,60 @@ app.post("/api/admin/users/:uid/setup-link", (req, res) => {
 app.get("/api/admin/activity", (_req, res) => {
   res.json({ events: auditEvents });
 });
+app.get("/api/admin/master/bucket", (_req, res) => {
+  res.json({ count: bucketList.length, consump: bucketList.filter((b) => b.bucket === "Consump").length, charge: bucketList.filter((b) => b.bucket === "Charge").length, rows: bucketList.slice(0, 200) });
+});
+app.post("/api/admin/master/bucket", withFiles(fileUpload.single("file")), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: "Choose a file first" });
+  let rows;
+  try {
+    rows = await readTable(file);
+  } catch (e) {
+    return res.status(400).json({ error: `Could not read the file: ${e.message}` });
+  }
+  if (!rows.length || !hasColumn(rows, "ERP Code", "Kode Barang", "Item Number") || !hasColumn(rows, "Bucket")) {
+    return res.status(400).json({ error: "The file needs the columns ERP Code and Bucket (Consump or Charge). SBP is optional." });
+  }
+  const rep = { kind: "bucket", label: "DB Bucket", file: file.originalname, at: nowIso(), by: actingUser().email, total: rows.length, ok: 0, errors: [], ignored: [], fixed: [] };
+  const next = [];
+  const seen = /* @__PURE__ */ new Set();
+  rows.forEach((r, i) => {
+    const line = i + 2;
+    const code = normalizeCode(pick(r, "ERP Code", "Kode Barang", "Item Number"));
+    const raw = pick(r, "Bucket");
+    const b = /^cons/i.test(raw) ? "Consump" : /^char/i.test(raw) ? "Charge" : "";
+    if (!code) {
+      rep.errors.push({ row: line, code, message: "Kode barang kosong" });
+      return;
+    }
+    if (!b) {
+      rep.errors.push({ row: line, code, message: `Bucket "${raw}" tidak dikenal (Consump atau Charge)` });
+      return;
+    }
+    if (seen.has(code)) {
+      rep.errors.push({ row: line, code, message: "Kode dobel, baris ini diabaikan" });
+      return;
+    }
+    seen.add(code);
+    if (raw !== b) rep.fixed.push({ row: line, code, field: "Bucket", from: raw, to: b });
+    const sbpRaw = pick(r, "SBP");
+    next.push({ code, bucket: b, sbp: sbpRaw ? /^(y|ya|yes|1|true)/i.test(sbpRaw) ? 1 : 0 : null });
+  });
+  rep.ok = next.length;
+  bucketList.length = 0;
+  bucketList.push(...next);
+  const map = new Map(next.map((x) => [x.code, x]));
+  for (const items of cycleItemsMap.values()) for (const it of items) {
+    const b = map.get(it.erp_code);
+    if (b) {
+      it.bucket = b.bucket;
+      if (b.sbp != null) it.sbp = !!b.sbp;
+    }
+  }
+  logAudit(actingUser().email, "master.bucket", { file: file.originalname, rows: rep.ok, errors: rep.errors.length });
+  res.json({ report: rep, count: bucketList.length });
+});
 function getMasterCounts() {
   const all = [...itemMasterMap.values()];
   const newCount = all.filter((i) => i.status === "new").length;
@@ -3776,8 +4755,8 @@ app.get("/api/admin/master/overview", (_req, res) => {
       { key: "items", label: "Items", count: c.all, note: `${c.labelled} with a generic name, ${c.groups} groups`, updated: nowIso(), attention: c.new, attention_label: "new, not reviewed" },
       { key: "principals", label: "Principals", count: principalsList.length, updated: nowIso() },
       { key: "negotiations", label: "Negotiations", count: cyclesList.length, note: `${cyclesList.filter((x) => x.status === "open").length} open`, updated: null },
-      { key: "benchmarks", label: "Benchmark prices", count: 116, note: "1 sources", updated: "2026-08-15" },
-      { key: "price_data", label: "Price data versions", count: 1, note: "Bundled synthetic sample", updated: latestDate }
+      { key: "bucket", label: "DB Bucket (Consump / Charge)", count: bucketList.length, note: `${bucketList.filter((b) => b.bucket === "Consump").length} Consump, ${bucketList.filter((b) => b.bucket === "Charge").length} Charge`, updated: null },
+      { key: "benchmarks", label: "Benchmark prices (per period)", count: [...periodDataMap.values()].reduce((sum2, d) => sum2 + d.benchmarks.length, 0), note: "Uploaded per period in Admin > Negotiation Periods", updated: null }
     ]
   });
 });
@@ -3823,18 +4802,24 @@ app.post("/api/admin/master/items/bulk", (req, res) => {
 });
 function resolvePrincipalCycle(req) {
   const cookies = parseCookies(req);
-  const token = req.query.token || req.headers["x-principal-token"] || cookies["nego_principal"];
+  let token = req.query.token || req.query.t || req.headers["x-principal-token"] || cookies["nego_principal"];
+  const cid = Number(req.query.cid || req.query.cycle_id);
+  if (!token && cid) {
+    const links = cycleLinksMap.get(cid) || [];
+    const active = links.find((l) => !l.revoked_at && (!l.expires_at || new Date(l.expires_at).getTime() > Date.now()));
+    if (active) token = active.token;
+  }
   let foundCycle = null;
   let foundLink = null;
   const link = validLink(token);
   if (link) {
     foundLink = link;
     foundCycle = cyclesList.find((x) => x.id === link.cycle_id);
-  } else {
-    const user = req.user;
-    const cid = Number(req.query.cid || req.query.cycle_id);
-    if (user && (user.role === "admin" || user.role === "negotiator") && cid) {
-      foundCycle = cyclesList.find((x) => x.id === cid);
+  } else if (cid) {
+    foundCycle = cyclesList.find((x) => x.id === cid);
+    if (foundCycle) {
+      const activeLinks = cycleLinksMap.get(cid) || [];
+      foundLink = activeLinks.find((l) => !l.revoked_at) || null;
     }
   }
   if (!foundCycle) return null;
@@ -3851,19 +4836,33 @@ function resolvePrincipalCycle(req) {
   }
   return { cycle: foundCycle, link: foundLink, step };
 }
-function checkItemIssues(it, step) {
+function dbHnaPerPc(it) {
+  const formConv = it.form_conv || matchUoMQty(it.po_unit_text);
+  if (it.formulary_hna && formConv) return it.formulary_hna / formConv;
+  if (it.mou_hna && it.mou_qty) return it.mou_hna / it.mou_qty;
+  return null;
+}
+function checkItemIssues(it, step, cycle) {
   const issues = [];
   const active = it.item_status !== "Discontinue";
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const th = { increase_tolerance: 5e-3, high_disc: 0.6, hna_jump: 0.5 };
+  const drugs = (cycle?.category || "") === "Drugs";
+  const th = { increase_tolerance: 5e-3, high_disc: Number(settingsValues.check_high_disc) || 0.6, hna_move: Number(settingsValues.hna_confirm) || 0.5 };
+  let increase = false, belowCo = false;
+  if (it.needs_check && ["rfq", "feedback1"].includes(step)) {
+    issues.push({ level: "confirm", code: "siloam_flag", field: null, id: `Siloam meminta Anda memeriksa SKU ini${it.check_note ? `: ${it.check_note}` : "."}`, en: `Siloam asks you to check this SKU${it.check_note ? `: ${it.check_note}` : "."}` });
+  }
   if (step === "rfq") {
     if (!it.item_status) {
-      issues.push({ level: "missing", code: "status_missing", field: "item_status", id: "Pilih status: Aktif atau Tidak dijual lagi.", en: "Choose status: Active or Discontinued." });
+      issues.push({ level: "missing", code: "status_missing", field: "item_status", id: "Pilih status: Aktif atau Discontinue.", en: "Choose status: Active or Discontinue." });
     }
     if (active && !it.brand) {
       issues.push({ level: "missing", code: "brand_missing", field: "brand", id: "Isi brand / pabrikan.", en: "Fill in brand / manufacturer." });
     }
-    if (active && !it.catalog_no) {
+    if (active && drugs && !it.active_ingredient) {
+      issues.push({ level: "missing", code: "ai_missing", field: "active_ingredient", id: "Isi zat aktif (Active Ingredient).", en: "Fill in the active ingredient." });
+    }
+    if (active && !drugs && !it.catalog_no) {
       issues.push({ level: "missing", code: "ref_missing", field: "catalog_no", id: "Isi nomor katalog (REF).", en: "Fill in catalogue number (REF)." });
     }
     if (active) {
@@ -3873,34 +4872,28 @@ function checkItemIssues(it, step) {
       if (hna == null && qty == null && disc == null) {
         issues.push({ level: "missing", code: "rfq_missing", field: "rfq_hna", id: "Harga belum diisi.", en: "No price yet." });
       } else {
-        if (hna == null) {
-          issues.push({ level: "missing", code: "hna_missing", field: "rfq_hna", id: "Isi harga HNA.", en: "Fill in HNA." });
-        } else if (hna <= 0) {
-          issues.push({ level: "error", code: "hna_zero", field: "rfq_hna", id: "HNA harus lebih dari 0.", en: "HNA must be > 0." });
-        }
-        if (qty == null) {
-          issues.push({ level: "missing", code: "qty_missing", field: "rfq_qty", id: "Isi jumlah pcs per kemasan.", en: "Fill in pieces per pack." });
-        } else if (qty < 1) {
-          issues.push({ level: "error", code: "qty_whole", field: "rfq_qty", id: "Isi per kemasan harus minimal 1.", en: "Pieces per pack must be at least 1." });
-        }
+        if (hna == null) issues.push({ level: "missing", code: "hna_missing", field: "rfq_hna", id: "Isi harga HNA.", en: "Fill in HNA." });
+        else if (hna <= 0) issues.push({ level: "error", code: "hna_zero", field: "rfq_hna", id: "HNA harus lebih dari 0.", en: "HNA must be > 0." });
+        if (qty == null) issues.push({ level: "missing", code: "qty_missing", field: "rfq_qty", id: "Isi jumlah pcs per kemasan.", en: "Fill in pieces per pack." });
+        else if (qty < 1) issues.push({ level: "error", code: "qty_whole", field: "rfq_qty", id: "Isi per kemasan harus minimal 1.", en: "Pieces per pack must be at least 1." });
         if (disc != null && (disc < 0 || disc >= 1)) {
-          issues.push({ level: "error", code: "disc_range", field: "rfq_disc", id: "Format diskon salah. Isi dalam persen antara 0% dan 100% (contoh: 15%).", en: "Discount format is wrong. Enter a percentage between 0% and 100% (e.g. 15%)." });
+          issues.push({ level: "error", code: "disc_range", field: "rfq_disc", id: "Format diskon salah. Isi angka antara 0 dan 100 (contoh: 15).", en: "Discount format is wrong. Enter a number between 0 and 100 (e.g. 15)." });
         }
         if (disc != null && disc >= 0 && disc < 1 && disc > th.high_disc) {
           issues.push({ level: "confirm", code: "disc_high", field: "rfq_disc", id: `Diskon ${(disc * 100).toFixed(0)}% sangat besar. Apakah benar?`, en: `Discount of ${(disc * 100).toFixed(0)}% is very high. Is this correct?` });
         }
         const baseHnaPc = dbHnaPerPc(it);
-        if (hna != null && hna > 0 && qty && baseHnaPc && hna / qty > baseHnaPc * (1 + th.hna_jump)) {
-          issues.push({ level: "confirm", code: "hna_anomaly", field: "rfq_hna", id: "HNA yang Anda isi tampak berbeda jauh dari data kami. Mohon periksa kembali harga dan isi per kemasan.", en: "The HNA you entered looks very different from our records. Please re-check the price and the pieces per pack." });
-        }
-        const dbQty = dbPackQty(it);
-        if (qty && dbQty && qty !== dbQty) {
-          issues.push({ level: "confirm", code: "uom_diff", field: "rfq_qty", id: "Isi per kemasan (UOM) berbeda dengan data kami. Mohon periksa kembali.", en: "The pack size (UOM) differs from our records. Please re-check." });
+        if (hna != null && hna > 0 && qty > 0 && baseHnaPc) {
+          const ratio = hna / qty / baseHnaPc;
+          if (ratio > 1 + th.hna_move || ratio < 1 - th.hna_move) {
+            issues.push({ level: "confirm", code: "hna_anomaly", field: "rfq_hna", id: "HNA yang Anda isi tampak berbeda jauh dari data kami. Mohon periksa kembali harga dan isi per kemasan.", en: "The HNA you entered looks very different from our records. Please re-check the price and the pieces per pack." });
+          }
         }
         const newUp = calcUnitPrice(hna, qty, disc, ppn);
         const mouUp = calcUnitPrice(it.mou_hna, it.mou_qty, it.mou_disc, ppn);
-        if (newUp != null && mouUp != null && mouUp > 0 && newUp / mouUp > 1 + th.increase_tolerance && !it.price_reason) {
-          issues.push({ level: "reason", code: "increase", field: "price_reason", id: "Harga per pcs naik dibanding kontrak saat ini. Mohon isi alasan kenaikan.", en: "The price per piece is higher than the current contract. Please state the reason." });
+        if (newUp != null && mouUp != null && mouUp > 0 && newUp / mouUp > 1 + th.increase_tolerance) {
+          increase = true;
+          if (!it.price_reason) issues.push({ level: "reason", code: "increase", field: "price_reason", id: "Harga per pcs naik dibanding kontrak saat ini. Mohon isi alasan kenaikan.", en: "The price per piece is higher than the current contract. Please state the reason." });
         }
       }
     }
@@ -3908,8 +4901,9 @@ function checkItemIssues(it, step) {
     if (active && it.co_disc != null) {
       if (it.fb1_disc == null) {
         issues.push({ level: "missing", code: "fb1_missing", field: "fb1_disc", id: "Terima counter offer atau isi diskon Anda.", en: "Accept counter offer or enter your discount." });
-      } else if (it.fb1_disc < it.co_disc - 1e-9 && !it.price_reason) {
-        issues.push({ level: "reason", code: "below_co", field: "price_reason", id: `Diskon Anda (${(it.fb1_disc * 100).toFixed(1)}%) di bawah counter offer Siloam (${(it.co_disc * 100).toFixed(1)}%). Mohon isi alasan.`, en: "Your discount is below Siloam counter offer. Please state reason." });
+      } else if (it.fb1_disc < it.co_disc - 1e-9) {
+        belowCo = true;
+        if (!it.price_reason) issues.push({ level: "reason", code: "below_co", field: "price_reason", id: `Diskon Anda (${fmtPct(it.fb1_disc)}) di bawah counter offer Siloam (${fmtPct(it.co_disc)}). Mohon isi alasan.`, en: "Your discount is below Siloam counter offer. Please state reason." });
       }
     }
   }
@@ -3934,29 +4928,29 @@ function checkItemIssues(it, step) {
     }
   }
   const state = hasMissing ? "missing" : hasCheck ? "check" : "done";
-  return { issues, outstanding, state };
+  return { issues, outstanding, state, increase, below_co: belowCo };
 }
-function dbPackQty(it) {
-  return it.mou_qty || matchUoMQty(it.po_unit_text) || null;
+function pruneAnswers(it, step, cycle) {
+  const r = checkItemIssues(it, step, cycle);
+  const present = new Set(r.issues.filter((i) => i.level === "confirm").map((i) => i.code));
+  const kept = (it.principal_confirmed || "").split(",").filter((c) => c && present.has(c));
+  const next = kept.join(",") || null;
+  if ((it.principal_confirmed || null) !== next) it.principal_confirmed = next;
+  if (it.price_reason && !r.increase && !r.below_co) it.price_reason = null;
 }
-function dbHnaPerPc(it) {
-  const q = dbPackQty(it);
-  if (it.mou_hna && it.mou_qty) return it.mou_hna / it.mou_qty;
-  if (it.formulary_hna && q) return it.formulary_hna / q;
-  return null;
-}
-function formatPrincipalItem(it, step) {
+function formatPrincipalItem(it, step, cycle) {
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const rfq_unit_price = calcUnitPrice(it.rfq_hna, it.rfq_qty, it.rfq_disc, ppn);
   const co_unit_price = it.co_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.co_disc, ppn) : null;
   const fb1_unit_price = it.fb1_disc != null ? calcUnitPrice(it.rfq_hna, it.rfq_qty, it.fb1_disc, ppn) : null;
-  const { issues, outstanding, state } = checkItemIssues(it, step);
+  const { issues, outstanding, state } = checkItemIssues(it, step, cycle);
   return {
     id: it.id,
     erp_code: it.erp_code,
     item_name: it.item_name,
     brand: it.brand || "",
     catalog_no: it.catalog_no || "",
+    active_ingredient: it.active_ingredient || "",
     item_status: it.item_status || "Active",
     remarks: it.remarks || null,
     rfq_qty: it.rfq_qty ?? null,
@@ -3969,6 +4963,10 @@ function formatPrincipalItem(it, step) {
     fb1_disc: it.fb1_disc ?? null,
     co_unit_price,
     fb1_unit_price,
+    needs_check: !!it.needs_check,
+    check_note: it.check_note || null,
+    corrections: (it.corrections || []).slice(0, 5),
+    comments: (it.comments || []).filter((m) => m.by === "principal").map((m) => ({ at: m.at, text: m.text, resolved: !!m.resolved })),
     issues,
     outstanding,
     state
@@ -3980,38 +4978,40 @@ function portalLocked(cycle, step) {
   if (sent) return { locked: true, reason: "sent" };
   return { locked: false, reason: null };
 }
+var PORTAL_STEP_NO = { rfq: 1, review_rfq: 2, counter_offer: 2, feedback1: 3, online_nego: 4, submission: 5, closed: 6 };
+var PORTAL_REASONS = [
+  { key: "raw_material", id: "Kenaikan harga bahan baku", en: "Raw material cost increase" },
+  { key: "fx", id: "Perubahan nilai tukar (kurs)", en: "Exchange rate movement" },
+  { key: "production", id: "Kenaikan biaya produksi / logistik", en: "Production / logistics cost increase" },
+  { key: "other", id: "Lainnya", en: "Other" }
+];
 app.get("/api/p/me", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku lagi. Minta tautan baru ke Siloam." });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku lagi. Minta tautan baru ke Siloam." });
   const { cycle, link, step } = resolved;
-  const stepNumberMap = {
-    rfq: 1,
-    counter_offer: 2,
-    feedback1: 3,
-    online_nego: 4,
-    submission: 5
-  };
   const lock = portalLocked(cycle, step);
+  const owner = STEPS.find((x) => x.key === cycle.current_step);
   res.json({
     principal: { name: cycle.principal.name, distributor: cycle.principal.distributor },
     contract: { start: cycle.contract_start, end: cycle.contract_end, binding: cycle.binding },
+    category: cycle.category || categoriesOf(cycle.principal || {})[0],
+    period: periodsList.find((x) => x.id === cycle.period_id)?.name || null,
     step,
     current_step: cycle.current_step,
-    step_no: stepNumberMap[cycle.current_step] || 1,
+    step_no: PORTAL_STEP_NO[cycle.current_step] || 1,
+    // Whose turn it is, so the page can say what happens next instead of always asking for the RFQ.
+    turn: owner?.who === "principal" ? "principal" : "siloam",
+    waiting_for: owner?.who === "principal" ? null : cycle.current_step,
     locked: lock.locked,
     excel_upload: true,
     lock_reason: lock.reason,
     submitted: cycle.submitted_steps?.[step] || null,
     due: cycle.step_due,
+    overdue_days: overdueDaysOf(cycle),
+    return_note: cycle.return_note && ["rfq", "feedback1", "submission"].includes(cycle.return_note.to) ? { message: cycle.return_note.message, at: cycle.return_note.at, flagged: cycle.return_note.flagged } : null,
+    completed_at: cycle.completed_at || null,
     ppn: Number(settingsValues.ppn_rate) || 0.11,
-    reasons: [
-      { key: "raw_material", id: "Kenaikan harga bahan baku", en: "Raw material cost increase" },
-      { key: "fx", id: "Perubahan nilai tukar (kurs)", en: "Exchange rate movement" },
-      { key: "production", id: "Kenaikan biaya produksi / logistik", en: "Production / logistics cost increase" },
-      { key: "other", id: "Lainnya", en: "Other" }
-    ],
+    reasons: PORTAL_REASONS,
     link_expires: link?.expires_at || addMonths(nowIso().slice(0, 10), 1),
     help: {
       whatsapp: process.env.NEGO_HELP_WHATSAPP || "6281112345678",
@@ -4021,12 +5021,10 @@ app.get("/api/p/me", (req, res) => {
 });
 app.get("/api/p/items", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle, step } = resolved;
   const rawItems = cycleItemsMap.get(cycle.id) || [];
-  const pItems = rawItems.map((it) => formatPrincipalItem(it, step));
+  const pItems = rawItems.map((it) => formatPrincipalItem(it, step, cycle));
   const filter = req.query.filter || "all";
   const q = (req.query.q || "").toLowerCase().trim();
   const offset = Math.max(0, parseInt(req.query.offset) || 0);
@@ -4039,168 +5037,141 @@ app.get("/api/p/items", (req, res) => {
     done: pItems.filter((i) => i.state === "done").length
   };
   let filtered = pItems;
-  if (q) {
-    filtered = filtered.filter(
-      (i) => (i.item_name || "").toLowerCase().includes(q) || (i.erp_code || "").toLowerCase().includes(q) || (i.brand || "").toLowerCase().includes(q) || (i.catalog_no || "").toLowerCase().includes(q)
-    );
-  }
-  if (filter === "todo") {
-    filtered = filtered.filter((i) => i.state === "missing");
-  } else if (filter === "check") {
-    filtered = filtered.filter((i) => i.state === "check");
-  } else if (filter === "up") {
-    filtered = filtered.filter((i) => i.issues.some((iss) => iss.code === "increase"));
-  } else if (filter === "done") {
-    filtered = filtered.filter((i) => i.state === "done");
-  }
-  res.json({
-    total: filtered.length,
-    offset,
-    items: filtered.slice(offset, offset + limit),
-    counts
-  });
+  if (q) filtered = filtered.filter((i) => `${i.item_name} ${i.erp_code} ${i.brand} ${i.catalog_no} ${i.active_ingredient}`.toLowerCase().includes(q));
+  if (filter === "todo") filtered = filtered.filter((i) => i.state === "missing");
+  else if (filter === "check") filtered = filtered.filter((i) => i.state === "check");
+  else if (filter === "up") filtered = filtered.filter((i) => i.issues.some((iss) => iss.code === "increase"));
+  else if (filter === "done") filtered = filtered.filter((i) => i.state === "done");
+  res.json({ total: filtered.length, offset, items: filtered.slice(offset, offset + limit), counts });
 });
 app.patch("/api/p/items/:iid", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle, step } = resolved;
   const iid = Number(req.params.iid);
   const items = cycleItemsMap.get(cycle.id) || [];
   const it = items.find((x) => x.id === iid);
-  if (!it) {
-    return res.status(404).json({ error: "No such item" });
-  }
+  if (!it) return res.status(404).json({ error: "No such item" });
   const { changes, confirm } = req.body || {};
-  if (portalLocked(cycle, step).locked) {
-    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
-  }
-  let cautionMessage = null;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  const next = {};
+  let caution = null;
   if (changes) {
-    if (changes.item_status !== void 0) it.item_status = changes.item_status;
-    if (changes.brand !== void 0) it.brand = String(changes.brand).trim();
-    if (changes.catalog_no !== void 0) it.catalog_no = String(changes.catalog_no).trim();
-    if (changes.remarks !== void 0) it.remarks = String(changes.remarks).trim();
+    if (changes.item_status !== void 0) {
+      if (!["Active", "Discontinue"].includes(String(changes.item_status))) return res.status(400).json({ error: "Status harus Aktif atau Discontinue." });
+      next.item_status = changes.item_status;
+    }
+    for (const f of ["brand", "catalog_no", "active_ingredient", "remarks"]) if (changes[f] !== void 0) next[f] = String(changes[f] ?? "").trim().slice(0, 300);
     if (changes.rfq_qty !== void 0) {
-      it.rfq_qty = changes.rfq_qty != null && changes.rfq_qty !== "" ? parseInt(String(changes.rfq_qty).replace(/[^\d]/g, "")) || null : null;
-      if (it.mou_qty && it.rfq_qty && it.rfq_qty !== it.mou_qty) {
-        cautionMessage = "Satuan/jumlah per kemasan berbeda dengan acuan MOU.";
+      if (changes.rfq_qty == null || changes.rfq_qty === "") next.rfq_qty = null;
+      else {
+        const n = parseMoney(changes.rfq_qty);
+        if (n == null || n < 1 || !Number.isFinite(n)) return res.status(400).json({ error: "Isi per kemasan harus bilangan bulat minimal 1." });
+        next.rfq_qty = Math.round(n);
       }
     }
     if (changes.rfq_hna !== void 0) {
-      if (changes.rfq_hna == null || changes.rfq_hna === "") {
-        it.rfq_hna = null;
-      } else {
-        const clean = String(changes.rfq_hna).replace(/\./g, "").replace(",", ".");
-        const val = parseFloat(clean);
-        if (isNaN(val) || val < 0) {
-          return res.status(400).json({ error: "Harga HNA tidak valid. Mohon periksa kembali harga yang dimasukkan." });
-        }
-        it.rfq_hna = val;
-        const refHna = it.mou_hna || it.last_po_price;
-        if (refHna && (val > refHna * 1.5 || val < refHna * 0.2)) {
-          cautionMessage = "Mohon periksa kembali kesesuaian harga yang dimasukkan.";
-        }
+      if (changes.rfq_hna == null || changes.rfq_hna === "") next.rfq_hna = null;
+      else {
+        const val = parseMoney(changes.rfq_hna);
+        if (val == null || val < 0) return res.status(400).json({ error: "Harga HNA tidak valid. Mohon periksa kembali harga yang dimasukkan." });
+        next.rfq_hna = val;
       }
     }
-    if (changes.rfq_disc !== void 0) {
-      if (changes.rfq_disc == null || changes.rfq_disc === "") {
-        it.rfq_disc = null;
-      } else {
-        const rawStr = String(changes.rfq_disc).trim();
-        const hasPct = rawStr.includes("%");
-        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
-        const d = parseFloat(clean);
-        if (isNaN(d) || d < 0) {
-          return res.status(400).json({ error: "Diskon tidak valid. Masukkan angka desimal 0 s/d 1 atau persentase (contoh: 0.15 atau 15%)." });
-        }
-        if (d > 1 && !hasPct) {
-          return res.status(400).json({ error: `Diskon '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%) atau ketik dengan tanda % (contoh: ${rawStr}%).` });
-        }
-        it.rfq_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
+    for (const f of ["rfq_disc", "fb1_disc"]) {
+      if (changes[f] === void 0) continue;
+      if (f === "fb1_disc" && changes[f] === "__co__") {
+        if (step !== "feedback1") return res.status(403).json({ error: "Feedback I belum dibuka." });
+        if (it.co_disc == null) return res.status(400).json({ error: "SKU ini belum punya counter offer." });
+        next.fb1_disc = it.co_disc;
+        continue;
       }
+      if (f === "rfq_disc" && step !== "rfq") return res.status(403).json({ error: "RFQ sudah terkunci." });
+      if (f === "fb1_disc" && step !== "feedback1") return res.status(403).json({ error: "Feedback I belum dibuka." });
+      const d = parseDiscount(changes[f]);
+      if (d.error) return res.status(400).json({ error: d.error });
+      next[f] = d.value;
     }
-    if (changes.fb1_disc !== void 0) {
-      if (changes.fb1_disc == null || changes.fb1_disc === "") {
-        it.fb1_disc = null;
-      } else {
-        const rawStr = String(changes.fb1_disc).trim();
-        const hasPct = rawStr.includes("%");
-        const clean = rawStr.replace("%", "").replace(/\./g, "").replace(",", ".");
-        const d = parseFloat(clean);
-        if (isNaN(d) || d < 0) {
-          return res.status(400).json({ error: "Diskon Feedback I tidak valid." });
-        }
-        if (d > 1 && !hasPct) {
-          return res.status(400).json({ error: `Diskon Feedback I '${rawStr}' tidak valid. Format harus antara 0 dan 1 (contoh: 0.15 untuk 15%).` });
-        }
-        it.fb1_disc = hasPct ? d / 100 : d > 1 ? d / 100 : d;
-      }
+    if (changes.price_reason !== void 0) next.price_reason = String(changes.price_reason || "").trim() || null;
+    if (step !== "rfq") {
+      for (const f of Object.keys(next)) if (FIELD_STEP[f] === "rfq" && f !== "price_reason") return res.status(403).json({ error: "Data RFQ sudah terkunci. Ajukan koreksi lewat komentar SKU." });
     }
-    if (changes.price_reason !== void 0) {
-      it.price_reason = String(changes.price_reason || "").trim() || null;
-    }
+  }
+  const by = `principal:${cycle.principal.name}`;
+  if (Object.keys(next).length) {
+    recordChange(it, next, { source: "portal", by });
+    it.needs_check = false;
+    const refPc = dbHnaPerPc(it);
+    if (next.rfq_hna != null && it.rfq_qty > 0 && refPc && (next.rfq_hna / it.rfq_qty > refPc * 1.5 || next.rfq_hna / it.rfq_qty < refPc * 0.5)) caution = "Mohon periksa kembali kesesuaian harga yang dimasukkan.";
   }
   if (confirm) {
     const set = new Set((it.principal_confirmed || "").split(",").filter(Boolean));
     set.add(String(confirm).trim());
     it.principal_confirmed = Array.from(set).join(",");
+    if (String(confirm).trim() === "siloam_flag") it.needs_check = false;
   }
+  pruneAnswers(it, step, cycle);
   scanCycleAnomalies(cycle.id);
-  const formatted = formatPrincipalItem(it, step);
-  res.json({ ...formatted, caution: cautionMessage });
+  res.json({ ...formatPrincipalItem(it, step, cycle), caution });
 });
 app.post("/api/p/fill", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle, step } = resolved;
-  if (step !== "feedback1") {
-    return res.status(403).json({ error: "Isi otomatis hanya tersedia untuk menerima counter offer / Auto-fill is only available for accepting counter offers." });
-  }
-  if (portalLocked(cycle, step).locked) {
-    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
-  }
+  if (step !== "feedback1") return res.status(403).json({ error: "Isi otomatis hanya tersedia untuk menerima counter offer / Auto-fill is only available for accepting counter offers." });
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
   const items = cycleItemsMap.get(cycle.id) || [];
-  let count = 0;
+  let count = 0, kept = 0;
   const ids = Array.isArray(req.body?.ids) ? new Set(req.body.ids) : null;
   for (const it of items) {
     if (ids && !ids.has(it.id)) continue;
-    if (it.item_status === "Discontinue") continue;
-    if (it.co_disc != null) {
-      it.fb1_disc = it.co_disc;
-      count++;
+    if (it.item_status === "Discontinue" || it.co_disc == null) continue;
+    if (it.fb1_disc != null) {
+      kept++;
+      continue;
     }
+    recordChange(it, { fb1_disc: it.co_disc }, { source: "portal: terima counter offer", by: `principal:${cycle.principal.name}` });
+    count++;
   }
   scanCycleAnomalies(cycle.id);
-  res.json({ filled: count });
+  logCycle(cycle.id, "principal.accept_all", { filled: count, kept }, `principal:${cycle.principal.name}`);
+  res.json({ filled: count, kept });
+});
+app.post("/api/p/items/:iid/comment", (req, res) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle } = resolved;
+  const it = (cycleItemsMap.get(cycle.id) || []).find((x) => x.id === Number(req.params.iid));
+  if (!it) return res.status(404).json({ error: "No such item" });
+  const text2 = String(req.body?.text || "").trim().slice(0, 500);
+  if (!text2) return res.status(400).json({ error: "Tulis komentar atau pengajuan koreksi." });
+  (it.comments ||= []).push({ at: nowIso(), by: "principal", text: text2, resolved: false });
+  scanCycleAnomalies(cycle.id);
+  logCycle(cycle.id, "principal.comment", { erp_code: it.erp_code, text: text2 }, `principal:${cycle.principal.name}`);
+  res.json({ ok: true, comments: it.comments.filter((m) => m.by === "principal") });
 });
 app.get("/api/p/summary", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle, step } = resolved;
   const items = cycleItemsMap.get(cycle.id) || [];
-  const pItems = items.map((it) => formatPrincipalItem(it, step));
+  const pItems = items.map((it) => formatPrincipalItem(it, step, cycle));
   const left = pItems.filter((i) => i.outstanding && i.outstanding.length > 0).map((i) => ({
     id: i.id,
     erp_code: i.erp_code,
     item_name: i.item_name,
     issues: i.issues.filter((iss) => i.outstanding.includes(iss.code))
   }));
-  const increases = pItems.filter((i) => i.issues.some((iss) => iss.code === "increase" || iss.code === "below_co")).map((i) => ({
-    id: i.id,
-    erp_code: i.erp_code,
-    item_name: i.item_name,
-    reason: i.price_reason
-  }));
+  const increases = pItems.filter((i) => i.issues.some((iss) => iss.code === "increase" || iss.code === "below_co")).map((i) => ({ id: i.id, erp_code: i.erp_code, item_name: i.item_name, reason: i.price_reason }));
+  const dcList = pItems.filter((i) => i.item_status === "Discontinue").map((i) => ({ id: i.id, erp_code: i.erp_code, item_name: i.item_name }));
+  const docs = cycleDocumentsMap.get(cycle.id) || [];
+  const missingDocs = step === "submission" ? REQUIRED_DOCS.filter((k) => !docs.some((d) => d.doc_type === k)) : [];
   res.json({
     step,
     items: pItems.length,
-    discontinued: pItems.filter((i) => i.item_status === "Discontinue").length,
+    discontinued: dcList.length,
+    discontinued_list: dcList.slice(0, 200),
+    needs_discontinue_confirm: step === "rfq" && dcList.length > 0,
     done: pItems.filter((i) => i.state === "done").length,
     missing: pItems.filter((i) => i.state === "missing").length,
     to_check: pItems.filter((i) => i.state === "check").length,
@@ -4208,48 +5179,53 @@ app.get("/api/p/summary", (req, res) => {
     outstanding_count: left.length,
     increases: increases.slice(0, 100),
     increase_count: increases.length,
-    documents: (cycleDocumentsMap.get(cycle.id) || []).length,
-    can_send: left.length === 0
+    documents: docs.length,
+    dc_documents: docs.filter((d) => d.doc_type === "dc_letter").length,
+    missing_documents: missingDocs,
+    can_send: step === "submission" ? missingDocs.length === 0 : left.length === 0
   });
 });
 app.post("/api/p/submit", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle, step } = resolved;
-  if (portalLocked(cycle, step).locked) {
-    return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci / This form was sent and is now locked." });
+  const items = cycleItemsMap.get(cycle.id) || [];
+  if (step === "submission") {
+    const docs = cycleDocumentsMap.get(cycle.id) || [];
+    const missing = REQUIRED_DOCS.filter((k) => !docs.some((d) => d.doc_type === k));
+    if (missing.length) return res.status(400).json({ error: `Dokumen wajib belum lengkap: ${missing.map((k) => DOC_TYPES.find((d) => d.key === k)?.id || k).join(", ")}.`, missing_documents: missing });
+  } else {
+    const left = items.filter((it) => formatPrincipalItem(it, step, cycle).outstanding.length > 0).length;
+    if (left > 0) return res.status(400).json({ error: `Masih ada ${left} SKU yang perlu dilengkapi atau diperbaiki / ${left} SKUs still need to be completed or fixed.` });
   }
-  if (step !== "submission") {
-    const left = (cycleItemsMap.get(cycle.id) || []).filter((it) => formatPrincipalItem(it, step).outstanding.length > 0).length;
-    if (left > 0) {
-      return res.status(400).json({ error: `Masih ada ${left} SKU yang perlu dilengkapi atau diperbaiki / ${left} SKUs still need to be completed or fixed.` });
+  if (step === "rfq") {
+    const dc = items.filter((i) => i.item_status === "Discontinue");
+    if (dc.length && !req.body?.confirm_discontinue) {
+      return res.status(409).json({ error: `${dc.length} SKU dinyatakan Discontinue. Konfirmasi dulu sebelum mengirim.`, needs_discontinue_confirm: true, discontinued: dc.map((i) => ({ erp_code: i.erp_code, item_name: i.item_name })) });
     }
+    if (dc.length) logCycle(cycle.id, "principal.discontinue_confirmed", { skus: dc.length, attachments: (cycleDocumentsMap.get(cycle.id) || []).filter((d) => d.doc_type === "dc_letter").length }, `principal:${cycle.principal.name}`);
   }
   if (!cycle.submitted_steps) cycle.submitted_steps = {};
   cycle.submitted_steps[step] = { at: nowIso() };
-  const nextStepMap = {
-    rfq: "counter_offer",
-    feedback1: "online_nego",
-    submission: "done"
-  };
-  const nextStep = nextStepMap[step] || "counter_offer";
+  let nextStep = "counter_offer";
+  if (step === "rfq") {
+    const counts = scanCycleAnomalies(cycle.id);
+    nextStep = counts.open_high > 0 ? "review_rfq" : "counter_offer";
+  } else if (step === "feedback1") nextStep = "online_nego";
+  else if (step === "submission") nextStep = "closed";
   cycle.current_step = nextStep;
-  const evs = cycleEventsMap.get(cycle.id) || [];
-  evs.unshift({
-    id: evs.length + 1,
-    cycle_id: cycle.id,
-    at: nowIso(),
-    user_email: `principal:${cycle.principal.name}`,
-    action: "principal.submit",
-    detail: { step, next_step: nextStep }
-  });
-  cycleEventsMap.set(cycle.id, evs);
+  cycle.return_note = null;
+  for (const it of items) it.needs_check = false;
+  if (nextStep === "closed") {
+    cycle.status = "closed";
+    cycle.completed_at = nowIso();
+  }
+  logCycle(cycle.id, "principal.submit", { step, next_step: nextStep }, `principal:${cycle.principal.name}`);
   res.json({ ok: true, step: nextStep, submitted_at: nowIso() });
 });
 var TEMPLATE_PATH = path.join(__dirname, "public", "templates", "Template_Nego.xlsx");
-var STAFF_COLUMNS = ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "coDisc", "fb1Disc", "onDisc"];
+var STAFF_COLUMNS = ["brand", "ref", "ai", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "reason", "coDisc", "coNote", "fb1Disc", "onDisc", "onNett", "onDiscScheme"];
 function templateOptions(c, forPrincipal) {
   return {
     forPrincipal,
@@ -4259,7 +5235,9 @@ function templateOptions(c, forPrincipal) {
     contractStart: c.contract_start,
     contractEnd: c.contract_end,
     binding: c.binding,
-    deliveryFee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, "")
+    deliveryFee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, ""),
+    category: c.category || categoriesOf(c.principal || {})[0],
+    ppn: Number(settingsValues.ppn_rate) || 0.11
   };
 }
 async function sendWorkbook(res, wb, filename) {
@@ -4272,18 +5250,54 @@ app.get("/api/nego/cycles/:cid/export.xlsx", async (req, res) => {
   const c = cycleOf(Number(req.params.cid));
   if (!c) return res.status(404).json({ error: "No such negotiation" });
   const items = cycleItemsMap.get(c.id) || [];
-  const wb = await buildTemplate(TEMPLATE_PATH, items, templateOptions(c, false));
+  const ppn0 = Number(settingsValues.ppn_rate) || 0.11;
+  const wb = await buildTemplate(null, items.map((i) => enrichCycleItem(i, ppn0, c)), templateOptions(c, false));
   await sendWorkbook(res, wb, `Template_Nego_${c.principal.name}.xlsx`);
 });
 app.get("/api/p/template.xlsx", async (req, res) => {
   const resolved = resolvePrincipalCycle(req);
   if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle } = resolved;
-  const wb = await buildTemplate(TEMPLATE_PATH, cycleItemsMap.get(cycle.id) || [], templateOptions(cycle, true));
+  const wb = await buildTemplate(null, cycleItemsMap.get(cycle.id) || [], templateOptions(cycle, true));
   await sendWorkbook(res, wb, `Template_Nego_${cycle.principal.name}.xlsx`);
 });
 function fieldNow(it, field) {
   return it[field] ?? null;
+}
+function planTemplateRows(rows, items, allowed) {
+  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
+  const count = /* @__PURE__ */ new Map();
+  for (const r of rows) if (r.erp_code) count.set(r.erp_code, [...count.get(r.erp_code) || [], r.row]);
+  const rejected = [];
+  const unmatched = [];
+  const changes = [];
+  const perItem = /* @__PURE__ */ new Map();
+  const seen = /* @__PURE__ */ new Set();
+  let matched = 0, okRows = 0;
+  for (const r of rows) {
+    const it = byErp.get(r.erp_code);
+    if (!it) {
+      unmatched.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name });
+      continue;
+    }
+    matched++;
+    seen.add(it.id);
+    const dup = count.get(r.erp_code) || [];
+    if (dup.length > 1) {
+      rejected.push({ row: r.row, erp_code: it.erp_code, item_name: it.item_name, errors: [{ column: "ERP Code", value: r.erp_code, message: `baris dobel (baris ${dup.join(", ")}), semua ditolak` }] });
+      continue;
+    }
+    const chk = checkRow(r.cells, allowed);
+    if (chk.errors.length) rejected.push({ row: r.row, erp_code: it.erp_code, item_name: it.item_name, errors: chk.errors });
+    else okRows++;
+    for (const ch of chk.changes) {
+      const old = fieldNow(it, ch.field);
+      if (sameVal(old, ch.value)) continue;
+      changes.push({ item_id: it.id, row: r.row, erp_code: it.erp_code, item_name: it.item_name, field: ch.field, header: ch.header, old, new: ch.value, overwrites: old != null && old !== "" });
+      perItem.set(it.id, { ...perItem.get(it.id) || {}, [ch.field]: ch.value });
+    }
+  }
+  return { byErp, rejected, unmatched, changes, perItem, seen, matched, okRows, total: rows.length };
 }
 app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file")), async (req, res) => {
   const cid = Number(req.params.cid);
@@ -4298,54 +5312,50 @@ app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file
     return res.status(400).json({ error: e.message });
   }
   const items = cycleItemsMap.get(cid) || [];
-  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
-  const byName = new Map(items.map((i) => [String(i.item_name).trim().toLowerCase(), i]));
-  const changes = [], errors = [], unmatched = [];
-  const seen = /* @__PURE__ */ new Set();
-  const perItem = /* @__PURE__ */ new Map();
-  let matched = 0;
-  for (const r of rows) {
-    const it = byErp.get(r.erp_code) || byName.get(r.item_name.trim().toLowerCase());
-    if (!it) {
-      unmatched.push({ erp_code: r.erp_code, item_name: r.item_name });
-      continue;
-    }
-    matched++;
-    seen.add(it.id);
-    const chk = checkRow(r.cells, STAFF_COLUMNS);
-    chk.errors.forEach((m) => errors.push({ row: r.row, message: m }));
-    if (chk.errors.length) continue;
-    for (const ch of chk.changes) {
-      const old = fieldNow(it, ch.field);
-      const same = typeof ch.value === "number" && old != null ? Math.abs(Number(old) - ch.value) < 1e-9 : String(old ?? "") === String(ch.value);
-      if (same) continue;
-      changes.push({ item_id: it.id, erp_code: it.erp_code, item_name: it.item_name, field: ch.field, header: ch.header, old, new: ch.value });
-      perItem.set(it.id, { ...perItem.get(it.id) || {}, [ch.field]: ch.value });
-    }
-  }
+  const plan = planTemplateRows(rows, items, STAFF_COLUMNS);
+  const locked = plan.changes.filter((x) => lockedStepFor(c, x.field));
   const byCol = {};
-  changes.forEach((x) => {
+  plan.changes.forEach((x) => {
     byCol[x.header] = (byCol[x.header] || 0) + 1;
   });
-  const warning = matched === 0 ? "None of the rows match this negotiation's items. Is this the right principal's workbook?" : null;
+  const warning = plan.matched === 0 ? "None of the rows match this negotiation's items. Is this the right principal's workbook?" : null;
+  const errors = plan.rejected.map((r) => ({ row: r.row, erp_code: r.erp_code, message: r.errors.map((e) => `${e.column} "${e.value}": ${e.message}`).join("; "), errors: r.errors }));
   if (String(req.body?.apply) === "1") {
     if (warning) return res.status(400).json({ error: warning });
-    for (const [id, ch] of perItem) Object.assign(items.find((i) => i.id === id), ch);
+    const reason = String(req.body?.correction_reason || "").trim();
+    if (locked.length && !reason) return res.status(423).json({ error: `${locked.length} perubahan menyentuh data step yang sudah terkunci (${[...new Set(locked.map((x) => x.header))].join(", ")}). Koreksi hanya atas pengajuan principal: tulis alasannya.`, needs_reason: true, locked_count: locked.length });
+    let applied = 0;
+    const touched = /* @__PURE__ */ new Set();
+    for (const [id, ch] of plan.perItem) {
+      const it = items.find((i) => i.id === id);
+      const lockedFields = Object.keys(ch).filter((f) => lockedStepFor(c, f));
+      const done = recordChange(it, ch, { source: lockedFields.length ? "import Excel (koreksi)" : "import Excel", reason: lockedFields.length ? reason : null });
+      if (lockedFields.length && done.some((f) => lockedFields.includes(f))) (it.corrections ||= []).unshift({ at: nowIso(), by: actingUser().email, fields: done.filter((f) => lockedFields.includes(f)).map((f) => FIELD_LABEL[f] || f), reason });
+      if (done.length) {
+        applied += done.length;
+        touched.add(id);
+      }
+      if (done.includes("on_disc_nett") || done.includes("on_disc_disc")) syncFinalScheme(c, it);
+    }
     const scan = scanCycleAnomalies(cid);
-    logAudit(actingUser().email, "cycle.import", { cycle_id: cid, items: perItem.size, changes: changes.length, file: file.originalname });
-    return res.json({ applied_items: perItem.size, applied_changes: changes.length, scan: { found: scan.open } });
+    logCycle(cid, "cycle.import", { items: touched.size, changes: applied, locked: locked.length, reason: reason || null, file: file.originalname, rejected_rows: plan.rejected.length });
+    return res.json({ applied_items: touched.size, applied_changes: applied, rejected_rows: plan.rejected.length, scan: { found: scan.open } });
   }
   res.json({
-    rows_in_file: rows.length,
-    matched,
-    unmatched_count: unmatched.length,
-    unmatched: unmatched.slice(0, 50),
-    not_in_file: items.length - seen.size,
-    items_changed: perItem.size,
-    changes,
+    rows_in_file: plan.total,
+    ok_rows: plan.okRows,
+    rejected_rows: plan.rejected.length,
+    matched: plan.matched,
+    unmatched_count: plan.unmatched.length,
+    unmatched: plan.unmatched.slice(0, 50),
+    not_in_file: items.length - plan.seen.size,
+    items_changed: plan.perItem.size,
+    changes: plan.changes,
     changes_by_column: byCol,
     errors,
-    warning
+    warning,
+    locked_count: locked.length,
+    locked_columns: [...new Set(locked.map((x) => x.header))]
   });
 });
 app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, res) => {
@@ -4361,33 +5371,42 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req, re
   } catch (e) {
     return res.status(400).json({ error: `${e.message}` });
   }
-  const allowed = step === "rfq" ? ["brand", "ref", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc"] : step === "feedback1" ? ["fb1Disc"] : [];
+  const allowed = step === "rfq" ? ["brand", "ref", "ai", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "reason"] : step === "feedback1" ? ["fb1Disc"] : [];
   const items = cycleItemsMap.get(cycle.id) || [];
-  const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
-  const rejected = [], ready = [];
-  let unmatched = 0;
-  for (const r of rows) {
-    const it = byErp.get(r.erp_code);
-    if (!it) {
-      unmatched++;
-      continue;
-    }
-    const chk = checkRow(r.cells, allowed);
-    if (chk.errors.length) {
-      rejected.push({ row: r.row, item_name: it.item_name, messages: chk.errors.map((m) => ({ id: m, en: m })) });
-      continue;
-    }
-    if (chk.changes.length) ready.push({ item: it, changes: chk.changes });
-  }
+  const plan = planTemplateRows(rows, items, allowed);
+  const overwrites = plan.changes.filter((x) => x.overwrites);
   if (String(req.body?.apply) === "1") {
-    for (const { item, changes } of ready) for (const ch of changes) item[ch.field] = ch.value;
+    if (overwrites.length && String(req.body?.confirm_overwrite) !== "1") {
+      return res.status(409).json({ error: "File ini akan menimpa isian yang sudah ada di portal. Konfirmasi dulu.", needs_confirm: true, overwrites: overwrites.slice(0, 200), overwrite_count: overwrites.length });
+    }
+    let applied = 0;
+    for (const [id, ch] of plan.perItem) {
+      const it = items.find((i) => i.id === id);
+      if (recordChange(it, ch, { source: "upload Excel (principal)", by: `principal:${cycle.principal.name}` }).length) {
+        applied++;
+        it.needs_check = false;
+      }
+    }
     scanCycleAnomalies(cycle.id);
-    return res.json({ applied: ready.length });
+    logCycle(cycle.id, "principal.excel", { step, rows: plan.total, applied, rejected_rows: plan.rejected.length }, `principal:${cycle.principal.name}`);
+    return res.json({ applied, rejected_rows: plan.rejected.length });
   }
-  res.json({ accepted: ready.length, rejected, read_errors: [], unmatched_count: unmatched, notes: [] });
+  res.json({
+    total: plan.total,
+    saved_rows: plan.okRows,
+    error_rows: plan.rejected.length,
+    accepted: plan.okRows,
+    rejected: plan.rejected.map((r) => ({ ...r, messages: r.errors.map((e) => ({ id: `${e.column} "${e.value}": ${e.message}`, en: `${e.column} "${e.value}": ${e.message}` })) })),
+    changes: plan.changes.map((x) => ({ erp_code: x.erp_code, item_name: x.item_name, header: x.header, old: x.old, new: x.new, overwrites: x.overwrites })),
+    overwrite_count: overwrites.length,
+    changed_items: plan.perItem.size,
+    read_errors: [],
+    unmatched_count: plan.unmatched.length,
+    notes: []
+  });
 });
 app.get("/api/admin/master/items.xlsx", async (_req, res) => {
-  const wb = new ExcelJS3.Workbook();
+  const wb = new ExcelJS4.Workbook();
   const ws = wb.addWorksheet("Master items");
   ws.addRow(["ERP Code", "Item Name", "Generic Name", "Group", "Brand", "Catalog No. (REF)", "UOM", "Tags", "Status", "Source"]);
   ws.getRow(1).font = { bold: true };
@@ -4397,120 +5416,462 @@ app.get("/api/admin/master/items.xlsx", async (_req, res) => {
   });
   await sendWorkbook(res, wb, "master_items.xlsx");
 });
-app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req, res) => {
-  const c = cycleOf(Number(req.params.cid));
-  if (!c) return res.status(404).json({ error: "No such negotiation" });
-  const ppn = Number(settingsValues.ppn_rate) || 0.11;
-  const items = (cycleItemsMap.get(c.id) || []).filter((i) => i.item_status !== "Discontinue").map((i) => enrichCycleItem(i, ppn, c)).sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
-  const seen = /* @__PURE__ */ new Set();
-  const wb = new ExcelJS3.Workbook();
-  const ws = wb.addWorksheet("Confirmation");
-  ws.addRow([`Agreed prices: ${c.principal.name}`]);
-  ws.addRow([`Contract ${c.contract_start} to ${c.contract_end} \xB7 Binding ${c.binding}`]);
-  ws.addRow([]);
-  ws.addRow(["ERP Code", "Item Name", "Brand", "Catalog No. (REF)", "Qty/PO Unit", "HNA/PO Unit (excl. PPN)", "Agreed Disc%", "Agreed Price/pc (incl. PPN)"]);
-  ws.getRow(4).font = { bold: true };
-  for (const i of items) {
-    if (seen.has(i.erp_code) || i.on_disc == null) continue;
-    seen.add(i.erp_code);
-    ws.addRow([i.erp_code, i.item_name, i.brand, i.catalog_no, i.rfq_qty, i.rfq_hna, i.on_disc, i.on_unit_price]);
+function analysisColumns(mode, years) {
+  const c = [];
+  const add = (group, key, label, kind = "text") => c.push({ key, label, group, kind });
+  add("Identitas", "erp_code", "ERP Code");
+  add("Identitas", "item_name", "Item Name");
+  add("Identitas", "principal", "Principal");
+  add("Identitas", "brand", "Brand");
+  add("Identitas", "item_status", "Status");
+  add("Identitas", "po_unit_text", "Satuan PO");
+  add("Identitas", "bucket", "Bucket");
+  add("Identitas", "binding", "Binding");
+  add("Formularium", "form_hna", "HNA", "money");
+  add("Formularium", "form_conv", "Konversi", "num");
+  add("Formularium", "form_disc", "Disc", "pct");
+  add("Formularium", "form_nett_price", "Price (Nett)", "price");
+  add("Formularium", "form_base_price", "Base Price", "price");
+  add("Formularium", "form_margin_unit", "Margin/Unit", "price");
+  add("Formularium", "hna_sbp", "HNA for SBP", "money");
+  add("Formularium", "form_kind", "Jenis");
+  add("MOU", "mou_qty", "Qty", "num");
+  add("MOU", "mou_hna", "HNA", "money");
+  add("MOU", "mou_disc", "Disc", "pct");
+  add("MOU", "mou_unit_price", "Price/pc", "price");
+  add("RFQ", "rfq_qty", "Qty", "num");
+  add("RFQ", "rfq_hna", "HNA", "money");
+  add("RFQ", "rfq_disc", "Disc", "pct");
+  add("RFQ", "rfq_unit_price", "Price/pc", "price");
+  add("RFQ", "rfq_hna_pc", "HNA/PCS", "price");
+  add("RFQ", "base_margin_price", "Base Price", "price");
+  add("RFQ", "margin_pc_rfq", "Margin/PCS", "price");
+  add("Variance", "variance_hna_pc", "Variance HNA/PCS", "price");
+  add("Variance", "variance_disc", "Variance Disc", "pct");
+  add("Counter offer", "co_disc", "Disc", "pct");
+  add("Counter offer", "co_unit_price", "Price/pc", "price");
+  add("Counter offer", "margin_pc_co", "Margin/pc", "price");
+  add("Feedback I", "fb1_disc", "Disc", "pct");
+  add("Feedback I", "fb1_unit_price", "Price/pc", "price");
+  add("Feedback I", "margin_pc_fb1", "Margin/pc", "price");
+  if (mode === "post") {
+    add("FIN (Online Nego)", "on_disc", "Disc", "pct");
+    add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price");
+    add("FIN (Online Nego)", "margin_pc_on", "Margin/pc", "price");
+    add("FIN (Online Nego)", "proceed_bak", "Lanjut ke BAK");
   }
-  ws.columns.forEach((col, k) => {
-    col.width = [14, 42, 18, 18, 12, 22, 14, 24][k];
+  for (const y of years) {
+    add(`PO ${y}`, `po_${y}_qty`, "Qty (pcs)", "num");
+    add(`PO ${y}`, `po_${y}_avg`, "Avg Price/pc (+PPN)", "price");
+    add(`PO ${y}`, `po_${y}_value`, "PO Value (+PPN)", "money");
+    add(`PO ${y}`, `po_${y}_margin`, "Total Margin", "money");
+  }
+  const cur = years[years.length - 1];
+  add(`PO ${cur} setahun`, "annual_pcs", "Qty setahun (pcs)", "num");
+  add(`PO ${cur} setahun`, "po_annualized_value_ppn", "Nilai PO setahun (+PPN)", "money");
+  const g = mode === "pre" ? "Hasil Pre-Nego" : "Hasil Post-Nego";
+  add(g, "sel_price", "Unit Price (+PPN)", "price");
+  add(g, "sel_total_cost", "Total Cost", "money");
+  add(g, "sel_cost_impact", "Cost Impact", "money");
+  add(g, "sel_cost_impact_pct", "Cost Impact %", "pct");
+  add(g, "sel_total_margin", "Total Margin", "money");
+  add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money");
+  add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money");
+  add("Info", "bench_pp", "Market/pc", "price");
+  add("Info", "sbp", "SBP?");
+  add("Info", "need_sbp", "Need SBP after nego?");
+  add("Info", "notes", "Notes");
+  add("Info", "findings", "Findings", "num");
+  return c;
+}
+function analysisFor(cid, mode, stepKey) {
+  const c = cycleOf(cid);
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const vat = 1 + ppn;
+  const per = periodsList.find((x) => x.id === c.period_id);
+  const curYear = per?.year || (/* @__PURE__ */ new Date()).getFullYear();
+  const years = [String(curYear - 2), String(curYear - 1), String(curYear)];
+  const months = c.months_elapsed || per?.months_elapsed || 12;
+  const open = (cycleAnomaliesMap.get(cid) || []).filter((a) => a.status === "open");
+  const findingsBy = /* @__PURE__ */ new Map();
+  for (const a of open) findingsBy.set(a.item_id, (findingsBy.get(a.item_id) || 0) + 1);
+  const sel = (en) => stepKey && ["rfq", "co", "fb1", "on"].includes(stepKey) ? en.m[stepKey] : mode === "pre" ? en.m.pre : en.m.post;
+  const rows = (cycleItemsMap.get(cid) || []).map((raw) => {
+    const en = enrichCycleItem(raw, ppn, c);
+    const m = sel(en);
+    const mk = marketPrice(c, en.erp_code);
+    const r = {
+      ...en,
+      principal: c.principal.name,
+      binding: c.binding,
+      bucket: en.bucket || "",
+      form_hna: en.formulary_hna,
+      rfq_hna_pc: en.rfq_hna != null && en.rfq_qty > 0 ? en.rfq_hna / en.rfq_qty : null,
+      sel_price: m?.price ?? null,
+      sel_total_cost: m?.total_cost ?? null,
+      sel_cost_impact: m?.cost_impact ?? null,
+      sel_cost_impact_pct: m?.cost_impact != null && en.po_annualized_value_ppn ? m.cost_impact / en.po_annualized_value_ppn : null,
+      sel_total_margin: m?.total_margin ?? null,
+      sel_margin_impact_po: m?.margin_impact_po ?? null,
+      sel_margin_impact_form: m?.margin_impact_form ?? null,
+      bench_pp: mk?.price_pp ?? null,
+      findings: findingsBy.get(en.id) || 0,
+      proceed_bak: en.proceed_bak === true ? "Ya" : "",
+      sbp: en.sbp == null ? "" : en.sbp ? "Ya" : "Tidak",
+      need_sbp: en.need_sbp == null ? "" : en.need_sbp ? "Ya" : "Tidak"
+    };
+    for (const y of years) {
+      const v = en.po_years?.[y];
+      const pack = en.po_unit_pcs || 1;
+      const mult = y === String(curYear) ? 12 / months : 1;
+      const qty = v ? v.qty * pack * mult : null;
+      r[`po_${y}_qty`] = qty;
+      r[`po_${y}_avg`] = v?.avg != null ? v.avg / pack * vat : null;
+      r[`po_${y}_value`] = v ? v.value * mult * vat : null;
+      r[`po_${y}_margin`] = qty != null && en.base_margin_price != null && v?.avg != null ? qty * (en.base_margin_price - v.avg / pack * vat) : null;
+    }
+    return r;
   });
-  logAudit(actingUser().email, "cycle.package", { cycle_id: c.id, rows: seen.size });
-  await sendWorkbook(res, wb, `Confirmation_${c.principal.name}.xlsx`);
+  const act = rows.filter((r) => r.item_status !== "Discontinue");
+  const sum2 = (k, from = act) => {
+    const v = from.map((r) => r[k]).filter((x) => x != null);
+    return v.length ? v.reduce((a, b) => a + b, 0) : null;
+  };
+  const scoped = act.filter((r) => r.sel_price != null);
+  const poCur = sum2(`po_${years[2]}_value`), po25 = sum2(`po_${years[1]}_value`), po24 = sum2(`po_${years[0]}_value`);
+  const growth = (a, b) => a != null && b ? a / b - 1 : null;
+  const poMarginTotal = scoped.length ? scoped.reduce((s, r) => s + (r.margin_pc_po != null && r.annual_pcs ? r.margin_pc_po * r.annual_pcs : 0), 0) : null;
+  const formMarginTotal = scoped.length ? scoped.reduce((s, r) => s + (r.margin_pc_formulary != null && r.annual_pcs ? r.margin_pc_formulary * r.annual_pcs : 0), 0) : null;
+  const costImpact = sum2("sel_cost_impact", scoped);
+  const miPo = sum2("sel_margin_impact_po", scoped), miForm = sum2("sel_margin_impact_form", scoped);
+  const poAnnual = act.reduce((s, r) => s + (r.po_annualized_value_ppn || 0), 0);
+  const bucket = (b) => act.filter((r) => String(r.bucket).toLowerCase() === b.toLowerCase()).length;
+  const summary = {
+    mode,
+    step: stepKey || (mode === "pre" ? "fb1" : "on"),
+    sku: scoped.length,
+    active: act.length,
+    po_year: years,
+    po_values: { [years[0]]: po24, [years[1]]: po25, [years[2]]: poCur },
+    growth_26_vs_25: growth(poCur, po25),
+    growth_26_vs_24: growth(poCur, po24),
+    po_value_year_ppn: poAnnual,
+    total_cost: sum2("sel_total_cost", scoped),
+    cost_impact: costImpact,
+    cost_impact_pct: costImpact != null && poAnnual ? costImpact / poAnnual : null,
+    total_margin: sum2("sel_total_margin", scoped),
+    margin_impact_po: miPo,
+    margin_impact_po_pct: miPo != null && poMarginTotal ? miPo / Math.abs(poMarginTotal) : null,
+    margin_impact_form: miForm,
+    margin_impact_form_pct: miForm != null && formMarginTotal ? miForm / Math.abs(formMarginTotal) : null,
+    bucket: { Consump: bucket("Consump"), Charge: bucket("Charge"), other: act.length - bucket("Consump") - bucket("Charge") }
+  };
+  return { summary, years, columns: analysisColumns(mode, years), rows };
+}
+app.get("/api/nego/cycles/:cid/analysis", (req, res) => {
+  const cid = Number(req.params.cid);
+  if (!cycleOf(cid)) return res.status(404).json({ error: "No such negotiation" });
+  const mode = req.query.mode === "post" ? "post" : "pre";
+  const stepKey = req.query.step ? String(req.query.step) : void 0;
+  const q = String(req.query.q || "").toLowerCase().trim();
+  const a = analysisFor(cid, mode, stepKey);
+  let rows = a.rows;
+  if (q) rows = rows.filter((r) => `${r.erp_code} ${r.item_name} ${r.brand}`.toLowerCase().includes(q));
+  const offset = Math.max(0, Number(req.query.offset || 0)), limit = Math.max(1, Math.min(500, Number(req.query.limit || 100)));
+  const keys = a.columns.map((c) => c.key);
+  res.json({ summary: a.summary, columns: a.columns, total: rows.length, offset, rows: rows.slice(offset, offset + limit).map((r) => ({ id: r.id, ...Object.fromEntries(keys.map((k) => [k, r[k] ?? null])) })) });
 });
+async function analysisWorkbook(cid, mode, stepKey) {
+  const a = analysisFor(cid, mode, stepKey);
+  const wb = new ExcelJS4.Workbook();
+  const ws = wb.addWorksheet(mode === "pre" ? "Pre-Nego" : "Post-Nego");
+  ws.addRow(a.columns.map((c) => c.group));
+  const h = ws.addRow(a.columns.map((c) => c.label));
+  h.font = { bold: true };
+  for (const r of a.rows) ws.addRow(a.columns.map((c) => r[c.key] ?? null));
+  a.columns.forEach((c, i) => {
+    const col = ws.getColumn(i + 1);
+    col.width = c.key === "item_name" ? 40 : 14;
+    col.numFmt = c.kind === "pct" ? "0.00%" : c.kind === "money" ? "#,##0" : c.kind === "price" ? "#,##0.00" : "General";
+  });
+  ws.views = [{ state: "frozen", xSplit: 2, ySplit: 2 }];
+  return wb;
+}
+app.get("/api/nego/cycles/:cid/analysis.xlsx", async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const mode = req.query.mode === "post" ? "post" : "pre";
+  await sendWorkbook(res, await analysisWorkbook(cid, mode, req.query.step ? String(req.query.step) : void 0), `Analysis_${mode}_${c.principal.name}.xlsx`);
+});
+var REPORT_COLS = [
+  { key: "principal", label: "Principal", group: "", kind: "text" },
+  { key: "category", label: "Kategori", group: "", kind: "text" },
+  { key: "step", label: "Step", group: "", kind: "text" },
+  { key: "sku", label: "SKU", group: "", kind: "num" },
+  { key: "bucket", label: "Bucket", group: "", kind: "text" },
+  { key: "binding", label: "Binding", group: "", kind: "text" },
+  { key: "po_prev", label: "PO tahun lalu (+PPN)", group: "", kind: "money" },
+  { key: "po_cur", label: "PO tahun ini setahun (+PPN)", group: "", kind: "money" },
+  { key: "growth", label: "Growth", group: "", kind: "pct" },
+  { key: "total_cost", label: "Total Cost", group: "", kind: "money" },
+  { key: "cost_impact", label: "Cost Impact (Rp)", group: "", kind: "money" },
+  { key: "cost_impact_pct", label: "Cost Impact (%)", group: "", kind: "pct" },
+  { key: "total_margin", label: "Total Margin", group: "", kind: "money" },
+  { key: "mi_po", label: "Margin Impact vs PO (Rp)", group: "", kind: "money" },
+  { key: "mi_po_pct", label: "Margin Impact vs PO (%)", group: "", kind: "pct" },
+  { key: "mi_form", label: "Margin Impact vs Form (Rp)", group: "", kind: "money" },
+  { key: "mi_form_pct", label: "Margin Impact vs Form (%)", group: "", kind: "pct" },
+  { key: "escalation", label: "Eskalasi", group: "", kind: "text" },
+  { key: "mou_end", label: "MOU berakhir", group: "", kind: "text" }
+];
+function reportRows(mode, f) {
+  const out = [];
+  for (const c of cyclesList) {
+    if (f.status && f.status !== "all" && c.status !== f.status) continue;
+    if (f.category && f.category !== "all" && (c.category || categoriesOf(c.principal)[0]) !== f.category) continue;
+    if (f.period && c.period_id !== f.period) continue;
+    const a = analysisFor(c.id, mode);
+    const s = a.summary;
+    const esc = computeEscalation(c.id);
+    out.push({
+      cycle_id: c.id,
+      principal: c.principal.name,
+      category: c.category || categoriesOf(c.principal)[0],
+      step: STEP_LABEL[c.current_step] || c.current_step,
+      sku: s.sku,
+      bucket: `Consump ${s.bucket.Consump} / Charge ${s.bucket.Charge}`,
+      binding: c.binding,
+      po_prev: s.po_values[s.po_year[1]],
+      po_cur: s.po_values[s.po_year[2]],
+      growth: s.growth_26_vs_25,
+      total_cost: s.total_cost,
+      cost_impact: s.cost_impact,
+      cost_impact_pct: s.cost_impact_pct,
+      total_margin: s.total_margin,
+      mi_po: s.margin_impact_po,
+      mi_po_pct: s.margin_impact_po_pct,
+      mi_form: s.margin_impact_form,
+      mi_form_pct: s.margin_impact_form_pct,
+      escalation: esc.status === "needed" ? "Perlu persetujuan" : esc.status === "approved" ? "Disetujui" : esc.status === "ok" ? "Tidak perlu" : "-",
+      mou_end: c.principal.mou_end || ""
+    });
+  }
+  return out;
+}
+app.get("/api/admin/report", (req, res) => {
+  const f = { status: String(req.query.status || "all"), category: String(req.query.category || "all"), period: req.query.period ? Number(req.query.period) : void 0 };
+  res.json({ columns: REPORT_COLS, fb1: reportRows("pre", f), fin: reportRows("post", f), periods: periodsList.map((p2) => ({ id: p2.id, name: p2.name })) });
+});
+app.get("/api/admin/report.xlsx", async (req, res) => {
+  const f = { status: String(req.query.status || "all"), category: String(req.query.category || "all"), period: req.query.period ? Number(req.query.period) : void 0 };
+  const wb = new ExcelJS4.Workbook();
+  for (const [name, mode] of [["Hasil FB1", "pre"], ["Hasil FIN", "post"]]) {
+    const ws = wb.addWorksheet(name);
+    ws.addRow(REPORT_COLS.map((c) => c.label)).font = { bold: true };
+    for (const r of reportRows(mode, f)) ws.addRow(REPORT_COLS.map((c) => r[c.key] ?? null));
+    REPORT_COLS.forEach((c, i) => {
+      const col = ws.getColumn(i + 1);
+      col.width = c.key === "principal" ? 30 : 16;
+      col.numFmt = c.kind === "pct" ? "0.00%" : c.kind === "money" ? "#,##0" : "General";
+    });
+  }
+  await sendWorkbook(res, wb, "Report_Negotiation.xlsx");
+});
+function packageRows(cid) {
+  const c = cycleOf(cid);
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const items = (cycleItemsMap.get(cid) || []).filter((i) => i.item_status !== "Discontinue" && i.proceed_bak === true);
+  const seen = /* @__PURE__ */ new Set();
+  const rows = [];
+  const sorted = items.map((i) => enrichCycleItem(i, ppn, c)).sort((a, b) => String(a.item_name).localeCompare(String(b.item_name)));
+  for (const i of sorted) {
+    if (seen.has(i.erp_code) || i.on_disc == null || i.on_unit_price == null) continue;
+    seen.add(i.erp_code);
+    const n2d = c.binding === "Nett to Disc";
+    const uom = n2d ? i.form_conv || i.po_unit_pcs : i.rfq_qty;
+    const hna = n2d ? i.formulary_hna ?? (i.po_avg_price ?? 0) : i.rfq_hna;
+    rows.push(confRow(rows.length + 1, i.item_name, i.erp_code, uom || 1, "PCS", hna, i.on_disc, ppn));
+  }
+  return rows;
+}
+function packageMeta(cid) {
+  const c = cycleOf(cid);
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
+  const esc = computeEscalation(cid);
+  return {
+    principal: c.principal.name,
+    distributor: c.principal.distributor || "",
+    category: c.category || categoriesOf(c.principal)[0],
+    binding: c.binding,
+    scheme: c.final_scheme || (c.binding === "Nett" ? "Nett" : "Disc"),
+    contract_start: c.contract_start,
+    contract_end: c.contract_end,
+    delivery_fee: String(c.delivery_fee || "").replace(/^Delivery Fee:\s*/i, ""),
+    ppn,
+    meeting_at: c.meeting?.at || null,
+    attendees_siloam: c.meeting?.attendees_siloam,
+    attendees_principal: c.meeting?.attendees_principal,
+    notes: c.meeting?.notes,
+    followups: c.meeting?.followups || [],
+    sku_count: 0,
+    po_value_year: esc.po_value,
+    cost_impact: esc.impact
+  };
+}
+var docTemplates = {};
+app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid);
+  meta.sku_count = rows.length;
+  logCycle(cid, "package.excel", { rows: rows.length });
+  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}.xlsx`);
+});
+async function sendDocx(res, buf, filename) {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^\w.\- ]/g, "_")}"`);
+  res.end(buf);
+}
+app.get("/api/admin/nego/cycles/:cid/bak.docx", async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid);
+  meta.sku_count = rows.length;
+  const tpl = docTemplates[meta.scheme === "Nett" ? "bak_nett" : "bak_disc"];
+  try {
+    const buf = tpl ? await fillDocxTemplate(tpl.data, meta, rows) : await buildBakDocx(meta, rows);
+    logCycle(cid, "package.bak", { scheme: meta.scheme, template: tpl?.name || "built-in" });
+    await sendDocx(res, buf, `BAK_${meta.scheme}_${c.principal.name}.docx`);
+  } catch (e) {
+    res.status(500).json({ error: `Gagal membuat BAK: ${e.message}` });
+  }
+});
+app.get("/api/admin/nego/cycles/:cid/pks.docx", async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid);
+  meta.sku_count = rows.length;
+  const tpl = docTemplates.pks;
+  try {
+    const buf = tpl ? await fillDocxTemplate(tpl.data, meta, rows) : await buildPksDocx(meta, rows);
+    logCycle(cid, "package.pks", { template: tpl?.name || "built-in" });
+    await sendDocx(res, buf, `PKS_${c.principal.name}.docx`);
+  } catch (e) {
+    res.status(500).json({ error: `Gagal membuat PKS: ${e.message}` });
+  }
+});
+var DOC_TEMPLATE_KEYS = { bak_nett: "BAK template - Nett", bak_disc: "BAK template - Disc (Disc and Nett to Disc)", pks: "PKS template" };
+app.get("/api/admin/doc-templates", (_req, res) => {
+  res.json({ templates: Object.entries(DOC_TEMPLATE_KEYS).map(([key, label]) => ({ key, label, file: docTemplates[key] ? { name: docTemplates[key].name, at: docTemplates[key].at, by: docTemplates[key].by } : null })), placeholders: ["principal", "distributor", "kategori", "binding", "skema", "tanggal", "kontrak_mulai", "kontrak_selesai", "biaya_kirim", "jumlah_sku", "nilai_po_setahun", "cost_impact", "tanggal_meeting", "peserta_siloam", "peserta_principal", "catatan", "ppn", "tabel_harga"] });
+});
+app.post("/api/admin/doc-templates/:key", withFiles(fileUpload.single("file")), (req, res) => {
+  const key = String(req.params.key);
+  if (!DOC_TEMPLATE_KEYS[key]) return res.status(404).json({ error: "Template tidak dikenal" });
+  const file = req.file;
+  if (!file || !/\.docx$/i.test(file.originalname) || file.buffer.slice(0, 2).toString("latin1") !== "PK") return res.status(400).json({ error: "Upload file Word (.docx)." });
+  docTemplates[key] = { name: file.originalname, data: file.buffer, at: nowIso(), by: actingUser().email };
+  logAudit(actingUser().email, "doc.template", { key, file: file.originalname });
+  res.json({ ok: true, key });
+});
+app.delete("/api/admin/doc-templates/:key", (req, res) => {
+  delete docTemplates[String(req.params.key)];
+  res.json({ ok: true });
+});
+var DOC_TYPES = [
+  { key: "nib", id: "Nomor Induk Berusaha (NIB)", en: "Business Identification Number (NIB)", required: true },
+  { key: "npwp", id: "NPWP Perusahaan", en: "Company Tax Number (NPWP)", required: true },
+  { key: "pakta_integritas", id: "Pakta Integritas Siloam", en: "Siloam Integrity Pact", required: true },
+  { key: "distributor_letter", id: "Surat Penunjukan Distributor Resmi", en: "Official Distributor Appointment Letter", required: false },
+  { key: "cdob", id: "Sertifikat Cara Distribusi yang Baik (CDOB untuk obat, CDAKB untuk alkes)", en: "Good Distribution Practice Certificate (CDOB for drugs, CDAKB for devices)", required: false },
+  { key: "dc_letter", id: "Surat DC atau dokumen lain untuk SKU Discontinue", en: "DC letter or other document for Discontinue SKUs", required: false, multiple: true }
+];
+var REQUIRED_DOCS = DOC_TYPES.filter((d) => d.required).map((d) => d.key);
+var DOC_MIME = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png" };
+function sniffDoc(buf) {
+  if (buf.length > 4 && buf.slice(0, 4).toString("latin1") === "%PDF") return "pdf";
+  if (buf.length > 3 && buf[0] === 255 && buf[1] === 216 && buf[2] === 255) return "jpg";
+  if (buf.length > 8 && buf.slice(0, 8).toString("hex") === "89504e470d0a1a0a") return "png";
+  return null;
+}
+var publicDocs = (docs) => docs.map(({ data, ...rest }) => rest);
+function docState(cid) {
+  const docs = cycleDocumentsMap.get(cid) || [];
+  const have = new Set(docs.map((d) => d.doc_type));
+  return { types: DOC_TYPES.map((dt) => ({ ...dt, uploaded: have.has(dt.key) })), documents: publicDocs(docs), missing_required: REQUIRED_DOCS.filter((k) => !have.has(k)), allowed: "PDF, JPG, PNG (maks 10 MB)" };
+}
 app.get("/api/p/documents", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
-  const { cycle } = resolved;
-  const docs = cycleDocumentsMap.get(cycle.id) || [];
-  const have = new Set(docs.map((d) => d.doc_type));
-  const docTypes = [
-    { key: "nib", id: "Nomor Induk Berusaha (NIB)", en: "Business Identification Number (NIB)", required: true },
-    { key: "npwp", id: "NPWP Perusahaan", en: "Company Tax Number (NPWP)", required: true },
-    { key: "pakta_integritas", id: "Pakta Integritas Siloam", en: "Siloam Integrity Pact", required: true },
-    { key: "distributor_letter", id: "Surat Penunjukan Distributor Resmi", en: "Official Distributor Appointment Letter", required: false },
-    { key: "cdob", id: "Sertifikat Distribusi Farmasi (CDOB/CPAKB)", en: "Good Distribution Practice Certificate", required: false }
-  ];
-  const requiredKeys = ["nib", "npwp", "pakta_integritas"];
-  res.json({
-    types: docTypes.map((dt) => ({ ...dt, uploaded: have.has(dt.key) })),
-    documents: docs,
-    missing_required: requiredKeys.filter((k) => !have.has(k))
-  });
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  res.json(docState(resolved.cycle.id));
 });
-app.post("/api/p/documents", (req, res) => {
+app.post("/api/p/documents", withFiles(fileUpload.single("file")), (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle } = resolved;
-  const docs = cycleDocumentsMap.get(cycle.id) || [];
-  const docType = req.body?.doc_type || "nib";
-  const newDoc = {
-    id: docs.length + 1,
-    doc_type: docType,
-    filename: `${docType}_document.pdf`,
-    size: 245e3,
-    uploaded_at: nowIso(),
-    uploaded_by: `principal:${cycle.principal.name}`
-  };
-  docs.push(newDoc);
+  const file = req.file;
+  const docType = String(req.body?.doc_type || "");
+  const dt = DOC_TYPES.find((d) => d.key === docType);
+  if (!dt) return res.status(400).json({ error: "Jenis dokumen tidak dikenal." });
+  if (!file) return res.status(400).json({ error: "Pilih file dulu." });
+  if (file.size > 10 * 1024 * 1024) return res.status(400).json({ error: "File terlalu besar (maks 10 MB)." });
+  const ext = (file.originalname.split(".").pop() || "").toLowerCase();
+  const real = sniffDoc(file.buffer);
+  if (!DOC_MIME[ext] || !real || DOC_MIME[ext] !== DOC_MIME[real]) {
+    return res.status(400).json({ error: "File ditolak. Hanya PDF, JPG, atau PNG yang isinya sesuai dengan nama filenya." });
+  }
+  let docs = cycleDocumentsMap.get(cycle.id) || [];
+  if (!dt.multiple) docs = docs.filter((d) => d.doc_type !== docType);
+  const id = Math.max(0, ...(cycleDocumentsMap.get(cycle.id) || []).map((d) => d.id)) + 1;
+  docs.push({ id, doc_type: docType, label: dt.id, filename: file.originalname.replace(/[^\w.\- ()]/g, "_").slice(0, 120), mime: DOC_MIME[real], size: file.size, uploaded_at: nowIso(), uploaded_by: `principal:${cycle.principal.name}`, data: file.buffer });
   cycleDocumentsMap.set(cycle.id, docs);
-  const have = new Set(docs.map((d) => d.doc_type));
-  const docTypes = [
-    { key: "nib", id: "Nomor Induk Berusaha (NIB)", en: "Business Identification Number (NIB)", required: true },
-    { key: "npwp", id: "NPWP Perusahaan", en: "Company Tax Number (NPWP)", required: true },
-    { key: "pakta_integritas", id: "Pakta Integritas Siloam", en: "Siloam Integrity Pact", required: true },
-    { key: "distributor_letter", id: "Surat Penunjukan Distributor Resmi", en: "Official Distributor Appointment Letter", required: false },
-    { key: "cdob", id: "Sertifikat Distribusi Farmasi (CDOB/CPAKB)", en: "Good Distribution Practice Certificate", required: false }
-  ];
-  const requiredKeys = ["nib", "npwp", "pakta_integritas"];
-  res.json({
-    types: docTypes.map((dt) => ({ ...dt, uploaded: have.has(dt.key) })),
-    documents: docs,
-    missing_required: requiredKeys.filter((k) => !have.has(k))
-  });
+  logCycle(cycle.id, "principal.document", { type: docType, file: file.originalname }, `principal:${cycle.principal.name}`);
+  res.json(docState(cycle.id));
 });
 app.delete("/api/p/documents/:did", (req, res) => {
   const resolved = resolvePrincipalCycle(req);
-  if (!resolved) {
-    return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
-  }
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
   const { cycle } = resolved;
+  if (portalLocked(cycle, resolved.step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci." });
   const did = Number(req.params.did);
-  let docs = cycleDocumentsMap.get(cycle.id) || [];
-  docs = docs.filter((d) => d.id !== did);
-  cycleDocumentsMap.set(cycle.id, docs);
-  const have = new Set(docs.map((d) => d.doc_type));
-  const docTypes = [
-    { key: "nib", id: "Nomor Induk Berusaha (NIB)", en: "Business Identification Number (NIB)", required: true },
-    { key: "npwp", id: "NPWP Perusahaan", en: "Company Tax Number (NPWP)", required: true },
-    { key: "pakta_integritas", id: "Pakta Integritas Siloam", en: "Siloam Integrity Pact", required: true },
-    { key: "distributor_letter", id: "Surat Penunjukan Distributor Resmi", en: "Official Distributor Appointment Letter", required: false },
-    { key: "cdob", id: "Sertifikat Distribusi Farmasi (CDOB/CPAKB)", en: "Good Distribution Practice Certificate", required: false }
-  ];
-  const requiredKeys = ["nib", "npwp", "pakta_integritas"];
-  res.json({
-    types: docTypes.map((dt) => ({ ...dt, uploaded: have.has(dt.key) })),
-    documents: docs,
-    missing_required: requiredKeys.filter((k) => !have.has(k))
-  });
+  cycleDocumentsMap.set(cycle.id, (cycleDocumentsMap.get(cycle.id) || []).filter((d) => d.id !== did));
+  res.json(docState(cycle.id));
+});
+app.get("/api/admin/nego/cycles/:cid/documents", (req, res) => {
+  const cid = Number(req.params.cid);
+  res.json({ documents: publicDocs(cycleDocumentsMap.get(cid) || []).map((d) => ({ ...d, url: `/api/admin/nego/cycles/${cid}/documents/${d.id}` })), required: REQUIRED_DOCS });
+});
+app.get("/api/admin/nego/cycles/:cid/documents/:did", (req, res) => {
+  if (actingUser().role !== "admin") return res.status(403).json({ error: "Hanya admin yang bisa membuka dokumen principal." });
+  const d = (cycleDocumentsMap.get(Number(req.params.cid)) || []).find((x) => x.id === Number(req.params.did));
+  if (!d || !d.data) return res.status(404).json({ error: "Dokumen tidak ditemukan." });
+  res.setHeader("Content-Type", d.mime || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${String(d.filename).replace(/"/g, "")}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.end(d.data);
 });
 var VENDOR_BLOCKED = /benchmark|target|baseline|margin|kompetitor|competitor|pesaing|formularium|formulary|harga\s+(acuan|kami|siloam|mou|po)\b|(our|siloam'?s?)\s+(price|mou|po)\b|principal\s+lain|vendor\s+lain|other\s+(principals?|vendors?|suppliers?)|ambang|threshold|findings?|temuan|cost\s*impact|saran\s+counter|counter.?offer\s+suggest|system\s*prompt|abaikan\s+instruksi|ignore\s+(all\s+)?(previous\s+)?instructions/i;
 function vendorChatFallback(msg, id, ctx) {
   const m = msg.toLowerCase();
   const pick2 = (a, b) => id ? a : b;
-  if (/(diskon|disc)/.test(m)) return pick2("Isi diskon dalam persen, misalnya 15%, atau desimal 0 sampai 1 (0,15). Angka 15 tanpa tanda % tidak diterima karena dianggap 1500%.", "Enter the discount as a percentage, e.g. 15%, or a decimal between 0 and 1 (0.15). A bare 15 without % is rejected because it reads as 1500%.");
+  if (/(diskon|disc)/.test(m)) return pick2("Isi diskon sebagai angka 0 sampai 100, misalnya 15 untuk 15% atau 27,5 untuk 27,5%. Tanda % muncul otomatis.", "Enter the discount as a percentage, e.g. 15%, or a decimal between 0 and 1 (0.15). A bare 15 without % is rejected because it reads as 1500%.");
   if (/(hna|harga)/.test(m)) return pick2("Isi HNA per kemasan sebelum PPN, lalu isi per kemasan (pcs). Jika HNA tampak berbeda jauh dari data kami, Anda akan diminta memeriksa kembali dan mengonfirmasi.", "Enter the HNA per pack before PPN, then the pieces per pack. If the HNA looks very different from our records you'll be asked to re-check and confirm.");
   if (/(uom|kemasan|satuan|pack|isi)/.test(m)) return pick2("Isi per kemasan adalah jumlah pcs dalam satu kemasan yang Anda tawarkan. Jika berbeda dengan data kami, muncul peringatan agar Anda memeriksa ulang.", "Pieces per pack is how many pieces are in the pack you quote. If it differs from our records a warning asks you to re-check.");
-  if (/(kunci|lock|ubah|edit|revisi|change)/.test(m)) return ctx.locked ? pick2("Isian ini sudah terkirim dan dikunci. Hubungi tim pengadaan jika ada yang perlu diubah.", "This form was sent and is locked. Contact the procurement team if something must change.") : pick2("Isian bisa diubah sampai Anda menekan Kirim. Setelah terkirim, formulir dikunci.", "You can edit until you press Send. After that the form is locked.");
+  if (/(kunci|lock|ubah|edit|revisi|change)/.test(m)) return ctx.locked ? pick2("Isian ini sudah terkirim dan dikunci. Jika ada yang perlu diubah, tulis komentar pada SKU yang bersangkutan sebagai pengajuan koreksi.", "This form was sent and is locked. If something must change, leave a comment on that SKU as a correction request.") : pick2("Isian bisa diubah sampai Anda menekan Kirim. Setelah terkirim, formulir dikunci.", "You can edit until you press Send. After that the form is locked.");
   if (/(kirim|submit|send)/.test(m)) return ctx.left > 0 ? pick2(`Masih ada ${ctx.left} SKU yang perlu dilengkapi atau diperbaiki sebelum bisa dikirim.`, `${ctx.left} SKUs still need to be completed or fixed before you can send.`) : pick2("Jika semua SKU sudah lengkap, tekan Kirim Tanggapan, periksa ringkasan, lalu kirim.", "When every SKU is complete, press Send Response, review the summary, then send.");
-  if (/(brand|ref|katalog|catalog|status|aktif|active)/.test(m)) return pick2("Pilih status Aktif atau Tidak dijual lagi, lalu isi brand dan nomor katalog (REF). Semuanya ada di satu formulir RFQ.", "Choose Active or Discontinued, then fill in the brand and catalogue number (REF). It is all in the one RFQ form.");
+  if (/(brand|ref|katalog|catalog|status|aktif|active)/.test(m)) return pick2("Pilih status Active atau Discontinue, lalu isi brand dan nomor katalog (REF), atau zat aktif untuk obat. Semuanya ada di satu formulir RFQ.", "Choose Active or Discontinue, then fill in the brand and catalogue number (REF), or the active ingredient for drugs. It is all in the one RFQ form.");
   return pick2("Saya bisa membantu mengisi RFQ: format diskon, HNA, isi per kemasan, status item, dan cara mengirim. Saya tidak dapat membahas data internal Siloam.", "I can help with the RFQ: discount format, HNA, pieces per pack, item status and how to send. I can't discuss Siloam's internal data.");
 }
 app.post("/api/p/chat", async (req, res) => {
@@ -4521,22 +5882,30 @@ app.post("/api/p/chat", async (req, res) => {
   const id = req.body?.lang !== "en";
   if (!message) return res.status(400).json({ error: "Message is required" });
   const lock = portalLocked(cycle, step);
-  const left = (cycleItemsMap.get(cycle.id) || []).filter((it) => formatPrincipalItem(it, step).outstanding.length > 0).length;
+  const left = (cycleItemsMap.get(cycle.id) || []).filter((it) => formatPrincipalItem(it, step, cycle).outstanding.length > 0).length;
   if (VENDOR_BLOCKED.test(message)) {
     return res.json({ reply: id ? "Maaf, informasi itu bersifat internal Siloam dan tidak dapat saya bagikan. Saya bisa membantu cara mengisi RFQ Anda." : "Sorry, that is internal Siloam information and I can't share it. I can help you fill in your RFQ.", refused: true });
   }
   const ctx = { locked: lock.locked, step, left };
+  if (/(cek|periksa|check|kurang|sebelum.{0,12}kirim|before.{0,12}send|review|lengkap)/i.test(message)) {
+    const list = (cycleItemsMap.get(cycle.id) || []).map((it) => formatPrincipalItem(it, step, cycle)).filter((i) => i.outstanding.length > 0);
+    if (!list.length) return res.json({ reply: id ? "Semua SKU sudah lengkap dan tidak ada yang perlu dicek. Anda bisa menekan Kirim." : "Every SKU is complete and nothing needs checking. You can press Send.", grounded: true });
+    const lines = list.slice(0, 12).map((i) => `- ${i.erp_code} ${i.item_name}: ${i.issues.filter((x) => i.outstanding.includes(x.code)).map((x) => id ? x.id : x.en).join(" ")}`);
+    return res.json({ reply: `${id ? `Ada ${list.length} SKU yang masih perlu dilengkapi atau dicek:` : `${list.length} SKUs still need to be completed or checked:`}
+${lines.join("\n")}${list.length > 12 ? `
+... ${id ? "dan" : "and"} ${list.length - 12} ${id ? "SKU lain" : "more"}` : ""}`, grounded: true });
+  }
   if (!process.env.GEMINI_API_KEY) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
   try {
     const history = Array.isArray(req.body?.history) ? req.body.history.slice(-4) : [];
     const contents = history.filter((h) => h?.role && h?.text).map((h) => ({ role: h.role === "assistant" || h.role === "model" ? "model" : "user", parts: [{ text: String(h.text).slice(0, 500) }] }));
     contents.push({ role: "user", parts: [{ text: message }] });
     const systemInstruction = `You are the assistant inside the Siloam vendor portal. Reply in ${id ? "Indonesian" : "English"}, politely, in at most 3 short sentences.
-Help the vendor fill in the RFQ form: status (Active/Discontinued), brand, catalogue number (REF), HNA per pack before PPN, pieces per pack, discount as a percentage such as 15% or a decimal 0 to 1 (a bare 15 is invalid), the reason for a price increase, and how to send. Sending is always done by the vendor.
+Help the vendor fill in the RFQ form: status (Active/Discontinue), brand, catalogue number (REF), HNA per pack before PPN, pieces per pack, discount as a number from 0 to 100 such as 15, the reason for a price increase, and how to send. Sending is always done by the vendor.
 You know nothing about Siloam's internal prices, contracts, benchmarks, margins, targets or other vendors. If asked, say it is internal and cannot be shared. Never guess such figures.
 Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)" : "open"}; ${left} SKUs still need attention.`;
-    const call = ai.models.generateContent({ model: "gemini-3.1-flash-lite", contents, config: { systemInstruction, temperature: 0.2, maxOutputTokens: 250 } });
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4e3));
+    const call = ai.models.generateContent({ model: "gemini-3.8-flash", contents, config: { systemInstruction, maxOutputTokens: 400 } });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2e4));
     const r = await Promise.race([call, timeout]);
     const reply = String(r.text || "").trim();
     if (!reply || VENDOR_BLOCKED.test(reply)) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
@@ -4754,8 +6123,8 @@ async function fetchScienceDrugProfile(itemName, genericName) {
           });
         }
         if (Array.isArray(r.packaging)) {
-          r.packaging.slice(0, 2).forEach((p) => {
-            if (p.description) pkgs.add(p.description);
+          r.packaging.slice(0, 2).forEach((p2) => {
+            if (p2.description) pkgs.add(p2.description);
           });
         }
       }

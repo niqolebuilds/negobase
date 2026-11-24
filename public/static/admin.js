@@ -9,10 +9,10 @@ function adminEnter(sub) {
   const nego = shell.user && shell.user.role === "negotiator";  // read-only master data, nothing else
   if (nego) sub = "master";
   $("admin-subtabs").hidden = nego;
-  adminState.sub = ["periods", "principals", "data", "master", "documents", "settings", "users", "activity"].includes(sub) ? sub : "periods";
+  adminState.sub = ["periods", "principals", "report", "master", "documents", "settings", "users", "activity"].includes(sub) ? sub : "periods";
   document.querySelectorAll("#admin-subtabs a").forEach((a) => a.classList.toggle("on", a.dataset.sub === adminState.sub));
   const body = clear($("admin-body"));
-  return ({ periods: adminPeriods, principals: adminPrincipals, data: adminData, master: adminMaster, documents: adminDocs, settings: adminSettings, users: adminUsers, activity: adminActivity })[adminState.sub](body);
+  return ({ periods: adminPeriods, principals: adminPrincipals, report: adminReport, master: adminMaster, documents: adminDocs, settings: adminSettings, users: adminUsers, activity: adminActivity })[adminState.sub](body);
 }
 
 function card(title, sub, ...kids) {
@@ -32,10 +32,10 @@ async function adminPeriods(body) {
 
   body.append(
     card("Negotiation Periods & Central Data Hub",
-      "Manage annual and mid-year negotiation cycles (e.g. CnC 2026 End-Year, Drugs 2026 Mid-Year). Upload PO Export, Master Formulary, Master SKU, and SKU-Principal Tagging once per period to drive all principal negotiations.",
+      "Manage negotiation periods (e.g. CnC 2026 End-Year, Drugs 2026 Mid-Year). One period is active per category, so Drugs and CnC run at the same time. Upload the PO export, formulary, SKU tagging and market benchmark once per period. Master SKU lives in Master data.",
       statusBox),
-    card("Active Period Data Hub", "Centralized upload of master datasets. Once uploaded, items and benchmarks are linked across all negotiations for this period.", uploadGridBox),
-    card("All Negotiation Periods", "Switch active periods or review past negotiation phases.", periodListBox),
+    card("Active Period Data Hubs", "Centralized upload of period data. After each upload you see how many rows were saved, which were rejected and why, and what was repaired.", uploadGridBox),
+    card("All Negotiation Periods", "Activating a period only changes the active period of its own category.", periodListBox),
     card("Create New Negotiation Period", "Start a new negotiation cycle with custom category and running months.", newPeriodFormBox)
   );
 
@@ -48,48 +48,36 @@ async function adminPeriods(body) {
   }
 
   const periods = pData.periods || [];
-  const activePeriod = periods.find((p) => p.active) || periods[0];
-
-  // Active status box
-  if (activePeriod) {
-    clear(statusBox).append(
-      el("div", { class: "preview ok", style: "display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;" },
+  // One active period per category: Drugs and CnC run side by side, each with its own data hub.
+  const actives = periods.filter((p) => p.active);
+  const UPLOAD_CARDS = [
+    { kind: "po_export", label: "PO Export (raw PO lines)", desc: "Raw PO lines. Qty, value, average price and yearly figures per item are calculated by the app. Units and codes are tidied automatically.", cols: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital", count: (p) => p.po_rows_count },
+    { kind: "formulary", label: "Formulary (Siloam file)", desc: "The Siloam formulary: HNA, conversion, discount, Price, Base Price, HNA for SBP and type (CnC Reguler, CnC BPJS, Drugs). RFQ prices are compared with the Nett Price.", cols: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA, Konversi, Disc, Price, Base Price, HNA for SBP, Jenis", count: (p) => p.formulary_count },
+    { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Which principal supplies each SKU. This is the only place items are tagged to a principal.", cols: "ERP Code, Principal", count: (p) => p.sku_tagging_count },
+    { kind: "benchmark", label: "Market benchmark (once per period)", desc: "Competitor prices from Siloam's own price file, with the source link. Used in the item table and the counter-offer plan.", cols: "ERP Code, Source, Price/PCS (incl. PPN), Link", count: (p) => p.benchmark_count },
+  ];
+  clear(statusBox);
+  clear(uploadGridBox);
+  if (!actives.length) clear(statusBox).append(el("p", { class: "muted", text: "No active period set. Select or create one below." }));
+  for (const activePeriod of actives) {
+    statusBox.append(
+      el("div", { class: "preview ok", style: "display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px;" },
         el("div", {},
-          el("h3", { text: `Active Period: ${activePeriod.name}` }),
-          el("p", { class: "small muted", text: `Category: ${activePeriod.category} · Running months: ${activePeriod.months_elapsed} months · Created: ${fmtDate(String(activePeriod.created_at).slice(0, 10))}` })),
-        el("div", { style: "display: flex; gap: 8px; flex-wrap: wrap;" },
-          el("a", { class: "act secondary", href: "#admin/principals", text: "Principals: add or import →" })
-        )
-      )
-    );
-
-    // Upload Grid Box: 4 centralized upload cards
-    clear(uploadGridBox);
-    const grid = el("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; margin-top: 14px; align-items: stretch;" });
-    const UPLOAD_CARDS = [
-      { kind: "po_export", label: "PO Export (raw PO lines)", desc: "Raw PO lines. Qty, value, average price and annualized figures per item are calculated by the app.", cols: "Vendor Name, Item Number, Quantity, Unit Price, Line Amount, Purch Unit, PO Date, Hospital", count: activePeriod.po_rows_count },
-      { kind: "formulary", label: "Formulary", desc: "Formulary items with pack unit and (optional) formulary HNA.", cols: "Kode Barang, Nama Barang, Principal, Merk, Status, Satuan, HNA", count: activePeriod.formulary_count },
-      { kind: "sku_master", label: "Master SKU", desc: "SKU master: names, generic, brand, REF and unit.", cols: "ERP Code, Item Name, Generic Name, Brand, Catalog No. (REF), UOM", count: activePeriod.sku_master_count },
-      { kind: "sku_tagging", label: "SKU - Principal Tagging", desc: "Which principal supplies each SKU. Maps ERP item codes to their principal supplier to drive negotiations.", cols: "ERP Code, Principal", count: activePeriod.sku_tagging_count },
-    ];
-
+          el("h3", { text: `Active ${activePeriod.category} period: ${activePeriod.name}` }),
+          el("p", { class: "small muted", text: `Running months: ${activePeriod.months_elapsed} · Created: ${fmtDate(String(activePeriod.created_at).slice(0, 10))} · Principals of this category read this period` })),
+        el("a", { class: "act secondary", href: "#admin/principals", text: "Principals: add or import →" })));
+    uploadGridBox.append(el("h3", { style: "margin: 18px 0 4px", text: `${activePeriod.category} · ${activePeriod.name}` }));
+    const grid = el("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; margin-top: 8px; align-items: stretch;" });
     UPLOAD_CARDS.forEach((c) => {
       const finput = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only" });
       const info = (activePeriod.files || {})[c.kind];
+      const n = c.count(activePeriod);
       const statusSpan = el("div", { class: "small", style: "min-height: 52px; display: flex; flex-direction: column; justify-content: flex-start; gap: 4px; margin-top: 6px;" },
-        c.count ? el("span", { class: "zone good", text: `${num(c.count)} rows loaded ✓` }) : el("span", { class: "zone warn", text: "Not uploaded yet" }),
-        info ? el("div", { class: "muted", style: "font-size: 11px; line-height: 1.35; color: #64748b; word-break: break-word;", text: `${info.name} · ${new Date(info.at).toLocaleString("en-GB")} · ${info.by}` }) : null
-      );
+        n ? el("span", { class: "zone good", text: `${num(n)} rows loaded ✓` }) : el("span", { class: "zone warn", text: "Not uploaded yet" }),
+        info ? el("div", { class: "muted", style: "font-size: 11px; line-height: 1.35; word-break: break-word;", text: `${info.name} · ${new Date(info.at).toLocaleString("en-GB")} · ${info.by}` }) : null,
+        info ? el("button", { type: "button", class: "act ghost small-btn", text: "Lihat hasil upload", onclick: async () => { try { showReport(c.label, await api(`/api/admin/periods/${activePeriod.id}/report/${c.kind}`)); } catch (e) { toast(e.message); } } }) : null);
       const zone = dropZone(finput, `Upload ${c.label}`);
-      zone.style.minHeight = "76px";
-      zone.style.display = "flex";
-      zone.style.flexDirection = "column";
-      zone.style.justifyContent = "center";
-      zone.style.alignItems = "center";
-      zone.style.textAlign = "center";
-      zone.style.padding = "16px 12px";
-      zone.style.boxSizing = "border-box";
-
+      zone.style.cssText += "min-height:76px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:16px 12px;box-sizing:border-box;";
       finput.addEventListener("change", async () => {
         if (!finput.files.length) return;
         const fd = new FormData();
@@ -98,37 +86,22 @@ async function adminPeriods(body) {
         statusSpan.textContent = "Uploading & reading…";
         try {
           const res = await upload(`/api/admin/periods/${activePeriod.id}/upload`, fd);
-          toast(`${c.label}: ${res.rows} rows loaded${res.skipped ? `, ${res.skipped} skipped` : ""}`);
-          adminEnter("periods");
+          toast(`${c.label}: ${res.report.ok} of ${res.report.total} rows saved`);
+          await adminEnter("periods");
+          showReport(`${c.label} · ${activePeriod.name}`, res.report);
         } catch (e) {
           statusSpan.textContent = `Error: ${e.message}`;
           statusSpan.className = "small error";
         }
       });
-
-      const headerSection = el("div", { style: "flex: 1 1 auto; display: flex; flex-direction: column; min-height: 110px; margin-bottom: 24px;" },
-        el("b", { style: "font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 6px; line-height: 1.3;", text: c.label }),
-        el("p", { class: "small muted", style: "margin: 0 0 8px 0; line-height: 1.45; color: #475569;", text: c.desc }),
-        el("p", { class: "small muted", style: "margin: 0; line-height: 1.4; color: #64748b; font-size: 11px;", text: `Columns: ${c.cols}` })
-      );
-
-      const actionSection = el("div", { style: "margin-top: auto; display: flex; flex-direction: column; gap: 8px;" },
-        zone,
-        statusSpan
-      );
-
-      const cCard = el("div", {
-        class: "card period-hub-card",
-        style: "padding: 20px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; justify-content: space-between; height: 100%; box-sizing: border-box; background: var(--bg-card, #ffffff); box-shadow: 0 1px 3px rgba(0,0,0,0.03);"
-      },
-        headerSection,
-        actionSection
-      );
-      grid.append(cCard);
+      grid.append(el("div", { class: "card period-hub-card", style: "padding: 20px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; justify-content: space-between; height: 100%; box-sizing: border-box;" },
+        el("div", { style: "flex: 1 1 auto; display: flex; flex-direction: column; min-height: 110px; margin-bottom: 24px;" },
+          el("b", { style: "font-size: 14px; font-weight: 700; margin-bottom: 6px; line-height: 1.3;", text: c.label }),
+          el("p", { class: "small muted", style: "margin: 0 0 8px 0; line-height: 1.45;", text: c.desc }),
+          el("p", { class: "small muted", style: "margin: 0; line-height: 1.4; font-size: 11px;", text: `Columns: ${c.cols}` })),
+        el("div", { style: "margin-top: auto; display: flex; flex-direction: column; gap: 8px;" }, zone, statusSpan)));
     });
     uploadGridBox.append(grid);
-  } else {
-    clear(statusBox).append(el("p", { class: "muted", text: "No active period set. Select or create one below." }));
   }
 
   // Periods table
@@ -140,11 +113,12 @@ async function adminPeriods(body) {
     { label: "Months Elapsed", num: true, get: (p) => `${p.months_elapsed} mo` },
     { label: "PO Rows", num: true, get: (p) => num(p.po_rows_count || 0) },
     { label: "Formulary", num: true, get: (p) => num(p.formulary_count || 0) },
-    { label: "Status", get: (p) => p.active ? el("span", { class: "pill good", text: "Active Hub" }) : el("button", {
+    { label: "Benchmark", num: true, get: (p) => num(p.benchmark_count || 0) },
+    { label: "Status", get: (p) => p.active ? el("span", { class: "pill good", text: `Active ${p.category} hub` }) : el("button", {
       type: "button", class: "act ghost small-btn", text: "Activate", onclick: async () => {
         try {
           await send(`/api/admin/periods/${p.id}/activate`, "POST", {});
-          toast(`Period ${p.name} activated`);
+          toast(`Period ${p.name} activated for ${p.category}. Other categories are not affected.`);
           adminEnter("periods");
         } catch (e) { toast(e.message); }
       }
@@ -357,7 +331,30 @@ function renderUploads(box, uploads) {
 }
 
 // ---------- documents ----------
+// Siloam's Word templates for the draft BAK (per scheme) and the PKS. Placeholders such as {{principal}} are filled in.
+async function docTemplatesCard() {
+  const box = el("div");
+  const wrap = card("Template BAK dan PKS (Word)", "Upload template .docx Siloam. Tanpa upload, app memakai draft bawaan. Nett memakai template Nett; Disc dan Nett to Disc memakai template Disc.", box);
+  let d;
+  try { d = await api("/api/admin/doc-templates"); } catch (e) { box.append(el("p", { class: "error", text: e.message })); return wrap; }
+  for (const t of d.templates) {
+    const file = el("input", { type: "file", accept: ".docx", class: "sr-only", id: `tpl-${t.key}` });
+    file.addEventListener("change", async () => {
+      if (!file.files.length) return;
+      const fd = new FormData(); fd.append("file", file.files[0]);
+      try { await upload(`/api/admin/doc-templates/${t.key}`, fd); toast(`${t.label} tersimpan`); adminEnter("documents"); } catch (e) { toast(e.message); }
+    });
+    box.append(el("div", { class: "actions", style: "align-items:center" }, el("b", { text: t.label }),
+      t.file ? el("span", { class: "small muted", text: `${t.file.name} · ${new Date(t.file.at).toLocaleString("en-GB")}` }) : el("span", { class: "small muted", text: "pakai draft bawaan" }),
+      el("label", { class: "act secondary small-btn", for: `tpl-${t.key}`, text: t.file ? "Ganti" : "Upload .docx" }), file,
+      t.file ? act("Hapus", async () => { await send(`/api/admin/doc-templates/${t.key}`, "DELETE"); adminEnter("documents"); }, "ghost") : null));
+  }
+  box.append(el("p", { class: "small muted", text: `Placeholder: ${d.placeholders.map((x) => `{{${x}}}`).join(" ")}. {{tabel_harga}} diganti daftar harga per SKU.` }));
+  return wrap;
+}
+
 async function adminDocs(body) {
+  body.append(await docTemplatesCard());
   const c = shell.catalog;
   const file = el("input", { type: "file", id: "doc-file", class: "sr-only", accept: ".pdf,.docx,.xlsx,.csv,.png,.jpg,.jpeg" });
   const vendor = el("select", { id: "doc-vendor" }, el("option", { value: "", text: "No vendor" }), c.vendors.map((v) => el("option", { value: v, text: v })));
@@ -561,4 +558,34 @@ async function adminActivity(body) {
       el("b", { text: e.user_email.split("@")[0] }), ` ${describeEvent(e)}`,
       el("span", { class: "muted small", text: ` · ${stamp.format(new Date(e.at))}` }))))
       : el("p", { class: "muted", text: "Nothing yet." })));
+}
+
+
+// ---------- report: one row per principal, results at Feedback I and at FIN ----------
+async function adminReport(body) {
+  const status = el("select", {}, [["all", "Semua status"], ["open", "Open"], ["closed", "Selesai"]].map(([v, l]) => el("option", { value: v, text: l })));
+  const cat = el("select", {}, [["all", "Semua kategori"], ["Drugs", "Drugs"], ["CnC", "CnC"]].map(([v, l]) => el("option", { value: v, text: l })));
+  const per = el("select", {}, el("option", { value: "", text: "Semua periode" }));
+  const out = el("div");
+  const xls = el("a", { class: "act secondary", href: "/api/admin/report.xlsx", text: "Export Excel ⤓" });
+  body.append(card("Report: ringkasan semua principal", "Satu baris per negosiasi. Dua tabel: hasil sampai Feedback I dan hasil FIN. Angka mengikuti Pre-Nego dan Post-Nego di tiap negosiasi.",
+    el("div", { class: "filters board-filters" }, el("label", {}, "Status", status), el("label", {}, "Kategori", cat), el("label", {}, "Periode", per), xls), out));
+  const qs = () => { const p = new URLSearchParams({ status: status.value, category: cat.value }); if (per.value) p.set("period", per.value); return p.toString(); };
+  let first = true;
+  async function load() {
+    xls.href = `/api/admin/report.xlsx?${qs()}`;
+    clear(out).append(el("p", { class: "muted", text: "Loading…" }));
+    let d;
+    try { d = await api(`/api/admin/report?${qs()}`); } catch (e) { clear(out).append(el("p", { class: "error", text: e.message })); return; }
+    if (first) { d.periods.forEach((p) => per.append(el("option", { value: p.id, text: p.name }))); first = false; }
+    const fmt = (c, v) => (v == null || v === "" ? "—" : c.kind === "pct" ? pct(v, 2) : c.kind === "money" ? (v > 0 && /impact|cost_impact/.test(c.key) ? "+" : "") + money(v) : c.kind === "num" ? num(v) : String(v));
+    const tableFor = (title, rows) => {
+      const t = el("table", { class: "items" });
+      table(t, d.columns.map((c) => ({ label: c.label, num: c.kind !== "text", get: (r) => fmt(c, r[c.key]) })), rows, (r) => { location.hash = `#nego/${r.cycle_id}/analysis`; });
+      return el("div", {}, el("h3", { text: `${title} (${rows.length} principal)` }), rows.length ? el("div", { class: "table-wrap", style: "overflow:auto" }, t) : el("p", { class: "muted", text: "Tidak ada data." }));
+    };
+    clear(out).append(tableFor("Hasil FB1", d.fb1), tableFor("Hasil FIN", d.fin));
+  }
+  [status, cat, per].forEach((x) => x.addEventListener("change", load));
+  load();
 }
