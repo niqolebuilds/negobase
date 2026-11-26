@@ -2060,9 +2060,10 @@ async function drawPackage(box) {
       act("Tandai semua SKU dengan harga FIN", async () => { try { const r = await send(`/api/admin/nego/cycles/${ng.cid}/bak-flags`, "POST", { mode: "agreed", value: true }); toast(`${r.changed} SKU ditandai`); drawPackage(box); } catch (e) { toast(e.message); } }, "secondary"),
       act("Hapus semua tanda", async () => { try { const r = await send(`/api/admin/nego/cycles/${ng.cid}/bak-flags`, "POST", { value: false }); toast(`${r.changed} tanda dihapus`); drawPackage(box); } catch (e) { toast(e.message); } }, "ghost")) : null,
     canWork() && chk.ready ? el("div", { class: "actions" },
-      dl(`/api/admin/nego/cycles/${ng.cid}/package.xlsx`, "1 · Excel Confirmation"),
-      dl(`/api/admin/nego/cycles/${ng.cid}/bak.docx`, "2 · Draft BAK (Word)", "secondary"),
-      dl(`/api/admin/nego/cycles/${ng.cid}/pks.docx`, "3 · Draft PKS (Word)", "secondary")) : null));
+      dl(`/api/admin/nego/cycles/${ng.cid}/package.zip`, "Unduh semua (ZIP: BAK + lampiran Excel + PKS)"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/package.xlsx`, "Excel Confirmation", "secondary"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/bak.docx`, "Draft BAK (Word)", "secondary"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/pks.docx`, "Draft PKS (Word)", "secondary")) : null));
   if (!canWork()) return;
   let docs;
   try { docs = await api(`/api/admin/nego/cycles/${ng.cid}/documents`); } catch (_) { return; }

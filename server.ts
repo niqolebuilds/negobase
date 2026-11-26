@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { readTable, pick, hasColumn, toNumber, toIsoDate, type Row } from "./tabular.js";
 import { buildTemplate, readTemplate, checkRow, type TemplateRow } from "./template.js";
 import { buildConfirmationWorkbook, buildBakDocx, buildPksDocx, fillDocxTemplate, confRow, type ConfRow, type DocMeta } from "./bak.js";
@@ -5260,6 +5261,29 @@ app.get("/api/admin/nego/cycles/:cid/pks.docx", async (req: Request, res: Respon
     logCycle(cid, "package.pks", { template: tpl?.name || "built-in" });
     await sendDocx(res, buf, `PKS_${c.principal.name}.docx`);
   } catch (e: any) { res.status(500).json({ error: `Gagal membuat PKS: ${e.message}` }); }
+});
+
+// One click: the BAK (Word), the Excel Confirmation it refers to (attachment) and the PKS draft, in one ZIP.
+app.get("/api/admin/nego/cycles/:cid/package.zip", async (req: Request, res: Response) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid); meta.sku_count = rows.length;
+  try {
+    const safe = `${c.principal.name}_${meta.category}`.replace(/[^\w.\- ]/g, "_");
+    const bakTpl = docTemplates[meta.scheme === "Nett" ? "bak_nett" : "bak_disc"], pksTpl = docTemplates.pks;
+    const zip = new JSZip();
+    zip.file(`1_BAK_${meta.scheme}_${safe}.docx`, bakTpl ? await fillDocxTemplate(bakTpl.data, meta, rows) : await buildBakDocx(meta, rows));
+    zip.file(`2_Lampiran_Confirmation_${safe}_${String(c.binding).replace(/\s+/g, "")}.xlsx`, Buffer.from(await (await buildConfirmationWorkbook(meta, rows)).xlsx.writeBuffer()));
+    zip.file(`3_PKS_${safe}.docx`, pksTpl ? await fillDocxTemplate(pksTpl.data, meta, rows) : await buildPksDocx(meta, rows));
+    logCycle(cid, "package.zip", { scheme: meta.scheme, rows: rows.length });
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="Package_${safe}.zip"`);
+    res.end(await zip.generateAsync({ type: "nodebuffer" }));
+  } catch (e: any) { res.status(500).json({ error: `Gagal membuat package: ${e.message}` }); }
 });
 
 // Admin: Siloam's Word templates for the BAK (per scheme) and the PKS. {{principal}}, {{tanggal}}, {{kontrak_mulai}},

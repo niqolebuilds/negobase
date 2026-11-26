@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
 import ExcelJS4 from "exceljs";
+import JSZip2 from "jszip";
 
 // tabular.ts
 import ExcelJS from "exceljs";
@@ -5955,6 +5956,30 @@ app.get("/api/admin/nego/cycles/:cid/pks.docx", async (req, res) => {
     await sendDocx(res, buf, `PKS_${c.principal.name}.docx`);
   } catch (e) {
     res.status(500).json({ error: `Gagal membuat PKS: ${e.message}` });
+  }
+});
+app.get("/api/admin/nego/cycles/:cid/package.zip", async (req, res) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid);
+  meta.sku_count = rows.length;
+  try {
+    const safe = `${c.principal.name}_${meta.category}`.replace(/[^\w.\- ]/g, "_");
+    const bakTpl = docTemplates[meta.scheme === "Nett" ? "bak_nett" : "bak_disc"], pksTpl = docTemplates.pks;
+    const zip = new JSZip2();
+    zip.file(`1_BAK_${meta.scheme}_${safe}.docx`, bakTpl ? await fillDocxTemplate(bakTpl.data, meta, rows) : await buildBakDocx(meta, rows));
+    zip.file(`2_Lampiran_Confirmation_${safe}_${String(c.binding).replace(/\s+/g, "")}.xlsx`, Buffer.from(await (await buildConfirmationWorkbook(meta, rows)).xlsx.writeBuffer()));
+    zip.file(`3_PKS_${safe}.docx`, pksTpl ? await fillDocxTemplate(pksTpl.data, meta, rows) : await buildPksDocx(meta, rows));
+    logCycle(cid, "package.zip", { scheme: meta.scheme, rows: rows.length });
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="Package_${safe}.zip"`);
+    res.end(await zip.generateAsync({ type: "nodebuffer" }));
+  } catch (e) {
+    res.status(500).json({ error: `Gagal membuat package: ${e.message}` });
   }
 });
 var DOC_TEMPLATE_KEYS = { bak_nett: "BAK template - Nett", bak_disc: "BAK template - Disc (Disc and Nett to Disc)", pks: "PKS template" };

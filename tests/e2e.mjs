@@ -214,6 +214,11 @@ await t("E2/E3: Confirmation columns, rounding, BAK and PKS Word files", async (
   assert.equal(bak.status, 200); assert.equal(bak.j.slice(0, 2).toString("latin1"), "PK", "BAK is a Word (zip) file");
   const pks = await call("GET", `/api/admin/nego/cycles/${cid}/pks.docx`);
   assert.equal(pks.status, 200);
+  const zp = await call("GET", `/api/admin/nego/cycles/${cid}/package.zip`);
+  assert.equal(zp.status, 200); assert.equal(zp.j.slice(0, 2).toString("latin1"), "PK");
+  const JSZip = (await import("jszip")).default;
+  const names = Object.keys((await JSZip.loadAsync(zp.j)).files);
+  assert.equal(names.length, 3, names.join(", "));
 });
 
 await t("A7: analysis and report", async () => {
