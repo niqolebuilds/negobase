@@ -1828,7 +1828,7 @@ function renderActivity(body) {
 // ---------- principal link ----------
 async function linkPanel(c) {
   const body = openPanel(el("p", { class: "eyebrow", text: "Principal link" }), el("h2", { id: "drawer-title", text: c.principal.name }));
-  const days = el("input", { type: "number", min: 1, max: 90, value: 14, id: "link-days" });
+  const days = el("input", { type: "number", min: 1, max: 90, placeholder: "ikut Engine settings", id: "link-days" });
   const out = el("div", { role: "status" });
   const list = el("div");
   const draw = (links) => {
@@ -1843,7 +1843,7 @@ async function linkPanel(c) {
   };
   const create = act("Create link", async () => {
     try {
-      const l = await send(`/api/admin/nego/cycles/${c.id}/links`, "POST", { days: +days.value || 14 });
+      const l = await send(`/api/admin/nego/cycles/${c.id}/links`, "POST", { days: +days.value || undefined });
       const url = location.origin + (l.path || l.url);
       const field = el("input", { value: url, readonly: "", id: "link-url" });
       clear(out).append(el("div", { class: "preview ok" },

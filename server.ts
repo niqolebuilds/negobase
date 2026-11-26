@@ -220,7 +220,6 @@ const SETTINGS_DEFS: SettingDef[] = [
   { key: "escalation_rp", label: "Escalate when the agreed cost impact is above (Rp a year)", group: "Principal negotiations", default: 50000000, kind: "number", min: 0, max: 1e13, help: "0 = off. Either limit passed means escalation.", optional: false },
   { key: "step_days", label: "Default days a principal gets to complete a step", group: "Principal negotiations", default: 7, kind: "int", min: 1, max: 60, help: "", optional: false },
   { key: "mou_alert_weekday", label: "Weekday for the MOU alert email (0 = Monday)", group: "Principal negotiations", default: 0, kind: "int", min: 0, max: 6, help: "", optional: false },
-  { key: "llm_assist", label: "Draft messages with Claude (counter-offer cover, meeting summary, escalation note)", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false },
   { key: "llm_fallback", label: "Send questions the built-in parser can't understand to Claude", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false },
 ];
 
@@ -3931,7 +3930,7 @@ app.get("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
 
 app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
   const cid = Number(req.params.cid);
-  const days = Math.max(1, Math.min(90, Number(req.body?.days) || 14));
+  const days = Math.max(1, Math.min(90, Number(req.body?.days) || Number(settingsValues.principal_link_days) || 14));
   const links = cycleLinksMap.get(cid) || [];
   const token = crypto.randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString();
