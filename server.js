@@ -965,17 +965,13 @@ var SETTINGS_DEFS = [
   { key: "anomaly_group_spread", label: "Price above the cheapest equivalent brand that raises a flag", group: "Principal negotiations", default: 0.2, kind: "fraction", min: 0, max: 5, help: "Items with the same generic name or group (Admin > Master data) are compared per piece.", optional: false },
   { key: "escalation_pct", label: "Escalate when the agreed cost impact is above this share of the principal's yearly PO value (+PPN)", group: "Principal negotiations", default: 0.05, kind: "fraction", min: 0, max: 1, help: "Cost impact (FIN) vs the yearly PO value. 0 = off. Either limit passed means escalation.", optional: false },
   { key: "escalation_rp", label: "Escalate when the agreed cost impact is above (Rp a year)", group: "Principal negotiations", default: 5e7, kind: "number", min: 0, max: 1e13, help: "0 = off. Either limit passed means escalation.", optional: false },
-  { key: "whatsapp_after_days", label: "Send the WhatsApp nudge when a principal hasn't acted for this many days", group: "Principal negotiations", default: 2, kind: "int", min: 0, max: 30, help: "", optional: false },
-  { key: "reminders_on", label: "Send deadline reminders to principals", group: "Principal negotiations", default: true, kind: "bool", min: null, max: null, help: "Through Power Automate, when automatic sending is set up.", optional: false },
-  { key: "reminder_first_days", label: "First reminder, days before the deadline", group: "Principal negotiations", default: 3, kind: "int", min: 0, max: 30, help: "", optional: false },
-  { key: "reminder_second_days", label: "Second reminder, days before the deadline", group: "Principal negotiations", default: 1, kind: "int", min: 0, max: 30, help: "", optional: false },
   { key: "step_days", label: "Default days a principal gets to complete a step", group: "Principal negotiations", default: 7, kind: "int", min: 1, max: 60, help: "", optional: false },
   { key: "mou_alert_weekday", label: "Weekday for the MOU alert email (0 = Monday)", group: "Principal negotiations", default: 0, kind: "int", min: 0, max: 6, help: "", optional: false },
   { key: "llm_assist", label: "Draft messages with Claude (counter-offer cover, meeting summary, escalation note)", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false },
   { key: "llm_fallback", label: "Send questions the built-in parser can't understand to Claude", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false }
 ];
 var settingsValues = Object.fromEntries(SETTINGS_DEFS.map((s) => [s.key, s.default]));
-var HIDDEN_SETTINGS = /* @__PURE__ */ new Set(["anomaly_increase_tolerance", "anomaly_po_deviation", "anomaly_outlier_z", "anomaly_review_top_n", "check_high_disc_unused", "co_max_extra", "anomaly_benchmark_deviation", "anomaly_group_spread", "whatsapp_after_days", "reminders_on", "reminder_first_days", "reminder_second_days", "mou_alert_weekday", "llm_fallback"]);
+var HIDDEN_SETTINGS = /* @__PURE__ */ new Set(["anomaly_increase_tolerance", "anomaly_po_deviation", "anomaly_outlier_z", "anomaly_review_top_n", "check_high_disc_unused", "co_max_extra", "anomaly_benchmark_deviation", "anomaly_group_spread", "mou_alert_weekday", "llm_fallback"]);
 var HIDDEN_GROUPS = /* @__PURE__ */ new Set(["Targets", "Money", "Rebates", "Renewals & alerts"]);
 function describeSettings() {
   return SETTINGS_DEFS.filter((s) => !HIDDEN_GROUPS.has(s.group) && !HIDDEN_SETTINGS.has(s.key)).map((s) => ({

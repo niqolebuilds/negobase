@@ -1801,7 +1801,7 @@ async function renderMessages(box) {
     d.messages.length ? el("table", { class: "msg-table" }, el("thead", {}, el("tr", {}, ["When", "Message", "To", "Status", ""].map((h) => el("th", { text: h })))),
       el("tbody", {}, d.messages.map((m) => el("tr", {},
         el("td", { text: new Date(m.created_at).toLocaleString("en-GB") }),
-        el("td", { text: { "principal.step_opened": "Link for the step", "principal.reminder": "Deadline reminder", "siloam.step_submitted": "Notice to Siloam: principal sent", "siloam.mou_alert": "MOU alert" }[m.event] || m.event }),
+        el("td", { text: { "principal.step_opened": "Link for the step", "siloam.step_submitted": "Notice to Siloam: principal sent", "siloam.mou_alert": "MOU alert" }[m.event] || m.event }),
         el("td", { text: m.recipient || "—" }),
         el("td", {}, el("span", { class: `mstat s-${m.status}`, text: { queued: "Queued", sending: "Sending", sent: "Sent", failed: `Failed (${m.attempts} tries)`, skipped: "Not sent" }[m.status] || m.status }),
           m.last_error ? el("div", { class: "small muted", text: m.last_error }) : null),
