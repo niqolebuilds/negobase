@@ -11,19 +11,90 @@ import { buildConfirmationWorkbook, buildBakDocx, buildPksDocx, fillDocxTemplate
 import { matchUoMQty, parseUoMQty, enrichCycleItem, summarizeCycleItems, parseDiscount, parseDiscLenient, normName, normalizeUom, normalizeCode, normalizePrincipalName, parseMoney, escalationFor, fmtPct } from "./pricing.js";
 import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel, type GenerateContentParameters, type GenerateContentResponse } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
+const GEMINI_MODEL = "gemini-4-hydrogen";
+
+class GeminiApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
     },
-  },
-});
+  });
+}
+
+function mapGeminiError(err: any): GeminiApiError {
+  if (err instanceof GeminiApiError) return err;
+  const raw = String(err?.message || err || "Unknown Gemini API error");
+  const status = Number(err?.status || err?.code) || 0;
+  if (status === 403 || /PERMISSION_DENIED|API_KEY_INVALID|API key not valid/i.test(raw)) {
+    return new GeminiApiError(403, "Gemini API key is invalid or lacks permission. Please verify GEMINI_API_KEY in Settings > Secrets.");
+  }
+  if (status === 400 && /API_KEY/i.test(raw)) {
+    return new GeminiApiError(400, "Gemini API key is invalid. Please check GEMINI_API_KEY in Settings > Secrets.");
+  }
+  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(raw)) {
+    return new GeminiApiError(429, "Gemini API rate limit or quota exceeded. Please try again shortly or check your quota in Settings > Secrets.");
+  }
+  if (status === 404 || /NOT_FOUND/i.test(raw)) {
+    return new GeminiApiError(404, `Configured Gemini model (${GEMINI_MODEL}) was not found or is unsupported.`);
+  }
+  if (/timeout/i.test(raw)) {
+    return new GeminiApiError(504, "Gemini API timed out while generating a response. Please try again.");
+  }
+  return new GeminiApiError(502, `Gemini API error: ${raw}`);
+}
+
+async function callGemini(
+  params: Omit<GenerateContentParameters, "model"> & { model?: string },
+  opts: { maxRetries?: number; timeoutMs?: number } = {}
+): Promise<GenerateContentResponse> {
+  const client = getGeminiClient();
+  if (!client) {
+    throw new GeminiApiError(503, "Gemini API key is not configured on the server. Please set GEMINI_API_KEY in Settings > Secrets.");
+  }
+  const maxRetries = opts.maxRetries ?? 2;
+  const timeoutMs = opts.timeoutMs ?? 28000;
+  const model = params.model || GEMINI_MODEL;
+  let lastErr: any;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const reqPromise = client.models.generateContent({ ...params, model });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new GeminiApiError(504, "Gemini API timeout")), timeoutMs)
+      );
+      return await Promise.race([reqPromise, timeoutPromise]);
+    } catch (err: any) {
+      lastErr = err;
+      const status = Number(err?.status || err?.code) || 0;
+      const msg = String(err?.message || err || "");
+      const retryable = status === 429 || status >= 500 || /RESOURCE_EXHAUSTED|UNAVAILABLE|INTERNAL/i.test(msg);
+      if (retryable && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 600 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw mapGeminiError(err);
+    }
+  }
+  throw mapGeminiError(lastErr);
+}
 
 export async function fetchWithRetry(
   url: string,
@@ -1991,9 +2062,11 @@ function parseChatText(rawText: string) {
     suggestions: [...skusMap.values()].slice(0, 4).map((s) => s.sku_name),
     candidates: [],
     llm_fallback: {
-      enabled: Boolean(settingsValues.llm_fallback),
-      available: false,
-      note: "Claude fallback is on the roadmap; answers come from the built-in parser.",
+      enabled: Boolean(getGeminiClient()),
+      available: Boolean(getGeminiClient()),
+      note: getGeminiClient()
+        ? "Powered by Gemini AI when natural-language phrasing is outside built-in patterns."
+        : "Set GEMINI_API_KEY in Settings > Secrets to enable Gemini natural-language answers.",
     },
   };
 }
@@ -2256,9 +2329,132 @@ app.get("/api/home", (req: Request, res: Response) => {
   });
 });
 
-app.post("/api/chat", (req: Request, res: Response) => {
+app.post("/api/chat", async (req: Request, res: Response) => {
   const text = String(req.body?.text || "").slice(0, 500);
-  res.json(parseChatText(text));
+  const parsed = parseChatText(text);
+
+  // Fast-path exact high-confidence parser matches; otherwise upgrade with Gemini NLU & Q&A.
+  if (parsed.intent !== "unknown" && parsed.missing.length === 0) {
+    return res.json(parsed);
+  }
+  if (!getGeminiClient() || !text.trim()) {
+    return res.json(parsed);
+  }
+
+  try {
+    const skuCatalog = [...skusMap.values()]
+      .slice(0, 80)
+      .map((s) => `${s.sku}: ${s.sku_name} [${s.equivalence_group}]`)
+      .join("\n");
+    const vendors = [...new Set(observations.map((o) => o.vendor))].sort();
+    const hospitals = [...new Set(observations.map((o) => o.hospital))].sort();
+    const topSavings = computeSavingsOpportunities(6)
+      .map((r) => `- ${r.sku} (${r.sku_name}): spend ${rp(r.spend_12m)}, saving opportunity ${rp(r.total_opportunity)}, best site ${r.internal_best_site} (${rp(r.internal_best_price)}), group best ${r.group_best_vendor || "-"} (${r.group_best_price != null ? rp(r.group_best_price) : "-"})`)
+      .join("\n");
+    const topAlerts = computeAlerts()
+      .filter((a) => a.severity !== "low")
+      .slice(0, 8)
+      .map((a) => `- [${a.severity}] ${a.title} — ${a.detail}`)
+      .join("\n");
+
+    const prompt = `User query: "${text}"
+
+Analyze the procurement user's query and either route it to the best structured app intent OR provide a grounded analytical answer ("llm_answer").
+Valid intents:
+- "options": user wants stretch/target/fallback price options for a SKU and/or vendor
+- "negotiate": user wants a negotiation script/plan/tactic for a SKU and/or vendor
+- "details": user wants evidence/comparison breakdown for a SKU and/or vendor
+- "renewals": user wants upcoming contract renewals (extract window in days if specified, e.g. 60, 90, 180)
+- "my_renewals": user asks about their own assigned renewals
+- "alerts": user asks about price risks, creep, variance, or warnings
+- "savings": user asks where to save money or biggest gaps
+- "spend": user asks about vendor spend or share of wallet
+- "lookup": user asks what price we currently pay for an item
+- "vendor": user asks about a specific vendor overall
+- "help": user asks what this assistant can do
+- "llm_answer": user asks an open-ended analytical, comparison, strategy, or negotiation question that is best answered directly in text from the data below.
+
+ONLY return exact sku codes from this catalog, exact vendor names from this vendor list, and exact hospital names from this hospital list (or empty string if not applicable).
+
+SKUs:
+${skuCatalog}
+
+Vendors: ${vendors.join(", ")}
+Hospitals: ${hospitals.join(", ")}
+
+Top Savings Opportunities:
+${topSavings}
+
+Top Risk Alerts:
+${topAlerts}
+
+${globalFacts()}`;
+
+    const gRes = await callGemini({
+      contents: prompt,
+      config: {
+        systemInstruction: "You are Siloam's Healthcare Procurement Intelligence router & analyst. Always ground facts strictly in the provided data. Reply in the same language as the user (English or Indonesian). Keep direct answers concise, actionable, and formatted cleanly in Markdown.",
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            intent: { type: Type.STRING },
+            sku: { type: Type.STRING },
+            vendor: { type: Type.STRING },
+            hospital: { type: Type.STRING },
+            window: { type: Type.INTEGER },
+            answer: { type: Type.STRING },
+          },
+          required: ["intent"],
+        },
+      },
+    });
+
+    const obj = JSON.parse((gRes.text || "{}").trim());
+    const matchedSku = obj.sku && skusMap.has(String(obj.sku)) ? skusMap.get(String(obj.sku))! : null;
+    const matchedVendor = obj.vendor && vendors.includes(String(obj.vendor)) ? String(obj.vendor) : parsed.vendor;
+    const matchedHospital = obj.hospital && hospitals.includes(String(obj.hospital)) ? String(obj.hospital) : parsed.hospital;
+    const allowedIntents = new Set(["options", "negotiate", "details", "renewals", "my_renewals", "alerts", "savings", "spend", "lookup", "vendor", "help", "llm_answer"]);
+    const intent = allowedIntents.has(obj.intent) ? obj.intent : parsed.intent;
+
+    if (intent === "llm_answer" && obj.answer) {
+      return res.json({
+        ...parsed,
+        intent: "llm_answer",
+        answer: String(obj.answer),
+        sku: matchedSku?.sku || parsed.sku,
+        sku_name: matchedSku?.sku_name || parsed.sku_name,
+        vendor: matchedVendor,
+        hospital: matchedHospital,
+        confidence: 0.92,
+      });
+    }
+
+    const skuFinal = matchedSku?.sku || parsed.sku;
+    const vendorFinal = matchedVendor;
+    const missing: string[] = [];
+    if (["options", "negotiate", "details"].includes(intent)) {
+      if (!skuFinal) missing.push("sku");
+      if (!vendorFinal) missing.push("vendor");
+    }
+
+    return res.json({
+      ...parsed,
+      intent,
+      sku: skuFinal,
+      sku_name: matchedSku?.sku_name || parsed.sku_name,
+      group: matchedSku?.equivalence_group || parsed.group,
+      vendor: vendorFinal,
+      hospital: matchedHospital,
+      window: Number(obj.window) > 0 ? Number(obj.window) : parsed.window,
+      missing,
+      confidence: 0.9,
+    });
+  } catch (err: any) {
+    console.error("Gemini /api/chat notice:", err?.message || err);
+    return res.json(parsed);
+  }
 });
 
 // ---- AI chat: answers come from the app's own data -------------------------------------------
@@ -2269,23 +2465,47 @@ const fmtDateId = (iso?: string | null) => (iso ? new Date(iso + "T00:00:00Z").t
 function globalFacts(): string {
   const today = new Date().toISOString().slice(0, 10);
   const alertMonths = Number(settingsValues.mou_alert_months) || 6;
+  const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const expiring = principalsList.filter((p) => p.mou_end && daysBetween(today, p.mou_end) >= 0 && daysBetween(today, p.mou_end) / 30.44 <= alertMonths);
   const periods = periodsList.map((per) => {
     const d = periodDataFor(per.id);
     return `  • ${per.name} (${per.category}, ${per.active ? "aktif" : "tidak aktif"}): PO ${d.po.length} baris, formularium ${d.formulary.length} baris, tagging ${d.tagging.length} baris, benchmark ${d.benchmarks.length} baris`;
   }).join("\n");
+  const openCycles = cyclesList.filter((c) => c.status === "open").map((c) => {
+    const items = (cycleItemsMap.get(c.id) || []).map((i) => enrichCycleItem(i, ppn, c));
+    const sum = summarizeCycleItems(items);
+    const openAnom = (cycleAnomaliesMap.get(c.id) || []).filter((a) => a.status === "open").length;
+    return `  • [Cycle #${c.id}] ${c.principal.name} [${c.category || "-"}, ${c.binding}] step ${STEP_LABEL[c.current_step]} | ${sum.items} SKU (RFQ ${sum.rfq_filled}/${sum.active}) | ${openAnom} temuan | Cost Impact: ${sum.latest_impact != null ? rp(sum.latest_impact) : "-"} | Margin vs Form: ${sum.margin_vs_formulary != null ? rp(sum.margin_vs_formulary) : "-"} | Overdue: ${c.overdue_days || 0} hari`;
+  }).join("\n") || "  • tidak ada";
+  const topSavings = computeSavingsOpportunities(6)
+    .map((r) => `  • ${r.sku} (${r.sku_name}): spend ${rp(r.spend_12m)}, potensi saving ${rp(r.total_opportunity)}, best internal ${r.internal_best_site} (${rp(r.internal_best_price)}), group best ${r.group_best_vendor || "-"} (${r.group_best_price != null ? rp(r.group_best_price) : "-"})`)
+    .join("\n");
+  const topAlerts = computeAlerts()
+    .filter((a) => a.severity !== "low")
+    .slice(0, 6)
+    .map((a) => `  • [${a.severity.toUpperCase()}] ${a.title} (${a.detail})`)
+    .join("\n");
   return `DATA APP (sumber kebenaran satu-satunya):
 • Tanggal hari ini: ${today}
 • Jumlah principal terdaftar: ${principalsList.length}
 • MOU berakhir dalam ${alertMonths} bulan (${expiring.length}): ${expiring.map((p) => `${p.name} (${p.mou_end})`).join(", ") || "tidak ada"}
 • Periode negosiasi:\n${periods}
-• Negosiasi berjalan: ${cyclesList.filter((c) => c.status === "open").map((c) => `${c.principal.name} [${c.category || "-"}] di step ${STEP_LABEL[c.current_step]}`).join("; ") || "tidak ada"}`;
+• Negosiasi berjalan:\n${openCycles}
+• Peluang Saving Jaringan Teratas:\n${topSavings || "  • tidak ada"}
+• Peringatan Risiko Harga Teratas:\n${topAlerts || "  • tidak ada"}`;
 }
 
-function buildAiChatContext(role: string, cycleId: number | null): string {
+function buildAiChatContext(role: string, cycleId: number | null, message = ""): string {
   let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
+  if (!cyc && message) {
+    const qLower = message.toLowerCase();
+    cyc = cyclesList.find((c) => {
+      const words = c.principal.name.toLowerCase().split(/\s+/).filter((w) => w.length >= 4 && !["pt", "cv", "tbk", "indonesia", "medika", "farma"].includes(w));
+      return qLower.includes(c.principal.name.toLowerCase()) || words.some((w) => qLower.includes(w));
+    }) || null;
+  }
   const global = globalFacts();
-  if (!cyc) return `${global}\nTidak ada negosiasi yang sedang dibuka di layar. Untuk data per SKU, minta pengguna membuka salah satu negosiasi.`;
+  if (!cyc) return `${global}\nTidak ada negosiasi spesifik yang sedang dibuka di layar. Untuk analisis tingkat SKU dari suatu principal, sebutkan nama principal-nya atau buka negosiasi terkait.`;
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   const rawItems = cycleItemsMap.get(cyc.id) || [];
   const anoms = (cycleAnomaliesMap.get(cyc.id) || []).filter((a) => a.status === "open");
@@ -2295,18 +2515,26 @@ function buildAiChatContext(role: string, cycleId: number | null): string {
   const m = (v: number | null | undefined) => (v == null ? "-" : rp(v));
   const d = (v: number | null | undefined) => (v == null ? "-" : fmtPct(v));
   const stageText = summary.stages.map((st: any) => `  • ${st.label}: ${st.items} SKU, cost impact ${m(st.impact)}, margin impact vs Form ${m(st.margin_impact_vs_formulary)}, vs PO ${m(st.margin_impact_vs_po)}`).join("\n");
-  const rank = [...enriched].sort((a, b) => (anoms.filter((x) => x.item_id === b.id).length - anoms.filter((x) => x.item_id === a.id).length) || Math.abs(b.impact || 0) - Math.abs(a.impact || 0));
-  const itemsText = rank.slice(0, 40).map((it) => `- [${it.erp_code}] ${it.item_name} | status ${it.item_status} | PO rata-rata ${m(it.po_unit_price)}/pcs | MOU ${m(it.mou_unit_price)} | formularium Nett ${m(it.form_nett_price)} | RFQ ${m(it.rfq_unit_price)} (disc ${d(it.rfq_disc)}) | CO ${m(it.co_unit_price)} | FB1 ${m(it.fb1_unit_price)} | FIN ${m(it.on_unit_price)} (disc ${d(it.on_disc)}) | cost impact ${m(it.impact)} | pembanding ${it.bench_tag}`).join("\n");
-  const anomText = anoms.length ? anoms.slice(0, 40).map((a) => `• [${a.severity.toUpperCase()}] ${a.erp_code} ${a.item_name}: ${a.message}`).join("\n") : "Tidak ada temuan terbuka.";
+
+  const msgLower = message.toLowerCase();
+  const isMentioned = (it: any) => (it.erp_code && msgLower.includes(String(it.erp_code).toLowerCase())) ||
+    String(it.item_name || "").toLowerCase().split(/\s+/).some((w: string) => w.length >= 5 && msgLower.includes(w));
+  const rank = [...enriched].sort((a, b) =>
+    (isMentioned(b) ? 1 : 0) - (isMentioned(a) ? 1 : 0) ||
+    (anoms.filter((x) => x.item_id === b.id).length - anoms.filter((x) => x.item_id === a.id).length) ||
+    Math.abs(b.impact || 0) - Math.abs(a.impact || 0)
+  );
+  const itemsText = rank.slice(0, 45).map((it) => `- [${it.erp_code}] ${it.item_name} | brand ${it.brand || "-"} | UOM ${it.po_unit_text || "-"} (${it.annual_pcs ? Math.round(it.annual_pcs) : 0} pcs/thn) | status ${it.item_status} | BaseMargin ${m(it.base_margin_price)} | PO ${m(it.po_unit_price)} | MOU ${m(it.mou_unit_price)} | FormNett ${m(it.form_nett_price)} | RFQ ${m(it.rfq_unit_price)} (disc ${d(it.rfq_disc)}) | CO ${m(it.co_unit_price)} (disc ${d(it.co_disc)}) | FB1 ${m(it.fb1_unit_price)} (disc ${d(it.fb1_disc)}) | FIN ${m(it.on_unit_price)} (disc ${d(it.on_disc)}) | CostImpact ${m(it.impact)} | Margin/pc ${m(it.margin_pc)} | MarginVsForm ${m(it.margin_vs_formulary)} | MarginVsPO ${m(it.margin_vs_po)} | Change ${it.change_pct != null ? fmtPct(it.change_pct) : "-"} | Acuan ${it.bench_tag}`).join("\n");
+  const anomText = anoms.length ? anoms.slice(0, 45).map((a) => `• [${a.severity.toUpperCase()}] ${a.erp_code} ${a.item_name}: ${a.message}`).join("\n") : "Tidak ada temuan terbuka.";
   return `${global}
 
-NEGOSIASI AKTIF: ${cyc.principal.name} (${cyc.category || "-"}, binding ${cyc.binding}, step ${STEP_LABEL[cyc.current_step]}, batas waktu ${cyc.step_due || "belum ada"}), periode kontrak ${cyc.contract_start} s/d ${cyc.contract_end}, biaya kirim ${cyc.delivery_fee}
+NEGOSIASI AKTIF: ${cyc.principal.name} (${cyc.category || "-"}, binding ${cyc.binding}, step ${STEP_LABEL[cyc.current_step]}, batas waktu ${cyc.step_due || "belum ada"}, overdue ${cyc.overdue_days || 0} hari), periode kontrak ${cyc.contract_start} s/d ${cyc.contract_end}, biaya kirim ${cyc.delivery_fee}
 • SKU: ${summary.items} (aktif ${summary.active}, discontinue ${summary.discontinued}); RFQ diterima ${summary.rfq_filled}/${summary.active}
 • Nilai PO setahun (+PPN): ${m(summary.po_value_12m)}; cost impact terkini ${m(summary.latest_impact)}; margin impact vs Form ${m(summary.margin_vs_formulary)}, vs PO ${m(summary.margin_vs_po)}
 • Eskalasi: ${esc.status} (impact FIN ${m(esc.impact)}, batas ${fmtPct(esc.limit_pct)} atau ${m(esc.limit_rp)})
 • Per step:\n${stageText}
 • Temuan terbuka (${anoms.length}):\n${anomText}
-• SKU (${enriched.length} total, 40 teratas menurut temuan dan cost impact):\n${itemsText}`;
+• SKU (${enriched.length} total, prioritas temuan & cost impact):\n${itemsText}`;
 }
 
 // Questions with an exact answer in the data. Returns null when the model should answer from the data sheet.
@@ -2379,6 +2607,8 @@ app.post("/api/ai/chat", async (req: Request, res: Response) => {
   // Role comes from the session, never from the request body.
   const role: string = (req as any).user?.role === "admin" ? "admin" : "negotiator";
   const cycleId = req.body?.cycleId ? Number(req.body.cycleId) : null;
+  const page = req.body?.page ? String(req.body.page) : "";
+  const tab = req.body?.tab ? String(req.body.tab) : "";
   const history = Array.isArray(req.body?.history) ? req.body.history : [];
 
   if (!message) {
@@ -2391,6 +2621,8 @@ app.post("/api/ai/chat", async (req: Request, res: Response) => {
   // Exact answers come from the data, not from the model.
   const direct = answerAdminFromData(message, cycleId);
   if (direct) return res.json({ reply: direct, role, grounded: true });
+
+  const uiContext = page ? `\nKonteks layar pengguna saat ini: halaman "${page}"${tab ? `, tab "${tab}"` : ""}.` : "";
 
   let systemInstruction = "";
   if (role === "principal") {
@@ -2415,40 +2647,38 @@ Tugas Anda adalah membantu tim pengadaan / negosiator rumah sakit menganalisa ha
 
 RUMUS RESMI PENGADAAN SILOAM:
 1. PPN: ${ppnPct}% (faktor pengali 1,${ppnPct}).
-2. Base Price (Harga Acuan Dasar): HNA/pc × 1,11 (HNA per pcs sebelum diskon + PPN).
-3. Harga Satuan (Harga/pc): (HNA / Pack_Size) × (1 - Diskon) × 1,11.
-4. Margin/pc per Step: Base Price - Harga Satuan pada step tersebut.
-   Dihitung untuk setiap step: RFQ, Counter Offer, Feedback I, dan Online Nego.
-5. Margin Impact: Σ [ Qty Tahunan × Margin/pc Step ] - Margin Saat Ini.
-   Disajikan dalam 2 versi:
-   • Versi vs Formularium: Membandingkan margin penawaran step terhadap margin Formularium/MOU.
-   • Versi vs PO: Membandingkan margin penawaran step terhadap margin harga PO riil 12 bulan terakhir.
+2. Base Price (Harga Acuan Dasar): HNA/pc × 1,${ppnPct} (HNA per pcs sebelum diskon + PPN).
+3. Harga Satuan (Harga/pc): (HNA / Pack_Size) × (1 - Diskon) × 1,${ppnPct}.
+4. Margin/pc per Step: Base Price - Harga Satuan pada step tersebut (RFQ, Counter Offer, Feedback I, Online Nego).
+5. Margin Impact: Σ [ Qty Tahunan × Margin/pc Step ] - Margin Saat Ini (disajikan dalam 2 versi: vs Formularium dan vs PO).
 6. Cost Impact: Σ [ (Harga Satuan Step × Qty Tahunan) - Total Belanja PO 12 Bulan ].
    • Nilai Negatif (-) = SAVING (Penghematan belanja bagi RS).
    • Nilai Positif (+) = COST INCREASE (Kenaikan beban biaya belanja RS yang harus dinegosiasikan ulang).
 7. Binding Kontrak:
-   • "nett_to_disc": Persentase diskon dikunci sebagai batas bawah. Kenaikan list price (HNA) tidak boleh mengikis margin atau menaikkan harga beli bersih RS.
-   • "nett_to_nett": Harga bersih per pcs dikunci mutlak.
-8. 7 Tahap Negosiasi: Prepare -> RFQ -> Counter Offer -> Feedback I -> Online Nego -> Submission -> Closed.
+   • "Nett to Disc": Persentase diskon dikunci sebagai batas bawah; HNA mengacu formularium/PO agar kenaikan HNA tidak menggerus margin RS.
+   • "Disc": Margin menggunakan HNA formularium.
+   • "Nett": Harga bersih per pcs dihitung dari HNA RFQ.
+8. Tahapan Negosiasi: Prepare -> RFQ & Identification -> Review RFQ (opsional bila ada temuan high) -> Counter Offer -> Feedback I -> Online Nego -> Submission -> Selesai.
+${uiContext}
 
-${buildAiChatContext(role, cycleId)}
+${buildAiChatContext(role, cycleId, message)}
 
 ATURAN DATA (WAJIB):
 - Jawab HANYA dari "DATA APP" dan data negosiasi di atas. Jangan mengarang nama, jumlah, harga, atau tanggal.
-- Jika datanya tidak ada di atas, jawab "Data itu tidak ada di app" dan sebutkan menu tempat melihatnya. Jangan menebak.
+- Jika data spesifik tidak tersedia pada konteks di atas, katakan dengan jelas bahwa data tersebut belum tersedia di konteks saat ini dan sebutkan menu tempat melihatnya (misalnya buka principal terkait di menu Negotiation atau tab Items / Analysis).
 - Anda tidak bisa mengubah data atau menjalankan aksi (mendaftarkan principal, mengirim, menyetujui). Jangan pernah mengaku sudah melakukannya.
 - Penalti, ketentuan pembayaran, dan klausul lain yang tidak ada di data tidak boleh dikarang.
 
 PEDOMAN MENJAWAB:
-- Jawab secara akurat, lugas, profesional, dan solutif dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya menggunakan Bahasa Inggris).
-- Jika pengguna menanyakan angka atau data spesifik (misal margin, harga item, atau temuan), SEBUTKAN data angka riil dari konteks di atas secara langsung dan transparan.
-- Gunakan format Markdown yang menarik: gunakan **tebal** untuk angka dan poin penting, bullet points untuk rincian, dan tabel/blok kode bila menjelaskan rumus atau perbandingan.
-- Berikan analisis strategis: tunjukkan di mana letak inefisiensi, SKU mana yang memberikan peluang saving terbesar, dan taktik counter offer yang paling efektif.`;
+- Jawab secara akurat, cerdas, analitis, dan solutif dalam Bahasa Indonesia (atau Bahasa Inggris jika penanya berbahasa Inggris).
+- Sebutkan angka riil (harga/pc, diskon %, cost impact, margin impact, nama & kode SKU) langsung dari konteks bila relevan.
+- Berikan saran strategis konkret: SKU mana yang berpotensi saving terbesar, mana yang perlu ditekan di Counter Offer, dan risiko yang perlu diprioritaskan.
+- Gunakan format Markdown yang rapi (tebal untuk angka penting, bullet list terstruktur, dan tabel ringkas bila membandingkan beberapa SKU).`;
   }
 
   try {
     const contents: any[] = [];
-    for (const h of history.slice(-6)) {
+    for (const h of history.slice(-8)) {
       if (h?.role && h?.text) {
         contents.push({
           role: h.role === "assistant" || h.role === "model" ? "model" : "user",
@@ -2461,39 +2691,23 @@ PEDOMAN MENJAWAB:
       parts: [{ text: message }],
     });
 
-    const callPromise = ai.models.generateContent({
-      model: "gemini-3.8-flash",
+    const response = await callGemini({
       contents,
       config: {
         systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("AI response timeout")), 25000)
-    );
-
-    const response: any = await Promise.race([callPromise, timeoutPromise]);
-    const reply = response.text || "Saya siap membantu proses negosiasi dan verifikasi penawaran harga.";
-    res.json({ reply, role });
-  } catch (err: any) {
-    console.error("Gemini AI chat notice:", err?.message || err);
-    let fallbackText = "";
-    if (role === "principal") {
-      fallbackText = "Isi diskon sebagai angka 0 sampai 100 (contoh 15 untuk 15%) dan cek kesesuaian isi per kemasan (pcs per pack).";
-    } else {
-      let cyc = cycleId ? cyclesList.find((c) => c.id === cycleId) : null;
-      if (!cyc && cyclesList.length > 0) cyc = cyclesList.find((c) => c.status === "open") || cyclesList[0];
-      if (cyc) {
-        const rawItems = cycleItemsMap.get(cyc.id) || [];
-        const summary = summarizeCycleItems(rawItems.map((i) => enrichCycleItem(i, ppn, cyc)));
-        const imp = summary.latest_impact != null ? (summary.latest_impact < 0 ? `Saving ${rp(Math.abs(summary.latest_impact))}` : `Kenaikan Biaya ${rp(summary.latest_impact)}`) : "Belum dihitung";
-        fallbackText = `**Data Negosiasi ${cyc.principal.name} (${cyc.current_step.toUpperCase()})**:\n• Total Spend PO 12m: **${rp(summary.po_value_12m)}**\n• Status Cost Impact: **${imp}**\n• Margin vs Formularium: **${summary.margin_vs_formulary != null ? rp(summary.margin_vs_formulary) : "—"}**\n• Margin vs PO: **${summary.margin_vs_po != null ? rp(summary.margin_vs_po) : "—"}**\n\n*Rumus*: Margin/pc = (HNA/pc × 1,11) - Harga Satuan. Cost Impact = Σ (Harga Satuan × Qty) - Nilai PO.`;
-      } else {
-        fallbackText = "Sistem Negotiation Intelligence siap membantu menganalisa harga, margin, dan cost impact per item.";
-      }
+    const reply = (response.text || "").trim();
+    if (!reply) {
+      return res.status(502).json({ error: "Gemini API returned an empty response. Please try again." });
     }
-    res.json({ reply: fallbackText, role, fallback: true });
+    res.json({ reply, role, model: GEMINI_MODEL });
+  } catch (err: any) {
+    const gErr = mapGeminiError(err);
+    console.error("Gemini AI chat error:", gErr.status, gErr.message);
+    res.status(gErr.status).json({ error: gErr.message });
   }
 });
 
@@ -5254,24 +5468,33 @@ app.post("/api/p/chat", async (req: Request, res: Response) => {
     const lines = list.slice(0, 12).map((i) => `- ${i.erp_code} ${i.item_name}: ${i.issues.filter((x: any) => i.outstanding.includes(x.code)).map((x: any) => (id ? x.id : x.en)).join(" ")}`);
     return res.json({ reply: `${id ? `Ada ${list.length} SKU yang masih perlu dilengkapi atau dicek:` : `${list.length} SKUs still need to be completed or checked:`}\n${lines.join("\n")}${list.length > 12 ? `\n... ${id ? "dan" : "and"} ${list.length - 12} ${id ? "SKU lain" : "more"}` : ""}`, grounded: true });
   }
-  if (!process.env.GEMINI_API_KEY) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
+  if (!getGeminiClient()) {
+    return res.status(503).json({
+      error: id
+        ? "Gemini API key belum dikonfigurasi pada server. Silakan atur GEMINI_API_KEY di panel Settings > Secrets."
+        : "Gemini API key is not configured on the server. Please set GEMINI_API_KEY in Settings > Secrets.",
+    });
+  }
   try {
     const history = Array.isArray(req.body?.history) ? req.body.history.slice(-4) : [];
     const contents: any[] = history.filter((h: any) => h?.role && h?.text).map((h: any) => ({ role: h.role === "assistant" || h.role === "model" ? "model" : "user", parts: [{ text: String(h.text).slice(0, 500) }] }));
     contents.push({ role: "user", parts: [{ text: message }] });
-    const systemInstruction = `You are the assistant inside the Siloam vendor portal. Reply in ${id ? "Indonesian" : "English"}, politely, in at most 3 short sentences.
+    const systemInstruction = `You are the assistant inside the Siloam vendor portal. Reply in ${id ? "Indonesian" : "English"}, politely, concisely in at most 3 short sentences.
 Help the vendor fill in the RFQ form: status (Active/Discontinue), brand, catalogue number (REF), HNA per pack before PPN, pieces per pack, discount as a number from 0 to 100 such as 15, the reason for a price increase, and how to send. Sending is always done by the vendor.
 You know nothing about Siloam's internal prices, contracts, benchmarks, margins, targets or other vendors. If asked, say it is internal and cannot be shared. Never guess such figures.
 Context: the step is ${step}; the form is ${lock.locked ? "locked (already sent)" : "open"}; ${left} SKUs still need attention.`;
-    const call = ai.models.generateContent({ model: "gemini-3.8-flash", contents, config: { systemInstruction, maxOutputTokens: 400 } });
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000));
-    const r: any = await Promise.race([call, timeout]);
+    const r = await callGemini({
+      contents,
+      config: { systemInstruction, thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+    }, { timeoutMs: 20000 });
     const reply = String(r.text || "").trim();
     // Belt and braces: an answer that touches an internal topic is replaced.
     if (!reply || VENDOR_BLOCKED.test(reply)) return res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
     res.json({ reply });
-  } catch (_e) {
-    res.json({ reply: vendorChatFallback(message, id, ctx), fallback: true });
+  } catch (err: any) {
+    const gErr = mapGeminiError(err);
+    console.error("Gemini /api/p/chat error:", gErr.status, gErr.message);
+    res.status(gErr.status).json({ error: gErr.message });
   }
 });
 
@@ -5462,40 +5685,27 @@ async function fetchScienceDrugProfile(itemName: string, genericName?: string | 
 }
 
 async function generateWithSearchGrounding(prompt: string): Promise<{ text: string; groundingLinks: { uri: string; title: string }[]; modelUsed: string }> {
-  const modelsToTry = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"];
-  let lastError: any = null;
-  for (const modelName of modelsToTry) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-        },
-      });
-      const text = response.text || "";
-      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-      const groundingLinks: { uri: string; title: string }[] = [];
-      const seenUris = new Set<string>();
-      for (const ch of chunks as any[]) {
-        const uri = ch?.web?.uri;
-        const title = ch?.web?.title || uri;
-        if (uri && !seenUris.has(uri)) {
-          seenUris.add(uri);
-          groundingLinks.push({ uri, title });
-        }
-      }
-      return { text, groundingLinks, modelUsed: modelName };
-    } catch (err: any) {
-      lastError = err;
-      const msg = String(err?.message || err);
-      if (msg.includes("404") || msg.includes("NOT_FOUND") || msg.includes("not found") || msg.includes("not supported")) {
-        continue;
-      }
-      break;
+  const response = await callGemini({
+    model: GEMINI_MODEL,
+    contents: prompt,
+    config: {
+      tools: [{ googleSearch: {} }],
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    },
+  });
+  const text = response.text || "";
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  const groundingLinks: { uri: string; title: string }[] = [];
+  const seenUris = new Set<string>();
+  for (const ch of chunks as any[]) {
+    const uri = ch?.web?.uri;
+    const title = ch?.web?.title || uri;
+    if (uri && !seenUris.has(uri)) {
+      seenUris.add(uri);
+      groundingLinks.push({ uri, title });
     }
   }
-  throw lastError || new Error("Gemini Search Grounding call failed");
+  return { text, groundingLinks, modelUsed: GEMINI_MODEL };
 }
 
 function extractJsonBlock(text: string): any {

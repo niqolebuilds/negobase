@@ -208,29 +208,92 @@ function initFloatingAiAssistant() {
     });
   }
 
+  function appendInlineTokens(target, line) {
+    const tokens = String(line || "").split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+    tokens.forEach((tok) => {
+      if (!tok) return;
+      if (tok.startsWith("**") && tok.endsWith("**")) {
+        target.appendChild(el("strong", { text: tok.slice(2, -2) }));
+      } else if (tok.startsWith("`") && tok.endsWith("`")) {
+        target.appendChild(el("code", { text: tok.slice(1, -1) }));
+      } else {
+        target.appendChild(document.createTextNode(tok));
+      }
+    });
+  }
+
   function formatAiText(raw) {
     const wrapper = el("div", { class: "ai-bubble" });
-    const text = String(raw || "").trim();
-    const paragraphs = text.split(/\n\s*\n/);
-    paragraphs.forEach((para) => {
+    const lines = String(raw || "").trim().split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trimEnd();
+      if (!line.trim()) { i++; continue; }
+
+      // Markdown table
+      if (line.trim().startsWith("|") && i + 1 < lines.length && /^\s*\|?[\s:-]+\|/.test(lines[i + 1])) {
+        const tableLines = [];
+        while (i < lines.length && lines[i].trim().startsWith("|")) {
+          tableLines.push(lines[i].trim());
+          i++;
+        }
+        const parseCells = (row) => row.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+        const headers = parseCells(tableLines[0]);
+        const bodyRows = tableLines.slice(2).map(parseCells);
+        const tbl = el("table", { class: "ai-md-table" },
+          el("thead", {}, el("tr", {}, headers.map((h) => { const th = el("th"); appendInlineTokens(th, h); return th; }))),
+          el("tbody", {}, bodyRows.map((cells) => el("tr", {}, cells.map((c) => { const td = el("td"); appendInlineTokens(td, c); return td; })))));
+        wrapper.appendChild(el("div", { class: "ai-md-table-wrap" }, tbl));
+        continue;
+      }
+
+      // Headings
+      const hMatch = line.match(/^#{1,4}\s+(.+)/);
+      if (hMatch) {
+        const h = el("h4", { class: "ai-md-h" });
+        appendInlineTokens(h, hMatch[1]);
+        wrapper.appendChild(h);
+        i++;
+        continue;
+      }
+
+      // Unordered list
+      if (/^\s*[-*•]\s+/.test(line)) {
+        const ul = el("ul", { class: "ai-md-list" });
+        while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+          const li = el("li");
+          appendInlineTokens(li, lines[i].replace(/^\s*[-*•]\s+/, ""));
+          ul.appendChild(li);
+          i++;
+        }
+        wrapper.appendChild(ul);
+        continue;
+      }
+
+      // Ordered list
+      if (/^\s*\d+[.)]\s+/.test(line)) {
+        const ol = el("ol", { class: "ai-md-list" });
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+          const li = el("li");
+          appendInlineTokens(li, lines[i].replace(/^\s*\d+[.)]\s+/, ""));
+          ol.appendChild(li);
+          i++;
+        }
+        wrapper.appendChild(ol);
+        continue;
+      }
+
+      // Paragraph block
       const p = el("p");
-      const lines = para.split("\n");
-      lines.forEach((line, idx) => {
-        if (idx > 0) p.appendChild(el("br"));
-        const tokens = line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
-        tokens.forEach((tok) => {
-          if (!tok) return;
-          if (tok.startsWith("**") && tok.endsWith("**")) {
-            p.appendChild(el("strong", { text: tok.slice(2, -2) }));
-          } else if (tok.startsWith("`") && tok.endsWith("`")) {
-            p.appendChild(el("code", { text: tok.slice(1, -1) }));
-          } else {
-            p.appendChild(document.createTextNode(tok));
-          }
-        });
-      });
+      let first = true;
+      while (i < lines.length && lines[i].trim() && !/^#{1,4}\s+/.test(lines[i]) && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i]) && !(lines[i].trim().startsWith("|") && i + 1 < lines.length && /^\s*\|?[\s:-]+\|/.test(lines[i + 1]))) {
+        if (!first) p.appendChild(el("br"));
+        appendInlineTokens(p, lines[i]);
+        first = false;
+        i++;
+      }
       wrapper.appendChild(p);
-    });
+    }
     return wrapper;
   }
 
@@ -266,14 +329,17 @@ function initFloatingAiAssistant() {
       const s = document.getElementById("principal-cycle-select");
       if (s && s.value) cycleId = Number(s.value);
     }
+    const tab = (typeof ng !== "undefined" && ng && ng.tab) ? ng.tab : (rest && rest[1] ? rest[1] : "");
 
+    shell.aiHistory.push({ role: "user", text });
     try {
-      shell.aiHistory.push({ role: "user", text });
       const res = await send("/api/ai/chat", "POST", {
         message: text,
         role,
         cycleId,
-        history: shell.aiHistory.slice(-6),
+        page,
+        tab,
+        history: shell.aiHistory.slice(-8, -1),
       });
       typing.remove();
       shell.aiHistory.push({ role: "model", text: res.reply });
@@ -286,6 +352,7 @@ function initFloatingAiAssistant() {
       body.scrollTop = body.scrollHeight;
     } catch (err) {
       typing.remove();
+      shell.aiHistory.pop();
       const errMsg = el("div", { class: "ai-msg ai-bot error" },
         el("div", { class: "ai-msg-avatar" }, "⚠️"),
         el("div", { class: "ai-bubble" },

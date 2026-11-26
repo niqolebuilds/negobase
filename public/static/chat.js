@@ -509,6 +509,41 @@ function helpBubble() {
     el("p", { class: "muted small", text: "I work out prices with the engine, from Siloam's own price data. I don't guess numbers." }));
 }
 
+function renderLlmAnswer(raw) {
+  const box = el("div");
+  const lines = String(raw || "").trim().split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+    if (/^[-*•]\s+/.test(l)) {
+      const ul = el("ul", { class: "plain" });
+      while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+        const li = el("li");
+        lines[i].replace(/^\s*[-*•]\s+/, "").split(/(\*\*[^*]+\*\*|`[^`]+`)/g).forEach((t) => {
+          if (!t) return;
+          if (t.startsWith("**") && t.endsWith("**")) li.appendChild(el("strong", { text: t.slice(2, -2) }));
+          else if (t.startsWith("`") && t.endsWith("`")) li.appendChild(el("code", { text: t.slice(1, -1) }));
+          else li.appendChild(document.createTextNode(t));
+        });
+        ul.appendChild(li);
+        i++;
+      }
+      i--;
+      box.appendChild(ul);
+      continue;
+    }
+    const p = el("p");
+    l.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).forEach((t) => {
+      if (!t) return;
+      if (t.startsWith("**") && t.endsWith("**")) p.appendChild(el("strong", { text: t.slice(2, -2) }));
+      else if (t.startsWith("`") && t.endsWith("`")) p.appendChild(el("code", { text: t.slice(1, -1) }));
+      else p.appendChild(document.createTextNode(t));
+    });
+    box.appendChild(p);
+  }
+  return box;
+}
+
 async function handleText(text) {
   text = (text || "").trim();
   if (!text) return;
@@ -529,13 +564,14 @@ async function handleText(text) {
     case "lookup": return lookupBubble(p);
     case "help": return helpBubble();
     case "greeting": return bot(el("p", { text: `Hi ${shell.user.name.split(" ")[0]}! What would you like to know?` }), exampleChips());
+    case "llm_answer": return bot(renderLlmAnswer(p.answer), el("p", { class: "small muted", text: "Try another question:" }), exampleChips());
     default:
       return bot(
         el("p", { text: "I didn't catch that." }),
         p.suggestions && p.suggestions.length ? el("p", { class: "small", text: "Did you mean one of these?" }) : null,
         p.suggestions && p.suggestions.length ? chips(p.suggestions, (s) => handleText(`best price for ${s}`)) : null,
         el("p", { class: "small muted", text: "Try one of these:" }), exampleChips(),
-        p.llm_fallback && p.llm_fallback.enabled ? el("p", { class: "muted small", text: p.llm_fallback.note }) : null);
+        p.llm_fallback && p.llm_fallback.note ? el("p", { class: "muted small", text: p.llm_fallback.note }) : null);
   }
 }
 

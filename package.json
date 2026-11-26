@@ -14,7 +14,7 @@
     "test:template": "tsx tests/template.test.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.28.0",
+    "@google/genai": "^3.6.1",
     "docx": "^9.16.0",
     "esbuild": "^0.28.2",
     "exceljs": "^4.4.0",

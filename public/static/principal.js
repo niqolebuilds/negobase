@@ -319,7 +319,7 @@ function aiInit() {
       const r = await call("/api/p/chat", { method: "POST", body: { message: text, lang: P.lang, history: AI.history } });
       aiAdd("bot", r.reply);
       AI.history.push({ role: "user", text }, { role: "model", text: r.reply });
-    } catch (_) { aiAdd("bot", AIT[P.lang].err); }
+    } catch (err) { aiAdd("bot", err?.message || AIT[P.lang].err); }
     AI.busy = false;
   });
 }

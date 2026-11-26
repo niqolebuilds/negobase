@@ -539,14 +539,18 @@ function renderHeaderParts() {
   const nextIdx = nextStepIndex(keys, at, a);
   const nextKey = keys[nextIdx];
   const noItems = !k.items;
+  const actionsWrap = (nextKey || at > 0)
+    ? el("div", { class: "step-cta" },
+        at > 0 ? act("Back a step", () => backDrawer(keys[at - 1]), "ghost") : null,
+        nextKey ? (noItems
+          ? el("span", { class: "step-blocked" }, el("button", { type: "button", class: "act", disabled: "", text: `Move to ${steps[nextIdx].label}` }),
+              el("span", { class: "small warn-text", text: "Build the item list first (Files & prepare). The principal can't start without items." }))
+          : act(`Move to ${steps[nextIdx].label}`, () => moveStep(nextKey))) : null)
+    : null;
   const move = canWork() && !done ? el("div", { class: "step-actions" },
     el("p", { class: "small", text: STEP_DESC[c.current_step] }),
-    nextKey ? (noItems
-      ? el("span", { class: "step-blocked" }, el("button", { type: "button", class: "act", disabled: "", text: `Move to ${steps[nextIdx].label}` }),
-          el("span", { class: "small warn-text", text: "Build the item list first (Files & prepare). The principal can't start without items." }))
-      : act(`Move to ${steps[nextIdx].label}`, () => moveStep(nextKey))) : null,
-    at > 0 ? act("Back a step", () => backDrawer(keys[at - 1]), "ghost") : null) :
-    canWork() && done ? el("div", { class: "step-actions" }, el("p", { class: "small", text: STEP_DESC.closed }), act("Reopen (back to Submission)", () => backDrawer("submission"), "ghost")) :
+    actionsWrap) :
+    canWork() && done ? el("div", { class: "step-actions" }, el("p", { class: "small", text: STEP_DESC.closed }), el("div", { class: "step-cta" }, act("Reopen (back to Submission)", () => backDrawer("submission"), "ghost"))) :
     el("p", { class: "small muted step-actions", text: STEP_DESC[c.current_step] });
   const sent = (c.submitted_steps || {})[c.current_step];
   const turn = steps[at] && steps[at].who === "principal";

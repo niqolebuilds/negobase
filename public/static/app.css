@@ -97,9 +97,9 @@
 .board-page, .admin-page { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
 .page-head h1 { margin: 0 0 4px; font-size: 22px; }
 .page-head p { margin: 0 0 14px; }
-.kpis5 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.kpis5 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .kpis5 .tile.good .value { color: var(--good); }
-@media (max-width: 760px) { .kpis5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .kpis5 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); } }
 .board-filters { margin-bottom: 14px; }
 .board-filters select, .board-filters input:not([type=checkbox]) { min-width: 150px; }
 .filters label.check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text-primary); padding-bottom: 6px; }
@@ -313,6 +313,15 @@ tr.best td { background: color-mix(in srgb, var(--positive-bg) 35%, transparent)
 }
 .ai-msg.ai-bot .ai-bubble p, .ai-msg.assistant .ai-bubble p { margin: 0 0 6px 0; color: inherit; font-size: inherit; line-height: inherit; }
 .ai-msg.ai-bot .ai-bubble p:last-child, .ai-msg.assistant .ai-bubble p:last-child { margin-bottom: 0; }
+.ai-bubble h4.ai-md-h { margin: 8px 0 4px; font-size: 13.5px; font-weight: 700; color: #0c21a4; }
+.ai-bubble h4.ai-md-h:first-child { margin-top: 0; }
+.ai-bubble .ai-md-list { margin: 4px 0 8px; padding-left: 18px; }
+.ai-bubble .ai-md-list:last-child { margin-bottom: 0; }
+.ai-bubble .ai-md-list li { margin: 3px 0; line-height: 1.45; }
+.ai-md-table-wrap { overflow-x: auto; margin: 6px 0; }
+.ai-md-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ai-md-table th, .ai-md-table td { border: 1px solid #e2e8f0; padding: 4px 7px; text-align: left; }
+.ai-md-table th { background: #eef2fe; color: #0c21a4; font-weight: 700; }
 .ai-msg.ai-bot strong, .ai-msg.assistant strong { color: #0c21a4; font-weight: 600; }
 .ai-msg.ai-bot code, .ai-msg.assistant code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 12px; color: #0c21a4; }
 .ai-msg.error .ai-bubble, .ai-msg.ai-bot.error .ai-bubble { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
