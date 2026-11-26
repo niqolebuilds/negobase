@@ -12,7 +12,7 @@ if (!["table", "list", "one"].includes(P.view) || (NARROW && P.view === "table")
 
 const T = {
   id: {
-    portal: "Portal Principal", loading: "Memuat…",
+    portal: "Portal Principal", loading: "Memuat…", terms_t: "Ketentuan RFQ",
     invalid_t: "Tautan tidak berlaku", invalid_p: "Tautan ini sudah kedaluwarsa atau dicabut. Minta tautan baru ke tim pengadaan.",
     step_of: (n) => `Langkah ${n} dari 6`, your_task: "Tugas Anda",
     steps: { rfq: "Isi data item & harga penawaran (RFQ)", feedback1: "Tanggapi counter offer", submission: "Kirim dokumen perusahaan" },
@@ -59,9 +59,11 @@ const T = {
     dc_t: "Konfirmasi SKU Discontinue", dc_p: (n) => `${n} SKU dinyatakan Discontinue. Surat DC diurus bersama Siloam; Anda bisa melampirkan surat DC atau dokumen lain (tidak wajib).`, dc_confirm: "Saya konfirmasi SKU di atas Discontinue.", dc_attach: "Lampirkan dokumen", dc_attached: (n) => `${n} dokumen terlampir`,
     up_changes: "Isian yang akan berubah", up_overwrite: (n) => `${n} isian di portal akan ditimpa oleh file ini.`, up_overwrite_ok: "Saya setuju menimpa isian portal dengan isi file ini.", up_old: "Sekarang", up_new: "File",
     disc_bad: "Isi diskon 0 sampai 100",
+    docs_missing: "Dokumen wajib belum lengkap", docs_ok: "Dokumen wajib sudah lengkap.", docs_locked: "Kirim terkunci sampai NIB, NPWP, dan Pakta Integritas terunggah.",
+    new_btn: "+ Item baru", new_t: "Tambah item baru", new_p: "Untuk item yang belum ada di daftar Siloam. Status New Item, Siloam akan memeriksanya dan memberi kode ERP.", new_name: "Nama item", new_badge: "New Item", new_added: "Item baru ditambahkan", new_remove: "Hapus item baru", new_note: "Item baru: menunggu pemeriksaan Siloam.", new_n: (n) => `${n} item baru akan ditambahkan:`, add: "Tambah",
   },
   en: {
-    portal: "Principal Portal", loading: "Loading…",
+    portal: "Principal Portal", loading: "Loading…", terms_t: "RFQ terms",
     invalid_t: "Link not valid", invalid_p: "This link has expired or was revoked. Ask the procurement team for a new one.",
     step_of: (n) => `Step ${n} of 6`, your_task: "Your task",
     steps: { rfq: "Item details & price quote (RFQ)", feedback1: "Respond to counter offer", submission: "Send company documents" },
@@ -108,6 +110,8 @@ const T = {
     dc_t: "Confirm Discontinue SKUs", dc_p: (n) => `${n} SKUs are marked Discontinue. The DC letter is arranged with Siloam; you may attach it or another document (optional).`, dc_confirm: "I confirm the SKUs above are Discontinue.", dc_attach: "Attach a document", dc_attached: (n) => `${n} document(s) attached`,
     up_changes: "Entries that will change", up_overwrite: (n) => `${n} entries already in the portal will be overwritten by this file.`, up_overwrite_ok: "I agree to overwrite the portal entries with this file.", up_old: "Now", up_new: "File",
     disc_bad: "Enter a discount from 0 to 100",
+    docs_missing: "Required documents missing", docs_ok: "All required documents are uploaded.", docs_locked: "Sending is locked until NIB, NPWP and the Integrity Pact are uploaded.",
+    new_btn: "+ New item", new_t: "Add a new item", new_p: "For an item not on Siloam's list. Its status is New Item; Siloam checks it and assigns the ERP code.", new_name: "Item name", new_badge: "New Item", new_added: "New item added", new_remove: "Remove new item", new_note: "New item: waiting for Siloam to check it.", new_n: (n) => `${n} new items will be added:`, add: "Add",
   },
 };
 const t = (k, ...a) => { const v = k.split(".").reduce((o, p) => (o == null ? o : o[p]), T[P.lang]); return typeof v === "function" ? v(...a) : v ?? k; };
@@ -212,6 +216,7 @@ function initZoomController() {
   } catch (_) {}
 
   const apply = (scale, save = true) => {
+    if (window.matchMedia("(max-width: 760px)").matches) scale = 1;   // no custom page zoom on a phone
     scale = Math.min(1.4, Math.max(0.7, Math.round(scale * 100) / 100));
     const pct = Math.round(scale * 100);
     document.documentElement.style.zoom = String(scale);
@@ -355,6 +360,9 @@ function render() {
     el("h2", { text: `🔒 ${t(me.lock_reason === "sent" ? "locked_t" : "not_open")}` }),
     me.lock_reason === "sent" ? el("p", { text: t("locked_p", me.submitted ? fmtDate(me.submitted.at) : "") }) : null) : null;
   const waiting = me.turn === "siloam";
+  const termsBox = (me.terms || []).length ? el("details", { class: "terms", open: me.step === "rfq" && !me.locked },
+    el("summary", {}, el("b", { text: `${t("terms_t")} · ${me.category}${me.period ? ` · ${me.period}` : ""}` })),
+    el("ol", {}, me.terms.map((x) => el("li", { text: x[P.lang] || x.id })))) : null;
   const returned = me.return_note ? el("p", { class: "warnline", role: "status" }, `${t("returned")}${me.return_note.message ? `: ${me.return_note.message}` : ""}`) : null;
   put(app,
     el("section", { class: "pcard stepcard" },
@@ -363,6 +371,7 @@ function render() {
       el("p", { class: "muted", text: `${t("contract")} ${fmtDate(me.contract.start)} – ${fmtDate(me.contract.end)}${me.due && !waiting ? ` · ${t("due")} ${fmtDate(me.due)}` : ""}` }),
       me.overdue_days > 0 && !waiting ? el("p", { class: "warnline", role: "status", text: `⚠ ${t("overdue", me.overdue_days)}` }) : null,
       returned,
+      termsBox,
       me.locked ? null : howto,
       me.step === "submission" || me.locked ? null : el("div", { class: "excelrow" },
         el("span", { class: "muted", text: me.excel_upload ? t("excel_or") : "" }),
@@ -386,8 +395,9 @@ function toolbar() {
       onclick: () => { P.view = v; try { localStorage.setItem("nego-p-view", v); } catch (_) { /* ignore */ } P.one = 0; renderList(); document.querySelectorAll(".seg button").forEach((b, i) => b.setAttribute("aria-pressed", String(VIEWS()[i] === v))); } })));
   const bulk = P.me.step !== "feedback1" || P.me.locked ? null :
     el("button", { type: "button", class: "pbtn ghost", text: t("fill_fb1"), onclick: bulkFill });
+  const addNew = P.me.step !== "rfq" || P.me.locked ? null : el("button", { type: "button", class: "pbtn", text: t("new_btn"), onclick: openNewItem });
   return el("section", { class: "toolbar" }, chips,
-    el("div", { class: "tools" }, search, views, bulk,
+    el("div", { class: "tools" }, search, views, bulk, addNew,
       P.me.locked ? null : el("button", { type: "button", class: "pbtn ghost", text: t("next_todo"), onclick: nextTodo })));
 }
 
@@ -476,6 +486,34 @@ async function bulkFill() {
   try { const r = await call("/api/p/fill", { method: "POST", body: {} }); toast(t("filled", r.filled)); load(true); } catch (e) { toast(e.message); }
 }
 
+function openNewItem() {
+  const drugs = P.me.category === "Drugs";
+  const f = {
+    item_name: el("input", { required: "", maxlength: 200, "aria-label": t("new_name") }),
+    brand: el("input", { maxlength: 200 }),
+    ref: el("input", { maxlength: 200 }),
+    qty: el("input", { inputmode: "numeric" }),
+    hna: el("input", { inputmode: "decimal" }),
+    disc: el("input", { inputmode: "decimal", placeholder: "15" }),
+  };
+  f.qty.addEventListener("input", () => { f.qty.value = digits(f.qty.value); });
+  f.hna.addEventListener("input", () => { const v = hnaValue(f.hna.value); f.hna.value = v ? hnaShow(v) : ""; });
+  const lab = (k, label, input) => el("label", { class: "field" }, el("span", { class: "lbl", text: label }), input);
+  const err = el("p", { class: "error", role: "alert", hidden: true });
+  const form = el("form", { onsubmit: async (e) => {
+    e.preventDefault();
+    try {
+      await call("/api/p/items", { method: "POST", body: { item_name: f.item_name.value.trim(), brand: f.brand.value.trim(), [drugs ? "active_ingredient" : "catalog_no"]: f.ref.value.trim(), rfq_qty: digits(f.qty.value), rfq_hna: hnaValue(f.hna.value), rfq_disc: discValue(f.disc.value) } });
+      $("dlg").close(); toast(t("new_added")); P.filter = "all"; load(true);
+    } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+  } },
+    lab("n", t("new_name"), f.item_name), lab("b", t("brand"), f.brand), lab("r", drugs ? t("ai") : t("ref"), f.ref),
+    el("div", { class: "grid3" }, lab("q", t("qty", P.lang === "id" ? "kemasan" : "pack"), f.qty), lab("h", t("hna", P.lang === "id" ? "kemasan" : "pack"), f.hna), lab("d", t("disc"), f.disc)),
+    err, el("div", { class: "pactions" }, el("button", { type: "submit", class: "pbtn primary", text: t("add") }), el("button", { type: "button", class: "pbtn", text: t("cancel"), onclick: () => $("dlg").close() })));
+  put(clear($("dlg-body")), el("h2", { text: t("new_t") }), el("p", { class: "muted", text: t("new_p") }), form);
+  $("dlg").showModal();
+}
+
 // ---------- table view (looks and moves like an Excel sheet) ----------
 const TCOLS = {
   rfq: ["item", "status", "brand", "ref", "hna", "qty", "disc", "unit"],
@@ -489,6 +527,7 @@ function theader() {
 }
 
 function statusSelect(a, it) {
+  if (it.is_new) return el("span", { class: "tag req", text: t("new_badge") });
   const sel = el("select", { "aria-label": t("status"), "data-col": "status" },
     el("option", { value: "Active", text: t("active"), selected: it.item_status === "Active" }),
     el("option", { value: "Discontinue", text: t("disc_btn"), selected: it.item_status === "Discontinue" }));
@@ -635,7 +674,16 @@ function card(it) {
   return a;
 }
 
+function newBadge(a, it) {
+  return el("div", { class: "field status" }, el("span", { class: "lbl", text: t("status") }),
+    el("span", { class: "tag req", text: t("new_badge") }),
+    P.me.locked ? null : el("button", { type: "button", class: "pbtn small ghost", text: t("new_remove"), onclick: async () => {
+      try { await call(`/api/p/items/${it.id}`, { method: "DELETE" }); load(true); } catch (e) { toast(e.message); } } }),
+    el("p", { class: "small muted", text: t("new_note") }));
+}
+
 function statusButtons(a, it) {
+  if (it.is_new) return newBadge(a, it);
   const mk = (val, label) => el("button", { type: "button", class: `sbtn ${it.item_status === val ? "on" : ""}`, "aria-pressed": String(it.item_status === val), text: label,
     disabled: !!P.me.locked, onclick: () => save(a, it, { item_status: val }) });
   return el("div", { class: "field status" }, el("span", { class: "lbl", text: t("status") }),
@@ -787,6 +835,9 @@ async function loadDocs() {
 
 function drawDocs(d) {
   const box = clear($("docs"));
+  const sendBtn = document.querySelector(".sendbar button");
+  if (sendBtn && P.me.step === "submission") { sendBtn.disabled = d.missing_required.length > 0; sendBtn.title = d.missing_required.length ? t("docs_locked") : ""; }
+  if (d.missing_required.length) put(box, el("p", { class: "warnline", text: t("docs_locked") }));
   put(box, el("p", { class: "muted", text: t("doc_note") }));
   const list = el("div", { class: "doclist-p" });
   for (const ty of d.types) {
@@ -839,11 +890,14 @@ async function openSummary() {
       render();
     } catch (e) { toast(e.message); sendBtn.disabled = false; }
   });
-  const facts = s.step === "submission" ? [["doc_uploaded", s.documents], ["sum_missing", s.missing]]
+  const facts = s.step === "submission" ? [["doc_uploaded", s.documents], ["docs_missing", (s.missing_documents || []).length]]
     : [["sum_items", s.items], ["sum_done", s.done], ["sum_missing", s.missing], ["sum_check", s.to_check], ["sum_disc", s.discontinued]];
   const body = clear($("dlg-body"));
   put(body, el("h2", { text: t("sum_t") }),
-    el("div", { class: "facts" }, facts.map(([k, v]) => el("div", { class: k === "sum_missing" && v ? "bad" : k === "sum_check" && v ? "warn" : "" }, el("span", { text: t(k) }), el("b", { text: num(v) })))),
+    el("div", { class: "facts" }, facts.map(([k, v]) => el("div", { class: (k === "sum_missing" || k === "docs_missing") && v ? "bad" : k === "sum_check" && v ? "warn" : "" }, el("span", { text: t(k) }), el("b", { text: num(v) })))),
+    s.step === "submission" ? ((s.missing_documents || []).length
+      ? el("div", {}, el("h3", { text: t("docs_missing") }), el("ul", { class: "left" }, s.missing_documents.map((k) => el("li", { text: ({ nib: "NIB", npwp: "NPWP", pakta_integritas: "Pakta Integritas" })[k] || k }))))
+      : el("p", { class: "okline", text: `✓ ${t("docs_ok")}` })) :
     s.outstanding_count ? el("div", {}, el("h3", { text: `${t("sum_left")} (${num(s.outstanding_count)})` }),
       el("ul", { class: "left" }, s.outstanding.map((o) => el("li", {},
         el("div", {}, el("b", { text: o.item_name }), el("span", { class: "muted", text: ` ${o.erp_code || ""}` }),
@@ -891,6 +945,7 @@ function showUpload(out, r, f) {
   agree.addEventListener("change", () => { save.disabled = !agree.checked; });
   const fmtV = (v) => (v == null ? "—" : typeof v === "number" && v > 0 && v < 1 ? discShow(v) : String(v));
   put(clear(out), el("p", { class: bad ? "warnline" : "okline", text: t("up_res", r.saved_rows ?? r.accepted, bad) }),
+    r.new_items && r.new_items.length ? el("div", { class: "okline" }, el("p", { text: t("new_n", r.new_items.length) }), el("ul", { class: "small left" }, r.new_items.map((n) => el("li", { text: `${t("row")} ${n.row}: ${n.item_name}` })))) : null,
     r.unmatched_count ? el("p", { class: "small muted", text: t("not_found", r.unmatched_count) }) : null,
     bad ? el("ul", { class: "left errs" }, [...r.read_errors, ...r.rejected].map((x) => el("li", {},
       el("b", { text: `${t("row")} ${x.row}` }), x.item_name ? el("span", { text: ` ${x.item_name}` }) : null,
@@ -900,7 +955,7 @@ function showUpload(out, r, f) {
     r.overwrite_count ? el("div", { class: "warnline" }, el("p", { text: t("up_overwrite", r.overwrite_count) }), el("label", { class: "agree" }, agree, t("up_overwrite_ok"))) : null,
     r.notes.length ? el("details", {}, el("summary", { text: `${r.notes.length} catatan / notes` }),
       el("ul", { class: "small" }, r.notes.map((n) => el("li", { text: `${t("row")} ${n.row}: ${msg(n)}` })))) : null,
-    r.accepted || (r.changes && r.changes.length) ? save : null);
+    r.accepted || (r.changes && r.changes.length) || (r.new_items && r.new_items.length) ? save : null);
 }
 
 boot();

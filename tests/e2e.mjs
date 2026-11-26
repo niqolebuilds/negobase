@@ -214,13 +214,18 @@ await t("E2/E3: Confirmation columns, rounding, BAK and PKS Word files", async (
   assert.equal(bak.status, 200); assert.equal(bak.j.slice(0, 2).toString("latin1"), "PK", "BAK is a Word (zip) file");
   const pks = await call("GET", `/api/admin/nego/cycles/${cid}/pks.docx`);
   assert.equal(pks.status, 200);
+  const zp = await call("GET", `/api/admin/nego/cycles/${cid}/package.zip`);
+  assert.equal(zp.status, 200); assert.equal(zp.j.slice(0, 2).toString("latin1"), "PK");
+  const JSZip = (await import("jszip")).default;
+  const names = Object.keys((await JSZip.loadAsync(zp.j)).files);
+  assert.equal(names.length, 3, names.join(", "));
 });
 
 await t("A7: analysis and report", async () => {
   const a = (await call("GET", `/api/nego/cycles/${cid}/analysis?mode=pre`)).j;
-  assert.ok(a.columns.length >= 60, `pre columns ${a.columns.length}`);
+  assert.equal(a.columns.length, 68, `pre columns ${a.columns.length}`);
   const b = (await call("GET", `/api/nego/cycles/${cid}/analysis?mode=post`)).j;
-  assert.ok(b.columns.length > a.columns.length, "post has the FIN columns");
+  assert.equal(b.columns.length, 70, `post columns ${b.columns.length}`);
   const rep = (await call("GET", "/api/admin/report")).j;
   assert.equal(rep.columns.length, 19);
   assert.ok(rep.fb1.length >= 1 && rep.fin.length >= 1);
@@ -365,6 +370,64 @@ await t("B5 confirm then submit; step moves to review or counter offer; back a s
   // the price no longer goes up: the old reason is dropped
   const fix = await P2("PATCH", `/api/p/items/${flagged.id}`, { changes: { rfq_disc: "10" } });
   assert.equal(fix.status, 200);
+});
+
+
+// ---- New Item: status, new row from Excel and from the portal, finding for Siloam
+await t("New Item: Excel row at the bottom and portal add both reach the list and Findings", async () => {
+  const pr = await call("POST", "/api/admin/nego/principals", { name: "PT DUMMY BARU FARMA", category: "Drugs", nego_type: "New Vendor", binding: "Nett" });
+  const c = await call("POST", "/api/admin/nego/cycles", { principal_id: pr.j.id, contract_start: "2027-01-15", contract_end: "2030-01-14", binding: "Nett", category: "Drugs" });
+  const c4 = c.j.id;
+  // no items in the sample for this principal: tag one SKU so the list is not empty
+  await up(`/api/admin/periods/${drugsId}/upload`, "tag.csv", "ERP Code,Principal\nBRU000001,PT DUMMY BARU FARMA\n", { kind: "sku_tagging" });
+  await up(`/api/admin/periods/${drugsId}/upload`, "f.csv", "Kode Barang,Nama Barang,Principal,Merk,Status,Satuan,HNA,Konversi,Disc\nBRU000001,Obat Lama,PT DUMMY BARU FARMA,B,Active,BOX@10,100000,10,10%\n", { kind: "formulary" });
+  const prep = await call("POST", `/api/admin/nego/cycles/${c4}/prepare`, {});
+  assert.equal(prep.status, 200, JSON.stringify(prep.j).slice(0, 200));
+  await call("POST", `/api/admin/nego/cycles/${c4}/step`, { step: "rfq", due: new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10) });
+  const link = await call("POST", `/api/admin/nego/cycles/${c4}/links`, { days: 7 });
+  const tk = (link.j.path || link.j.url).split("/p/")[1];
+  const P4 = (method, path, body) => call(method, path + (path.includes("?") ? "&" : "?") + `token=${tk}`, body, { "X-Principal-Token": tk });
+  // portal: add a new item
+  const add = await P4("POST", "/api/p/items", { item_name: "Obat Baru Alfa", brand: "Alfa", active_ingredient: "Alfaprazol", rfq_qty: "10", rfq_hna: "50000", rfq_disc: "5" });
+  assert.equal(add.status, 200, JSON.stringify(add.j));
+  assert.equal(add.j.item_status, "New Item"); assert.equal(add.j.is_new, true);
+  const dup = await P4("POST", "/api/p/items", { item_name: "obat baru alfa" });
+  assert.equal(dup.status, 409);
+  // Excel: a row at the bottom with status New Item
+  const ExcelJS = (await import("exceljs")).default;
+  const x = await fetch(`${BASE}/api/p/template.xlsx?token=${tk}`, { headers: { "X-Principal-Token": tk } });
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(Buffer.from(await x.arrayBuffer()));
+  const ws = wb.worksheets[0]; const hdr = ws.getRow(7).values; const col = (h) => hdr.indexOf(h);
+  let r = 8; while (ws.getCell(r, 1).value) r++;
+  ws.getCell(r, col("Item Name")).value = "Obat Baru Beta"; ws.getCell(r, col("Item Status")).value = "New Item";
+  ws.getCell(r, col("Brand / Manufacturer")).value = "Beta"; ws.getCell(r, col("Active Ingredient")).value = "Betamol";
+  ws.getCell(r, col("RFQ_Qty/PO Unit")).value = 20; ws.getCell(r, col("RFQ_HNA/PO Unit (excl. PPN)")).value = 80000; ws.getCell(r, col("RFQ_Disc%")).value = 12.5;
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  const pv = await up(`/api/p/template?token=${tk}`, "t.xlsx", buf, { apply: "0" }, { "X-Principal-Token": tk });
+  assert.equal(pv.j.new_items.length, 1, JSON.stringify(pv.j).slice(0, 300));
+  const ap = await up(`/api/p/template?token=${tk}`, "t.xlsx", buf, { apply: "1", confirm_overwrite: "1" }, { "X-Principal-Token": tk });
+  assert.equal(ap.j.new_items, 1, JSON.stringify(ap.j));
+  const its = (await call("GET", `/api/nego/cycles/${c4}/items?filter=new&limit=50`)).j.items;
+  assert.equal(its.length, 2, "both new items are in the SKU list");
+  assert.ok(its.every((i) => i.item_status === "New Item" && /^NEW-\d+$/.test(i.erp_code)));
+  const f = (await call("GET", `/api/nego/cycles/${c4}/anomalies?status=open`)).j.anomalies.filter((a) => a.rule === "new_item");
+  assert.equal(f.length, 2, "Siloam sees a finding per new item");
+  // Siloam assigns the ERP code, then approves
+  const target = its[0];
+  const bad = await call("PATCH", `/api/admin/nego/cycles/${c4}/items/${target.id}`, { changes: { erp_code: "BRU000001" } });
+  assert.equal(bad.status, 409, "ERP code already used");
+  const okc = await call("PATCH", `/api/admin/nego/cycles/${c4}/items/${target.id}`, { changes: { erp_code: "BRU000099" } });
+  assert.equal(okc.status, 200, JSON.stringify(okc.j));
+  const fin = f.find((a) => a.item_id === target.id);
+  const dec = await call("POST", `/api/admin/nego/cycles/${c4}/anomalies/${fin.id}`, { decision: "fix" });
+  assert.equal(dec.status, 200, JSON.stringify(dec.j));
+  const after = (await call("GET", `/api/nego/cycles/${c4}/items/${target.id}`)).j;
+  assert.equal(after.item_status, "Active");
+  const mine = (await P4("GET", "/api/p/items?limit=50")).j.items.filter((i) => i.is_new);
+  assert.equal(mine.length, 2);
+  // a new item row from the portal can be removed before sending
+  const del = await P4("DELETE", `/api/p/items/${its[1].id}`);
+  assert.equal(del.status, 200);
 });
 
 console.log(`\n${n} checks passed`);

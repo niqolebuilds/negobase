@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import multer from "multer";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { readTable, pick, hasColumn, toNumber, toIsoDate, type Row } from "./tabular.js";
 import { buildTemplate, readTemplate, checkRow, type TemplateRow } from "./template.js";
 import { buildConfirmationWorkbook, buildBakDocx, buildPksDocx, fillDocxTemplate, confRow, type ConfRow, type DocMeta } from "./bak.js";
@@ -218,20 +219,15 @@ const SETTINGS_DEFS: SettingDef[] = [
   { key: "anomaly_group_spread", label: "Price above the cheapest equivalent brand that raises a flag", group: "Principal negotiations", default: 0.20, kind: "fraction", min: 0, max: 5, help: "Items with the same generic name or group (Admin > Master data) are compared per piece.", optional: false },
   { key: "escalation_pct", label: "Escalate when the agreed cost impact is above this share of the principal's yearly PO value (+PPN)", group: "Principal negotiations", default: 0.05, kind: "fraction", min: 0, max: 1, help: "Cost impact (FIN) vs the yearly PO value. 0 = off. Either limit passed means escalation.", optional: false },
   { key: "escalation_rp", label: "Escalate when the agreed cost impact is above (Rp a year)", group: "Principal negotiations", default: 50000000, kind: "number", min: 0, max: 1e13, help: "0 = off. Either limit passed means escalation.", optional: false },
-  { key: "whatsapp_after_days", label: "Send the WhatsApp nudge when a principal hasn't acted for this many days", group: "Principal negotiations", default: 2, kind: "int", min: 0, max: 30, help: "", optional: false },
-  { key: "reminders_on", label: "Send deadline reminders to principals", group: "Principal negotiations", default: true, kind: "bool", min: null, max: null, help: "Through Power Automate, when automatic sending is set up.", optional: false },
-  { key: "reminder_first_days", label: "First reminder, days before the deadline", group: "Principal negotiations", default: 3, kind: "int", min: 0, max: 30, help: "", optional: false },
-  { key: "reminder_second_days", label: "Second reminder, days before the deadline", group: "Principal negotiations", default: 1, kind: "int", min: 0, max: 30, help: "", optional: false },
   { key: "step_days", label: "Default days a principal gets to complete a step", group: "Principal negotiations", default: 7, kind: "int", min: 1, max: 60, help: "", optional: false },
   { key: "mou_alert_weekday", label: "Weekday for the MOU alert email (0 = Monday)", group: "Principal negotiations", default: 0, kind: "int", min: 0, max: 6, help: "", optional: false },
-  { key: "llm_assist", label: "Draft messages with Claude (counter-offer cover, meeting summary, escalation note)", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false },
   { key: "llm_fallback", label: "Send questions the built-in parser can't understand to Claude", group: "Assistant", default: false, kind: "bool", min: null, max: null, help: "Needs ANTHROPIC_API_KEY on the server.", optional: false },
 ];
 
 const settingsValues: Record<string, any> = Object.fromEntries(SETTINGS_DEFS.map((s) => [s.key, s.default]));
 
 // Settings that the negotiation does not use (price intelligence, rebates, reminders) stay out of Engine settings.
-const HIDDEN_SETTINGS = new Set(["anomaly_increase_tolerance", "anomaly_po_deviation", "anomaly_outlier_z", "anomaly_review_top_n", "check_high_disc_unused", "co_max_extra", "anomaly_benchmark_deviation", "anomaly_group_spread", "whatsapp_after_days", "reminders_on", "reminder_first_days", "reminder_second_days", "mou_alert_weekday", "llm_fallback"]);
+const HIDDEN_SETTINGS = new Set(["anomaly_increase_tolerance", "anomaly_po_deviation", "anomaly_outlier_z", "anomaly_review_top_n", "check_high_disc_unused", "co_max_extra", "anomaly_benchmark_deviation", "anomaly_group_spread", "mou_alert_weekday", "llm_fallback"]);
 const HIDDEN_GROUPS = new Set(["Targets", "Money", "Rebates", "Renewals & alerts"]);
 function describeSettings() {
   return SETTINGS_DEFS.filter((s) => !HIDDEN_GROUPS.has(s.group) && !HIDDEN_SETTINGS.has(s.key)).map((s) => ({
@@ -1343,6 +1339,12 @@ function scanCycleAnomalies(cid: number) {
       const last = comments[comments.length - 1];
       pushFinding(raw, "principal_comment", "Pengajuan koreksi dari principal", "medium", `Principal mengajukan koreksi: "${last.text}"`, { principal_comment: last.text });
     }
+    if (raw.is_new && raw.item_status === "New Item") {
+      pushFinding(raw, "new_item", "Item baru dari principal", "medium",
+        `Item baru "${raw.item_name}" (kode sementara ${raw.erp_code}): belum ada MOU, PO, atau formularium sebagai pembanding. Cek NIE, kode ERP, dan harganya, lalu setujui sebagai item aktif.`,
+        { field: "item_status", suggestion: null, suggestion_text: "Beri ERP code di detail item, lalu ubah status ke Active" });
+      continue;
+    }
     if (raw.item_status === "Discontinue") continue;
     const acuan = en.primary_bench;
     const tag = en.bench_tag;
@@ -1366,7 +1368,7 @@ function scanCycleAnomalies(cid: number) {
       }
     }
     // 2. RFQ price down > 0.5%
-    if (en.rfq_unit_price != null && acuan && acuan > 0) {
+    if (en.rfq_unit_price != null && acuan && acuan > 0 && !(raw.rfq_disc >= 1)) {   // a wrong discount format is its own finding
       const drop = (acuan - en.rfq_unit_price) / acuan;
       if (drop > downLimit) {
         pushFinding(raw, "price_decrease_rfq", `Harga RFQ turun >${(downLimit * 100).toString().replace(".", ",")}%`, "high",
@@ -2935,6 +2937,7 @@ app.get("/api/nego/cycles/:cid/items", (req: Request, res: Response) => {
   else if (filter === "increase") rows = rows.filter((r) => (r.change_pct || 0) > 0.0005);
   else if (filter === "decrease") rows = rows.filter((r) => (r.change_pct || 0) < -0.0005);
   else if (filter === "no_mou") rows = rows.filter((r) => !r.in_mou);
+  else if (filter === "new") rows = rows.filter((r) => r.is_new);
   else if (filter === "no_rfq") rows = rows.filter((r) => r.rfq_hna == null && r.item_status !== "Discontinue");
   else if (filter === "has_rfq") rows = rows.filter((r) => r.rfq_hna != null);
   else if (filter === "discontinued") rows = rows.filter((r) => r.item_status === "Discontinue");
@@ -3412,7 +3415,7 @@ app.get("/api/admin/nego/principals-template.xlsx", async (_req: Request, res: R
     "Category: Drugs, CnC, or Drugs & CnC.",
     "Negotiation Type: Renewal, New Vendor, Addendum or Force Majeure.",
     "Binding: Nett, Disc or Nett to Disc.",
-    "Items (ERP codes): optional, separated by ; or commas. These items are tagged to the principal.",
+    "Items are not listed here: tag SKUs to principals with the SKU tagging upload in Admin > Negotiation Periods.",
     "Current MOU Start / End: yyyy-mm-dd. Required except for New Vendor. The end date drives the 6-month alert.",
     "The new contract dates are entered when you start the negotiation.",
   ].forEach((t) => notes.addRow([t]));
@@ -3520,8 +3523,33 @@ function newCycleItem(cid: number, idx: number, it: any) {
     id: idx + 1, cycle_id: cid, sort: idx + 1, ...it,
     rfq_qty: null, rfq_hna: null, rfq_disc: null, co_disc: null, fb1_disc: null, on_disc: null, on_disc_nett: null, on_disc_disc: null,
     price_reason: null, co_note: null, proceed_bak: null, needs_check: false, check_note: null,
-    comments: [], corrections: [], history: [], version: 0,
+    is_new: false, comments: [], corrections: [], history: [], version: 0,
   };
+}
+
+// A new item the principal adds in the RFQ (portal or Excel): no MOU, PO or formulary yet, so nothing to compare
+// with. It gets a temporary code (NEW-001) until Siloam assigns the ERP code, and a finding so Siloam checks it.
+function addNewItem(cid: number, f: Record<string, any>, by: string) {
+  const items = cycleItemsMap.get(cid) || [];
+  const used = new Set(items.map((i) => String(i.erp_code)));
+  let code = normalizeCode(f.erp_code);
+  if (!code || used.has(code)) {
+    let k = items.filter((i) => /^NEW-\d+$/.test(String(i.erp_code))).length + 1;
+    while (used.has(`NEW-${String(k).padStart(3, "0")}`)) k++;
+    code = `NEW-${String(k).padStart(3, "0")}`;
+  }
+  const base = newCycleItem(cid, 0, {
+    erp_code: code, item_name: String(f.item_name || "").trim().slice(0, 200), brand: "", catalog_no: "", active_ingredient: "", item_status: "New Item", remarks: null,
+    mou_qty: null, mou_hna: null, mou_disc: null, formulary_hna: null, form_conv: null, form_disc: null, hna_sbp: null, form_kind: "",
+    bucket: "", sbp: null, need_sbp: null, notes: "", po_unit_text: "", po_qty_12m: 0, po_value_12m: 0, po_avg_price: null, last_po_price: null, po_years: {},
+  });
+  const it: any = { ...base, id: Math.max(0, ...items.map((i) => i.id)) + 1, sort: items.length + 1, is_new: true, added_by: by, added_at: nowIso() };
+  items.push(it);
+  cycleItemsMap.set(cid, items);
+  const changes: Record<string, any> = {};
+  for (const k of ["brand", "catalog_no", "active_ingredient", "remarks", "rfq_qty", "rfq_hna", "rfq_disc", "price_reason"]) if (f[k] !== undefined && f[k] !== null && f[k] !== "") changes[k] = f[k];
+  recordChange(it, changes, { source: "item baru", by });
+  return it;
 }
 
 app.post("/api/admin/nego/cycles", (req: Request, res: Response) => {
@@ -3540,8 +3568,9 @@ app.post("/api/admin/nego/cycles", (req: Request, res: Response) => {
   if (cyclesList.some((x) => x.principal_id === p.id && x.status === "open" && (x.category || categoriesOf(p)[0]) === category)) {
     return res.status(409).json({ error: `${p.name} already has an open ${category} negotiation` });
   }
-  // The negotiation reads the active period of its own category.
-  const per = activePeriodFor(category);
+  // The negotiation reads the active period of its own category. With none active there is no price to read.
+  const per = periodsList.find((x) => x.category === category && x.active);
+  if (!per) return res.status(400).json({ error: `Belum ada periode ${category} yang aktif. Aktifkan satu periode ${category} di Admin > Negotiation Periods.` });
   const c = {
     id: Math.max(0, ...cyclesList.map((x) => x.id)) + 1,
     principal_id: p.id,
@@ -3604,7 +3633,18 @@ function computePackage(cid: number) {
     discontinued: items.length - active.length,
     missing_on: incomplete.slice(0, 10).map((x) => x.erp_code),
     escalation: esc,
+    templates: templateChoice(cid),
   };
+}
+
+// Which Word template each document uses: Nett binding -> Nett template; Disc and Nett to Disc -> Disc template.
+// A final scheme chosen in Online Nego overrides the binding.
+function templateChoice(cid: number) {
+  const c = cycleOf(cid);
+  const scheme = (c.final_scheme || (c.binding === "Nett" ? "Nett" : "Disc")) as "Nett" | "Disc";
+  const bakKey = scheme === "Nett" ? "bak_nett" : "bak_disc";
+  const info = (k: string) => (docTemplates[k] ? `${docTemplates[k].name} (unggahan Siloam)` : "draft bawaan app");
+  return { binding: c.binding, scheme, from_final_scheme: !!c.final_scheme, bak: { key: bakKey, label: DOC_TEMPLATE_KEYS[bakKey], using: info(bakKey) }, pks: { key: "pks", label: DOC_TEMPLATE_KEYS.pks, using: info("pks") } };
 }
 
 app.post("/api/admin/nego/cycles/:cid/step", (req: Request, res: Response) => {
@@ -3773,7 +3813,7 @@ app.post("/api/admin/nego/cycles/:cid/scan", (req: Request, res: Response) => {
 
 // Staff edits to one negotiation item: only these fields, with real values. (Nothing else on the item,
 // such as its id, ERP code or PO history, can be overwritten from a request.)
-const ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note", "notes", "bucket", "active_ingredient"];
+const ITEM_TEXT_FIELDS = ["brand", "catalog_no", "remarks", "price_reason", "co_note", "notes", "bucket", "active_ingredient", "erp_code", "item_name"];
 const ITEM_DISC_FIELDS = ["rfq_disc", "co_disc", "fb1_disc", "on_disc", "on_disc_nett", "on_disc_disc", "mou_disc"];
 const ITEM_NUM_FIELDS = ["rfq_qty", "rfq_hna", "mou_qty", "mou_hna"];
 const ITEM_BOOL_FIELDS = ["proceed_bak", "sbp", "need_sbp"];
@@ -3783,7 +3823,7 @@ function cleanItemChanges(input: any): { changes: any; error?: string } {
     if (ITEM_TEXT_FIELDS.includes(k)) out[k] = v == null || v === "" ? null : String(v).trim().slice(0, 300);
     else if (ITEM_BOOL_FIELDS.includes(k)) out[k] = v === null || v === "" ? null : v === true || v === "true" || v === "yes";
     else if (k === "item_status") {
-      if (!["Active", "Discontinue"].includes(String(v))) return { changes: {}, error: "Item status must be Active or Discontinue" };
+      if (!["Active", "Discontinue", "New Item"].includes(String(v))) return { changes: {}, error: "Item status must be Active, Discontinue or New Item" };
       out[k] = v;
     } else if (ITEM_DISC_FIELDS.includes(k)) {
       const d = parseDiscount(v);
@@ -3815,6 +3855,17 @@ app.patch("/api/admin/nego/cycles/:cid/items/:iid", (req: Request, res: Response
   if (!it || !c) return res.status(404).json({ error: "No such item" });
   const clean = cleanItemChanges(req.body?.changes || {});
   if (clean.error) return res.status(400).json({ error: clean.error });
+  if (clean.changes.erp_code !== undefined || clean.changes.item_name !== undefined) {
+    if (!it.is_new) return res.status(400).json({ error: "ERP code dan nama hanya bisa diubah untuk item baru dari principal." });
+    if (clean.changes.erp_code !== undefined) {
+      const code = normalizeCode(clean.changes.erp_code);
+      if (!code) return res.status(400).json({ error: "ERP code tidak boleh kosong." });
+      if (items.some((x) => x.id !== it.id && x.erp_code === code)) return res.status(409).json({ error: `ERP code ${code} sudah dipakai SKU lain di negosiasi ini.` });
+      clean.changes.erp_code = code;
+    }
+    if (clean.changes.item_name !== undefined && !clean.changes.item_name) return res.status(400).json({ error: "Nama item tidak boleh kosong." });
+  }
+  if (clean.changes.item_status === "New Item" && !it.is_new) return res.status(400).json({ error: "Status New Item hanya untuk item baru dari principal." });
   const ppn = Number(settingsValues.ppn_rate) || 0.11;
   // Someone else saved this item since the page was loaded.
   const baseVersion = req.body?.base_version;
@@ -3848,7 +3899,10 @@ app.post("/api/admin/nego/cycles/:cid/anomalies/:aid", (req: Request, res: Respo
   const it = items.find((x) => x.id === a.item_id);
   const c = cycleOf(cid);
   if (decision === "fix") {
-    if (a.field && a.suggestion != null && it) {
+    if (a.rule === "new_item" && it) {
+      if (/^NEW-\d+$/.test(String(it.erp_code))) return res.status(400).json({ error: "Beri ERP code resmi di detail item dulu, lalu setujui item baru ini." });
+      recordChange(it, { item_status: "Active" }, { source: "item baru disetujui" });
+    } else if (a.field && a.suggestion != null && it) {
       if (lockedStepFor(c, a.field)) return res.status(423).json({ error: "Data step ini sudah terkunci. Koreksi lewat detail item dengan alasan." });
       recordChange(it, { [a.field]: a.suggestion }, { source: "finding" });
     }
@@ -3877,7 +3931,7 @@ app.get("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
 
 app.post("/api/admin/nego/cycles/:cid/links", (req: Request, res: Response) => {
   const cid = Number(req.params.cid);
-  const days = Math.max(1, Math.min(90, Number(req.body?.days) || 14));
+  const days = Math.max(1, Math.min(90, Number(req.body?.days) || Number(settingsValues.principal_link_days) || 14));
   const links = cycleLinksMap.get(cid) || [];
   const token = crypto.randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString();
@@ -4391,6 +4445,7 @@ function formatPrincipalItem(it: any, step: string, cycle?: any) {
     brand: it.brand || "",
     catalog_no: it.catalog_no || "",
     active_ingredient: it.active_ingredient || "",
+    is_new: !!it.is_new,
     item_status: it.item_status || "Active",
     remarks: it.remarks || null,
     rfq_qty: it.rfq_qty ?? null,
@@ -4419,6 +4474,29 @@ function portalLocked(cycle: any, step: string): { locked: boolean; reason: stri
   if (cycle.current_step !== step) return { locked: true, reason: sent ? "sent" : "not_open" };
   if (sent) return { locked: true, reason: "sent" };
   return { locked: false, reason: null };
+}
+
+// What every principal must know, per negotiation (so per category). Shown at the top of the portal.
+const ddmmyyyy = (iso: string) => { const [y, m, d] = String(iso || "").slice(0, 10).split("-"); return y ? `${d}/${m}/${y}` : "-"; };
+function termsFor(cycle: any): { id: string; en: string }[] {
+  const b = cycle.binding;
+  const bind = b === "Disc"
+    ? { id: "Pengikatan dilakukan pada discount. Harga dasar mengikuti HNA, dan discount yang disepakati tetap berlaku selama periode kontrak.", en: "Binding is on the discount. The price follows the HNA and the agreed discount stays fixed for the contract period." }
+    : b === "Nett to Disc"
+    ? { id: "Pengikatan dilakukan pada nett price, dengan perhitungan dari HNA formularium Siloam dan discount yang disepakati. Apabila HNA berubah selama periode kontrak, discount menyesuaikan sehingga nett price tetap.", en: "Binding is on the nett price, calculated from Siloam's formulary HNA and the agreed discount. If the HNA changes during the contract, the discount adjusts so the nett price stays the same." }
+    : { id: "Pengikatan dilakukan pada nett price. Apabila terjadi kenaikan HNA selama periode kontrak, akan diberlakukan discount conversion sehingga nett price tetap sesuai kesepakatan.", en: "Binding is on the nett price. If the HNA rises during the contract period, a discount conversion is applied so the nett price stays as agreed." };
+  const fee = String(cycle.delivery_fee || "").replace(/^Delivery Fee:\s*/i, "");
+  const delivery = !fee || /^free/i.test(fee) ? { id: "Free delivery untuk seluruh unit Siloam Group.", en: "Free delivery to all Siloam Group units." } : { id: fee, en: fee };
+  return [
+    { id: `Contract Period: ${ddmmyyyy(cycle.contract_start)} sampai ${ddmmyyyy(cycle.contract_end)}`, en: `Contract Period: ${ddmmyyyy(cycle.contract_start)} to ${ddmmyyyy(cycle.contract_end)}` },
+    { id: `Binding: ${bind.id}`, en: `Binding: ${bind.en}` },
+    { id: `Delivery Fee: ${delivery.id}`, en: `Delivery Fee: ${delivery.en}` },
+    { id: "Seluruh kolom pada template RFQ yang telah ditandai wajib dilengkapi. Untuk New Item, tambahkan pada baris paling bawah dan isi status \"New Item\".", en: "All columns marked in the RFQ template are required. For a New Item, add it on the bottom row and set the status to \"New Item\"." },
+    { id: "Seluruh item wajib memiliki Nomor Izin Edar (NIE) yang masih berlaku pada saat quotation disampaikan.", en: "Every item must have a Marketing Authorization Number (NIE) that is still valid when the quotation is submitted." },
+    { id: "Untuk item berstatus Discontinued pada periode kontrak berikutnya, mohon melampirkan surat resmi discontinue dari principal atau principal global. Surat tidak perlu dikirimkan kembali apabila telah disampaikan sebelumnya.", en: "For items that will be Discontinued in the next contract period, please attach the official discontinue letter from the principal or global principal. The letter need not be sent again if it was submitted before." },
+    { id: "RFQ ini bersifat rahasia, merupakan initial offer, dan tidak dapat diartikan sebagai komitmen maupun jaminan kelanjutan kerja sama oleh Siloam Group.", en: "This RFQ is confidential, is an initial offer, and cannot be read as a commitment or guarantee of continued cooperation by Siloam Group." },
+    { id: "Principal diharapkan menyampaikan penawaran terbaik pada submission awal, mengingat penawaran tersebut akan menjadi dasar utama dalam proses evaluasi kerja sama.", en: "The principal is expected to give its best offer at the first submission, as it will be the main basis for evaluating the cooperation." },
+  ];
 }
 
 const PORTAL_STEP_NO: Record<string, number> = { rfq: 1, review_rfq: 2, counter_offer: 2, feedback1: 3, online_nego: 4, submission: 5, closed: 6 };
@@ -4456,6 +4534,7 @@ app.get("/api/p/me", (req: Request, res: Response) => {
     completed_at: cycle.completed_at || null,
     ppn: Number(settingsValues.ppn_rate) || 0.11,
     reasons: PORTAL_REASONS,
+    terms: termsFor(cycle),
     link_expires: link?.expires_at || addMonths(nowIso().slice(0, 10), 1),
     help: {
       whatsapp: process.env.NEGO_HELP_WHATSAPP || "6281112345678",
@@ -4506,8 +4585,14 @@ app.patch("/api/p/items/:iid", (req: Request, res: Response) => {
   let caution: string | null = null;
   if (changes) {
     if (changes.item_status !== undefined) {
-      if (!["Active", "Discontinue"].includes(String(changes.item_status))) return res.status(400).json({ error: "Status harus Aktif atau Discontinue." });
-      next.item_status = changes.item_status;
+      if (it.is_new && it.item_status === "New Item") { /* a new item stays New Item until Siloam approves it */ }
+      else if (!["Active", "Discontinue"].includes(String(changes.item_status))) return res.status(400).json({ error: "Status harus Aktif atau Discontinue." });
+      else next.item_status = changes.item_status;
+    }
+    if (changes.item_name !== undefined && it.is_new) {
+      const nm = String(changes.item_name || "").trim().slice(0, 200);
+      if (!nm) return res.status(400).json({ error: "Nama item tidak boleh kosong." });
+      next.item_name = nm;
     }
     for (const f of ["brand", "catalog_no", "active_ingredient", "remarks"]) if (changes[f] !== undefined) next[f] = String(changes[f] ?? "").trim().slice(0, 300);
     if (changes.rfq_qty !== undefined) {
@@ -4561,6 +4646,43 @@ app.patch("/api/p/items/:iid", (req: Request, res: Response) => {
   pruneAnswers(it, step, cycle);
   scanCycleAnomalies(cycle.id);
   res.json({ ...formatPrincipalItem(it, step, cycle), caution });
+});
+
+// The principal adds an item Siloam does not have (RFQ step only).
+app.post("/api/p/items", (req: Request, res: Response) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (step !== "rfq" || portalLocked(cycle, step).locked) return res.status(403).json({ error: "Item baru hanya bisa ditambahkan saat RFQ terbuka." });
+  const b = req.body || {};
+  const name = String(b.item_name || "").trim();
+  if (!name) return res.status(400).json({ error: "Nama item wajib diisi." });
+  if ((cycleItemsMap.get(cycle.id) || []).some((i) => String(i.item_name).trim().toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: "Nama item ini sudah ada di daftar." });
+  const f: Record<string, any> = { item_name: name };
+  if (b.brand) f.brand = String(b.brand).trim().slice(0, 300);
+  if (b.catalog_no) f.catalog_no = String(b.catalog_no).trim().slice(0, 300);
+  if (b.active_ingredient) f.active_ingredient = String(b.active_ingredient).trim().slice(0, 300);
+  if (b.rfq_qty) { const n = parseMoney(b.rfq_qty); if (n == null || n < 1) return res.status(400).json({ error: "Isi per kemasan harus bilangan bulat minimal 1." }); f.rfq_qty = Math.round(n); }
+  if (b.rfq_hna) { const n = parseMoney(b.rfq_hna); if (n == null || n <= 0) return res.status(400).json({ error: "Harga HNA tidak valid." }); f.rfq_hna = n; }
+  if (b.rfq_disc) { const d = parseDiscount(b.rfq_disc); if (d.error) return res.status(400).json({ error: d.error }); f.rfq_disc = d.value; }
+  const it = addNewItem(cycle.id, f, `principal:${cycle.principal.name}`);
+  scanCycleAnomalies(cycle.id);
+  logCycle(cycle.id, "principal.new_item", { item_name: name, code: it.erp_code }, `principal:${cycle.principal.name}`);
+  res.json(formatPrincipalItem(it, step, cycle));
+});
+
+// A new item can be taken back before sending.
+app.delete("/api/p/items/:iid", (req: Request, res: Response) => {
+  const resolved = resolvePrincipalCycle(req);
+  if (!resolved) return res.status(401).json({ error: "Tautan tidak berlaku / Link expired or invalid" });
+  const { cycle, step } = resolved;
+  if (portalLocked(cycle, step).locked) return res.status(403).json({ error: "Formulir sudah dikirim dan dikunci." });
+  const items = cycleItemsMap.get(cycle.id) || [];
+  const it = items.find((x) => x.id === Number(req.params.iid));
+  if (!it || !it.is_new) return res.status(400).json({ error: "Hanya item baru yang bisa dihapus." });
+  cycleItemsMap.set(cycle.id, items.filter((x) => x.id !== it.id));
+  scanCycleAnomalies(cycle.id);
+  res.json({ ok: true });
 });
 
 // "Accept all counter offers" fills only the SKUs the principal has not answered yet; an own discount stays.
@@ -4619,6 +4741,7 @@ app.get("/api/p/summary", (req: Request, res: Response) => {
     step,
     items: pItems.length,
     discontinued: dcList.length,
+    new_items: pItems.filter((i) => i.is_new).length,
     discontinued_list: dcList.slice(0, 200),
     needs_discontinue_confirm: step === "rfq" && dcList.length > 0,
     done: pItems.filter((i) => i.state === "done").length,
@@ -4726,19 +4849,37 @@ function fieldNow(it: any, field: string) { return it[field] ?? null; }
 
 // Reads the rows of a filled template against the negotiation's items. A code that appears twice is rejected
 // (every row of it) and listed; one wrong cell never throws away the other cells of its row.
-function planTemplateRows(rows: TemplateRow[], items: any[], allowed: string[]) {
+function planTemplateRows(rows: TemplateRow[], items: any[], allowed: string[], allowNew = false) {
   const byErp = new Map(items.map((i) => [String(i.erp_code).toUpperCase(), i]));
   const count = new Map<string, number[]>();
   for (const r of rows) if (r.erp_code) count.set(r.erp_code, [...(count.get(r.erp_code) || []), r.row]);
   const rejected: { row: number; erp_code: string; item_name: string; errors: { column: string; value: string; message: string }[] }[] = [];
   const unmatched: { row: number; erp_code: string; item_name: string }[] = [];
+  const newRows: { row: number; erp_code: string; item_name: string; fields: Record<string, any> }[] = [];
+  const names = new Map<string, number>();
   const changes: any[] = [];
   const perItem = new Map<number, any>();
   const seen = new Set<number>();
   let matched = 0, okRows = 0;
   for (const r of rows) {
     const it = byErp.get(r.erp_code);
-    if (!it) { unmatched.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name }); continue; }
+    if (!it) {
+      // A row the Siloam list does not know, with status New Item, is a new item the principal adds.
+      if (allowNew && /^(new\s*item|item baru)$/i.test((r.cells.status || "").trim())) {
+        const key = r.item_name.trim().toLowerCase();
+        const errs: { column: string; value: string; message: string }[] = [];
+        if (!r.item_name.trim()) errs.push({ column: "Item Name", value: "", message: "nama item baru wajib diisi" });
+        if (names.has(key)) errs.push({ column: "Item Name", value: r.item_name, message: `nama dobel dengan baris ${names.get(key)}` });
+        names.set(key, r.row);
+        const chk = checkRow(r.cells, allowed.filter((k) => k !== "status"));
+        errs.push(...chk.errors);
+        if (errs.length) { rejected.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name, errors: errs }); continue; }
+        newRows.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name.trim(), fields: Object.fromEntries(chk.changes.map((c) => [c.field, c.value])) });
+        continue;
+      }
+      unmatched.push({ row: r.row, erp_code: r.erp_code, item_name: r.item_name });
+      continue;
+    }
     matched++; seen.add(it.id);
     const dup = count.get(r.erp_code) || [];
     if (dup.length > 1) {
@@ -4755,7 +4896,7 @@ function planTemplateRows(rows: TemplateRow[], items: any[], allowed: string[]) 
       perItem.set(it.id, { ...(perItem.get(it.id) || {}), [ch.field]: ch.value });
     }
   }
-  return { byErp, rejected, unmatched, changes, perItem, seen, matched, okRows, total: rows.length };
+  return { byErp, rejected, unmatched, newRows, changes, perItem, seen, matched, okRows: okRows + newRows.length, total: rows.length };
 }
 
 // Staff import: read the filled template, show every change, apply only on request.
@@ -4768,7 +4909,7 @@ app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file
   let rows: TemplateRow[];
   try { rows = await readTemplate(file.buffer); } catch (e: any) { return res.status(400).json({ error: e.message }); }
   const items = cycleItemsMap.get(cid) || [];
-  const plan = planTemplateRows(rows, items, STAFF_COLUMNS);
+  const plan = planTemplateRows(rows, items, STAFF_COLUMNS, true);
   const locked = plan.changes.filter((x) => lockedStepFor(c, x.field));
   const byCol: Record<string, number> = {};
   plan.changes.forEach((x) => { byCol[x.header] = (byCol[x.header] || 0) + 1; });
@@ -4787,11 +4928,13 @@ app.post("/api/admin/nego/cycles/:cid/import", withFiles(fileUpload.single("file
       if (done.length) { applied += done.length; touched.add(id); }
       if (done.includes("on_disc_nett") || done.includes("on_disc_disc")) syncFinalScheme(c, it);
     }
+    for (const nr of plan.newRows) { addNewItem(cid, { erp_code: nr.erp_code, item_name: nr.item_name, ...nr.fields }, actingUser().email); applied++; touched.add(-applied); }
     const scan = scanCycleAnomalies(cid);
     logCycle(cid, "cycle.import", { items: touched.size, changes: applied, locked: locked.length, reason: reason || null, file: file.originalname, rejected_rows: plan.rejected.length });
     return res.json({ applied_items: touched.size, applied_changes: applied, rejected_rows: plan.rejected.length, scan: { found: scan.open } });
   }
   res.json({
+    new_items: plan.newRows.map((n) => ({ row: n.row, item_name: n.item_name, erp_code: n.erp_code || null })),
     rows_in_file: plan.total, ok_rows: plan.okRows, rejected_rows: plan.rejected.length, matched: plan.matched,
     unmatched_count: plan.unmatched.length, unmatched: plan.unmatched.slice(0, 50),
     not_in_file: items.length - plan.seen.size, items_changed: plan.perItem.size, changes: plan.changes, changes_by_column: byCol,
@@ -4812,7 +4955,7 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req: Re
   try { rows = await readTemplate(file.buffer); } catch (e: any) { return res.status(400).json({ error: `${e.message}` }); }
   const allowed = step === "rfq" ? ["brand", "ref", "ai", "status", "remarks", "rfqQty", "rfqHna", "rfqDisc", "reason"] : step === "feedback1" ? ["fb1Disc"] : [];
   const items = cycleItemsMap.get(cycle.id) || [];
-  const plan = planTemplateRows(rows, items, allowed);
+  const plan = planTemplateRows(rows, items, allowed, step === "rfq");
   const overwrites = plan.changes.filter((x) => x.overwrites);
   if (String(req.body?.apply) === "1") {
     // The portal already holds other values for these cells: the principal must confirm the overwrite.
@@ -4824,15 +4967,17 @@ app.post("/api/p/template", withFiles(fileUpload.single("file")), async (req: Re
       const it = items.find((i) => i.id === id)!;
       if (recordChange(it, ch, { source: "upload Excel (principal)", by: `principal:${cycle.principal.name}` }).length) { applied++; it.needs_check = false; }
     }
+    for (const nr of plan.newRows) { addNewItem(cycle.id, { erp_code: nr.erp_code, item_name: nr.item_name, ...nr.fields }, `principal:${cycle.principal.name}`); applied++; }
     scanCycleAnomalies(cycle.id);
-    logCycle(cycle.id, "principal.excel", { step, rows: plan.total, applied, rejected_rows: plan.rejected.length }, `principal:${cycle.principal.name}`);
-    return res.json({ applied, rejected_rows: plan.rejected.length });
+    logCycle(cycle.id, "principal.excel", { step, rows: plan.total, applied, new_items: plan.newRows.length, rejected_rows: plan.rejected.length }, `principal:${cycle.principal.name}`);
+    return res.json({ applied, new_items: plan.newRows.length, rejected_rows: plan.rejected.length });
   }
   res.json({
     total: plan.total, saved_rows: plan.okRows, error_rows: plan.rejected.length, accepted: plan.okRows,
     rejected: plan.rejected.map((r) => ({ ...r, messages: r.errors.map((e) => ({ id: `${e.column} "${e.value}": ${e.message}`, en: `${e.column} "${e.value}": ${e.message}` })) })),
     changes: plan.changes.map((x) => ({ erp_code: x.erp_code, item_name: x.item_name, header: x.header, old: x.old, new: x.new, overwrites: x.overwrites })),
     overwrite_count: overwrites.length, changed_items: plan.perItem.size,
+    new_items: plan.newRows.map((n) => ({ row: n.row, item_name: n.item_name, erp_code: n.erp_code || null })),
     read_errors: [], unmatched_count: plan.unmatched.length, notes: [],
   });
 });
@@ -4855,18 +5000,19 @@ function analysisColumns(mode: "pre" | "post", years: string[]): AnCol[] {
   const add = (group: string, key: string, label: string, kind: AnCol["kind"] = "text") => c.push({ key, label, group, kind });
   add("Identitas", "erp_code", "ERP Code"); add("Identitas", "item_name", "Item Name"); add("Identitas", "principal", "Principal"); add("Identitas", "brand", "Brand");
   add("Identitas", "item_status", "Status"); add("Identitas", "po_unit_text", "Satuan PO"); add("Identitas", "bucket", "Bucket"); add("Identitas", "binding", "Binding");
+  add("Identitas", "catalog_no", "Catalog No. (REF)"); add("Identitas", "active_ingredient", "Active Ingredient");
   add("Formularium", "form_hna", "HNA", "money"); add("Formularium", "form_conv", "Konversi", "num"); add("Formularium", "form_disc", "Disc", "pct");
   add("Formularium", "form_nett_price", "Price (Nett)", "price"); add("Formularium", "form_base_price", "Base Price", "price"); add("Formularium", "form_margin_unit", "Margin/Unit", "price");
   add("Formularium", "hna_sbp", "HNA for SBP", "money"); add("Formularium", "form_kind", "Jenis");
   add("MOU", "mou_qty", "Qty", "num"); add("MOU", "mou_hna", "HNA", "money"); add("MOU", "mou_disc", "Disc", "pct"); add("MOU", "mou_unit_price", "Price/pc", "price");
   add("RFQ", "rfq_qty", "Qty", "num"); add("RFQ", "rfq_hna", "HNA", "money"); add("RFQ", "rfq_disc", "Disc", "pct"); add("RFQ", "rfq_unit_price", "Price/pc", "price");
   add("RFQ", "rfq_hna_pc", "HNA/PCS", "price"); add("RFQ", "base_margin_price", "Base Price", "price"); add("RFQ", "margin_pc_rfq", "Margin/PCS", "price");
+  add("Acuan", "bench_tag", "Pembanding"); add("Acuan", "primary_bench", "Harga acuan/pc", "price"); add("Acuan", "change_pct", "vs Acuan %", "pct");
   add("Variance", "variance_hna_pc", "Variance HNA/PCS", "price"); add("Variance", "variance_disc", "Variance Disc", "pct");
   add("Counter offer", "co_disc", "Disc", "pct"); add("Counter offer", "co_unit_price", "Price/pc", "price"); add("Counter offer", "margin_pc_co", "Margin/pc", "price");
   add("Feedback I", "fb1_disc", "Disc", "pct"); add("Feedback I", "fb1_unit_price", "Price/pc", "price"); add("Feedback I", "margin_pc_fb1", "Margin/pc", "price");
   if (mode === "post") {
-    add("FIN (Online Nego)", "on_disc", "Disc", "pct"); add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price"); add("FIN (Online Nego)", "margin_pc_on", "Margin/pc", "price");
-    add("FIN (Online Nego)", "proceed_bak", "Lanjut ke BAK");
+    add("FIN (Online Nego)", "on_disc", "Disc", "pct"); add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price");
   }
   for (const y of years) {
     add(`PO ${y}`, `po_${y}_qty`, "Qty (pcs)", "num"); add(`PO ${y}`, `po_${y}_avg`, "Avg Price/pc (+PPN)", "price");
@@ -4876,7 +5022,7 @@ function analysisColumns(mode: "pre" | "post", years: string[]): AnCol[] {
   add(`PO ${cur} setahun`, "annual_pcs", "Qty setahun (pcs)", "num"); add(`PO ${cur} setahun`, "po_annualized_value_ppn", "Nilai PO setahun (+PPN)", "money");
   const g = mode === "pre" ? "Hasil Pre-Nego" : "Hasil Post-Nego";
   add(g, "sel_price", "Unit Price (+PPN)", "price"); add(g, "sel_total_cost", "Total Cost", "money"); add(g, "sel_cost_impact", "Cost Impact", "money"); add(g, "sel_cost_impact_pct", "Cost Impact %", "pct");
-  add(g, "sel_total_margin", "Total Margin", "money"); add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money"); add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money");
+  add(g, "sel_total_margin", "Total Margin", "money"); add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money"); add(g, "sel_margin_impact_po_pct", "Margin Impact vs PO %", "pct"); add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money"); add(g, "sel_margin_impact_form_pct", "Margin Impact vs Formularium %", "pct");
   add("Info", "bench_pp", "Market/pc", "price"); add("Info", "sbp", "SBP?"); add("Info", "need_sbp", "Need SBP after nego?"); add("Info", "notes", "Notes"); add("Info", "findings", "Findings", "num");
   return c;
 }
@@ -4902,6 +5048,8 @@ function analysisFor(cid: number, mode: "pre" | "post", stepKey?: string) {
       sel_price: m?.price ?? null, sel_total_cost: m?.total_cost ?? null, sel_cost_impact: m?.cost_impact ?? null,
       sel_cost_impact_pct: m?.cost_impact != null && en.po_annualized_value_ppn ? m.cost_impact / en.po_annualized_value_ppn : null,
       sel_total_margin: m?.total_margin ?? null, sel_margin_impact_po: m?.margin_impact_po ?? null, sel_margin_impact_form: m?.margin_impact_form ?? null,
+      sel_margin_impact_po_pct: m?.margin_impact_po != null && en.margin_pc_po != null && en.annual_pcs && en.margin_pc_po !== 0 ? m.margin_impact_po / Math.abs(en.margin_pc_po * en.annual_pcs) : null,
+      sel_margin_impact_form_pct: m?.margin_impact_form != null && en.margin_pc_formulary != null && en.annual_pcs && en.margin_pc_formulary !== 0 ? m.margin_impact_form / Math.abs(en.margin_pc_formulary * en.annual_pcs) : null,
       bench_pp: mk?.price_pp ?? null, findings: findingsBy.get(en.id) || 0,
       proceed_bak: en.proceed_bak === true ? "Ya" : "", sbp: en.sbp == null ? "" : en.sbp ? "Ya" : "Tidak", need_sbp: en.need_sbp == null ? "" : en.need_sbp ? "Ya" : "Tidak",
     };
@@ -5072,7 +5220,7 @@ app.get("/api/admin/nego/cycles/:cid/package.xlsx", async (req: Request, res: Re
   const rows = packageRows(cid);
   const meta = packageMeta(cid); meta.sku_count = rows.length;
   logCycle(cid, "package.excel", { rows: rows.length });
-  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}.xlsx`);
+  await sendWorkbook(res, await buildConfirmationWorkbook(meta, rows), `Confirmation_${c.principal.name}_${meta.category}_${String(c.binding).replace(/\s+/g, "")}.xlsx`);
 });
 
 async function sendDocx(res: Response, buf: Buffer, filename: string) {
@@ -5113,6 +5261,29 @@ app.get("/api/admin/nego/cycles/:cid/pks.docx", async (req: Request, res: Respon
     logCycle(cid, "package.pks", { template: tpl?.name || "built-in" });
     await sendDocx(res, buf, `PKS_${c.principal.name}.docx`);
   } catch (e: any) { res.status(500).json({ error: `Gagal membuat PKS: ${e.message}` }); }
+});
+
+// One click: the BAK (Word), the Excel Confirmation it refers to (attachment) and the PKS draft, in one ZIP.
+app.get("/api/admin/nego/cycles/:cid/package.zip", async (req: Request, res: Response) => {
+  const cid = Number(req.params.cid);
+  const c = cycleOf(cid);
+  if (!c) return res.status(404).json({ error: "No such negotiation" });
+  const pkg = computePackage(cid);
+  if (!pkg.ready) return res.status(400).json({ error: `Package belum siap: ${pkg.problems.join(" ")}` });
+  const rows = packageRows(cid);
+  const meta = packageMeta(cid); meta.sku_count = rows.length;
+  try {
+    const safe = `${c.principal.name}_${meta.category}`.replace(/[^\w.\- ]/g, "_");
+    const bakTpl = docTemplates[meta.scheme === "Nett" ? "bak_nett" : "bak_disc"], pksTpl = docTemplates.pks;
+    const zip = new JSZip();
+    zip.file(`1_BAK_${meta.scheme}_${safe}.docx`, bakTpl ? await fillDocxTemplate(bakTpl.data, meta, rows) : await buildBakDocx(meta, rows));
+    zip.file(`2_Lampiran_Confirmation_${safe}_${String(c.binding).replace(/\s+/g, "")}.xlsx`, Buffer.from(await (await buildConfirmationWorkbook(meta, rows)).xlsx.writeBuffer()));
+    zip.file(`3_PKS_${safe}.docx`, pksTpl ? await fillDocxTemplate(pksTpl.data, meta, rows) : await buildPksDocx(meta, rows));
+    logCycle(cid, "package.zip", { scheme: meta.scheme, rows: rows.length });
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="Package_${safe}.zip"`);
+    res.end(await zip.generateAsync({ type: "nodebuffer" }));
+  } catch (e: any) { res.status(500).json({ error: `Gagal membuat package: ${e.message}` }); }
 });
 
 // Admin: Siloam's Word templates for the BAK (per scheme) and the PKS. {{principal}}, {{tanggal}}, {{kontrak_mulai}},

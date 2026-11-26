@@ -33,8 +33,8 @@ export function confRow(no: number, name: string, code: string, uom: number, bas
 export async function buildConfirmationWorkbook(meta: DocMeta, rows: ConfRow[]): Promise<ExcelJS.Workbook> {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Confirmation");
-  ws.addRow([`Agreed prices: ${meta.principal}`]).font = { bold: true, size: 13 };
-  ws.addRow([`Contract ${meta.contract_start} to ${meta.contract_end} · Binding ${meta.binding} · Scheme ${meta.scheme}`]);
+  ws.addRow([`Agreed prices: ${meta.principal} (${meta.category})`]).font = { bold: true, size: 13 };
+  ws.addRow([`Contract ${meta.contract_start} to ${meta.contract_end} · Binding ${meta.binding}${meta.scheme !== (meta.binding === "Nett" ? "Nett" : "Disc") ? ` · Final scheme ${meta.scheme}` : ""}`]);
   ws.addRow([]);
   const head = ws.addRow(["No", "Item Name", "ERP Code", "UOM", "Base Unit", "HNA", "Disc", "Unit Price", "Unit Price (+VAT)"]);
   head.font = { bold: true, color: { argb: "FFFFFFFF" } };

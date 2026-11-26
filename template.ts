@@ -88,7 +88,7 @@ export async function buildTemplate(_unused: string | null, items: any[], o: Tem
 
   // Hints that name the right columns (taken from the column map, never typed by hand).
   const hint = (k: string, text: string) => { if (at(k)) { const c = ws.getCell(6, at(k)); c.value = text; c.font = { italic: true, size: 8, color: { argb: "FF555555" } }; c.alignment = { wrapText: true, vertical: "top" }; } };
-  hint("status", "Active atau Discontinue. Discontinue wajib dengan surat DC (lampirkan di portal).");
+  hint("status", "Active atau Discontinue. Item baru: tulis di baris paling bawah dengan status New Item. Discontinue: lampirkan surat DC di portal.");
   hint("rfqQty", `Jumlah pcs per kemasan. Basis HNA kolom ${L.rfqHna}.`);
   hint("rfqHna", `HNA per satuan pembelian (kolom ${L.rfqQty}), sebelum PPN.`);
   hint("rfqDisc", "Angka 0 sampai 100 (15 = 15%). Maksimal 2 desimal.");
@@ -165,7 +165,7 @@ export async function buildTemplate(_unused: string | null, items: any[], o: Tem
     if (!at(k)) return;
     for (let r = FIRST_ROW; r <= LAST_ROW; r++) ws.getCell(r, at(k)).dataValidation = def;
   };
-  dv("status", { type: "list", allowBlank: true, formulae: ['"Active,Discontinue"'], showErrorMessage: true, errorTitle: "Item Status", error: "Pilih Active atau Discontinue." });
+  dv("status", { type: "list", allowBlank: true, formulae: ['"Active,Discontinue,New Item"'], showErrorMessage: true, errorTitle: "Item Status", error: "Pilih Active, Discontinue, atau New Item." });
   dv("rfqQty", { type: "whole", operator: "greaterThanOrEqual", allowBlank: true, formulae: [1], showErrorMessage: true, errorTitle: "Qty/PO Unit", error: "Isi bilangan bulat minimal 1." });
   dv("rfqHna", { type: "decimal", operator: "greaterThan", allowBlank: true, formulae: [0], showErrorMessage: true, errorTitle: "HNA", error: "HNA harus lebih dari 0." });
   for (const k of ["rfqDisc", "fb1Disc"]) dv(k, { type: "decimal", operator: "between", allowBlank: true, formulae: [0, 99.99], showErrorMessage: true, errorTitle: "Diskon", error: "Isi angka 0 sampai 99,99 (15 = 15%)." });
@@ -234,7 +234,7 @@ export async function readTemplate(buffer: Buffer): Promise<TemplateRow[]> {
   return rows;
 }
 
-const STATUS_WORDS: Record<string, string> = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue" };
+const STATUS_WORDS: Record<string, string> = { active: "Active", aktif: "Active", discontinue: "Discontinue", discontinued: "Discontinue", "tidak dijual lagi": "Discontinue", inactive: "Discontinue", "new item": "New Item", newitem: "New Item", "item baru": "New Item" };
 
 export interface CellChange { field: string; header: string; value: any }
 export interface RowCheck { changes: CellChange[]; errors: { column: string; value: string; message: string }[] }
@@ -272,7 +272,7 @@ export function checkRow(cells: Record<string, string>, allowed: string[]): RowC
     if (m.kind === "text") { changes.push({ field: m.field, header: m.header, value: raw.slice(0, 300) }); continue; }
     if (m.kind === "status") {
       const v = STATUS_WORDS[raw.toLowerCase()];
-      if (!v) bad("pakai Active atau Discontinue"); else changes.push({ field: m.field, header: m.header, value: v });
+      if (!v) bad("pakai Active, Discontinue, atau New Item"); else changes.push({ field: m.field, header: m.header, value: v });
       continue;
     }
     if (m.kind === "reason") {

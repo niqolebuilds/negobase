@@ -24,6 +24,7 @@ const FILTERS = [
   ["all", "All items"],
   ["active", "Active items only"],
   ["discontinued", "Discontinued only"],
+  ["new", "New items (cek Siloam)"],
   ["anomalies", "With open findings"],
   ["increase", "Price up vs acuan (+%)"],
   ["decrease", "Price down vs acuan (-%)"],
@@ -403,7 +404,7 @@ function importPrincipals() {
   const file = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "file" });
   const out = el("div", { role: "status" });
   const form = el("form", { class: "upload-form" },
-    el("p", { class: "small" }, "Use the template. Same fields as Add principal: principal, distributor (optional), category, negotiation type, binding, items, current MOU period and contact."),
+    el("p", { class: "small" }, "Use the template. Same fields as Add principal: principal, distributor (optional), category, negotiation type, binding, current MOU period and contact. Names are saved in capitals. SKUs are tagged to principals in the period upload, not here."),
     el("div", { class: "actions" },
       el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.xlsx", text: "Download Excel template ⤓" }),
       el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "Download CSV template ⤓" })),
@@ -418,7 +419,8 @@ function importPrincipals() {
     try {
       const r = await upload("/api/admin/nego/principals/import", fd);
       clear(out).append(el("p", { class: r.errors.length ? "warn-text" : "good-text", text: `${r.added} added, ${r.updated} updated${r.errors.length ? `, ${r.errors.length} skipped` : ""}.` }),
-        r.errors.length ? el("ul", { class: "errors" }, r.errors.map((x) => el("li", { text: x }))) : null);
+        r.errors.length ? el("ul", { class: "errors" }, r.errors.map((x) => el("li", { text: x }))) : null,
+        r.fixed && r.fixed.length ? el("details", { open: "" }, el("summary", { text: `${r.fixed.length} nama diubah otomatis ke huruf besar` }), el("ul", { class: "small" }, r.fixed.map((f) => el("li", { text: `Baris ${f.row}: ${f.from} → ${f.to}` })))) : null);
       afterPrincipalChange();
     } catch (ex) { clear(out).append(el("p", { class: "error", text: ex.message })); }
   });
@@ -773,7 +775,7 @@ async function renderItems(body) {
   const q = el("input", { type: "search", id: "ng-q", value: p.q || null, placeholder: "Search ERP code, name, brand, REF…" });
   
   const statusSelect = el("select", { id: "ng-status" },
-    [["all", "All statuses"], ["Active", "Active only"], ["Discontinue", "Discontinued only"]].map(([k, l]) =>
+    [["all", "All statuses"], ["Active", "Active only"], ["Discontinue", "Discontinued only"], ["New Item", "New items"]].map(([k, l]) =>
       el("option", { value: k, text: l })
     )
   );
@@ -1011,7 +1013,7 @@ async function loadItems(wrap, pager) {
           text: "⚲",
           onclick: (e) => {
             e.stopPropagation();
-            toggleColFilterMenu(th, "status", ["Active", "Discontinue"], p.status, (val) => {
+            toggleColFilterMenu(th, "status", ["Active", "Discontinue", "New Item"], p.status, (val) => {
               p.status = val;
               p.offset = 0;
               loadItems(wrap, pager);
@@ -1390,7 +1392,7 @@ function renderItemMarginCard(it) {
 }
 
 const BOOL_FIELDS = new Set(["sbp", "need_sbp", "proceed_bak"]);
-const SELECT_FIELDS = { item_status: ["", "Active", "Discontinue"], bucket: ["", "Consump", "Charge"] };
+const SELECT_FIELDS = { item_status: ["", "Active", "Discontinue", "New Item"], bucket: ["", "Consump", "Charge"] };
 
 async function openItem(id) {
   const body = openPanel(el("p", { class: "muted", text: "Loading…" }));
@@ -1431,7 +1433,7 @@ async function openItem(id) {
   rsnBox.hidden = true;
   const drugs = (ng.ov.cycle.category || "") === "Drugs";
   for (const [sec, fields0] of EDIT_GROUPS) {
-    const fields = fields0.filter((f) => !(f === "catalog_no" && drugs) && !(f === "active_ingredient" && !drugs));
+    const fields = [...(sec === "rfq" && it.is_new ? ["erp_code", "item_name"] : []), ...fields0.filter((f) => !(f === "catalog_no" && drugs) && !(f === "active_ingredient" && !drugs))];
     const fs = el("fieldset", { class: SECTION_CLASS[sec] }, el("legend", { text: SECTION_SHORT[sec] }));
     const lockedHere = fields.some((f) => fieldLocked(f));
     if (lockedHere) fs.append(el("p", { class: "small muted", style: "margin-top: 0;", text: "🔒 Data step ini sudah terkunci karena negosiasi sudah melewatinya. Mengubahnya = koreksi: isi alasan di bawah." }));
@@ -1494,6 +1496,7 @@ async function openItem(id) {
     el("p", { class: "eyebrow", text: it.erp_code || "No ERP code" }),
     el("h2", { id: "drawer-title", text: it.item_name || "Unnamed item" }),
     el("p", { class: "muted small", text: [it.brand, drugs ? it.active_ingredient : it.catalog_no, it.item_status, it.bucket].filter(Boolean).join(" · ") }),
+    it.is_new && it.item_status === "New Item" ? el("p", { class: "reason-note co" }, el("b", { text: "Item baru dari principal. " }), "Isi ERP code resmi di bawah (sekarang kode sementara), lalu setujui lewat Findings atau ubah status ke Active.") : null,
     prices, facts, marginBox, reason,
     el("h3", { text: "Findings" }), findings,
     el("h3", { text: canWork() ? "Edit" : "Values" }), anyLocked ? el("p", { class: "small muted", text: "Data step yang sudah lewat terkunci. Koreksi hanya atas pengajuan principal." }) : null, form,
@@ -1725,12 +1728,13 @@ function importPreview(plan, file) {
     Object.keys(plan.changes_by_column).length ? el("p", { class: "small", text: `Changes by column: ${Object.entries(plan.changes_by_column).map(([k, v]) => `${k} ${v}`).join(" · ")}` }) : null,
     plan.errors.length ? el("details", { open: "" }, el("summary", { text: `${plan.errors.length} baris dengan error (sel yang benar tetap dihitung)` }),
       el("ul", { class: "errors" }, plan.errors.slice(0, 60).map((x) => el("li", { text: `Baris ${x.row} ${x.erp_code || ""}: ${x.message}` })))) : null,
+    plan.new_items && plan.new_items.length ? el("div", { class: "preview ok" }, el("b", { text: `${plan.new_items.length} item baru akan ditambahkan (status New Item, masuk Findings untuk dicek)` }), el("ul", { class: "small" }, plan.new_items.map((n) => el("li", { text: `Baris ${n.row}: ${n.item_name}` })))) : null,
     plan.unmatched.length ? el("p", { class: "small muted", text: `Not matched: ${plan.unmatched.slice(0, 6).map((u) => u.erp_code || u.item_name).join(", ")}${plan.unmatched_count > 6 ? "…" : ""}` }) : null);
   const reason = el("textarea", { rows: "2", placeholder: "Alasan koreksi (atas pengajuan principal)" });
   if (plan.locked_count) box.append(el("div", { class: "preview bad" },
     el("p", { class: "error", text: `${plan.locked_count} perubahan menyentuh data step yang sudah terkunci (${(plan.locked_columns || []).join(", ")}). Ini koreksi: hanya atas pengajuan principal, tercatat di riwayat item.` }),
     field("Alasan koreksi (wajib)", reason)));
-  if (plan.changes.length) {
+  if (plan.changes.length || (plan.new_items && plan.new_items.length)) {
     const t = el("table");
     table(t, [{ label: "Baris", get: (c) => c.row }, { label: "ERP", get: (c) => c.erp_code }, { label: "Item", get: (c) => c.item_name }, { label: "Column", get: (c) => c.header },
       { label: "Now", get: (c) => fmtAny(c.field, c.old) }, { label: "File", get: (c) => fmtAny(c.field, c.new) }], plan.changes.slice(0, 100));
@@ -1798,7 +1802,7 @@ async function renderMessages(box) {
     d.messages.length ? el("table", { class: "msg-table" }, el("thead", {}, el("tr", {}, ["When", "Message", "To", "Status", ""].map((h) => el("th", { text: h })))),
       el("tbody", {}, d.messages.map((m) => el("tr", {},
         el("td", { text: new Date(m.created_at).toLocaleString("en-GB") }),
-        el("td", { text: { "principal.step_opened": "Link for the step", "principal.reminder": "Deadline reminder", "siloam.step_submitted": "Notice to Siloam: principal sent", "siloam.mou_alert": "MOU alert" }[m.event] || m.event }),
+        el("td", { text: { "principal.step_opened": "Link for the step", "siloam.step_submitted": "Notice to Siloam: principal sent", "siloam.mou_alert": "MOU alert" }[m.event] || m.event }),
         el("td", { text: m.recipient || "—" }),
         el("td", {}, el("span", { class: `mstat s-${m.status}`, text: { queued: "Queued", sending: "Sending", sent: "Sent", failed: `Failed (${m.attempts} tries)`, skipped: "Not sent" }[m.status] || m.status }),
           m.last_error ? el("div", { class: "small muted", text: m.last_error }) : null),
@@ -1825,7 +1829,7 @@ function renderActivity(body) {
 // ---------- principal link ----------
 async function linkPanel(c) {
   const body = openPanel(el("p", { class: "eyebrow", text: "Principal link" }), el("h2", { id: "drawer-title", text: c.principal.name }));
-  const days = el("input", { type: "number", min: 1, max: 90, value: 14, id: "link-days" });
+  const days = el("input", { type: "number", min: 1, max: 90, placeholder: "ikut Engine settings", id: "link-days" });
   const out = el("div", { role: "status" });
   const list = el("div");
   const draw = (links) => {
@@ -1840,7 +1844,7 @@ async function linkPanel(c) {
   };
   const create = act("Create link", async () => {
     try {
-      const l = await send(`/api/admin/nego/cycles/${c.id}/links`, "POST", { days: +days.value || 14 });
+      const l = await send(`/api/admin/nego/cycles/${c.id}/links`, "POST", { days: +days.value || undefined });
       const url = location.origin + (l.path || l.url);
       const field = el("input", { value: url, readonly: "", id: "link-url" });
       clear(out).append(el("div", { class: "preview ok" },
@@ -2052,13 +2056,15 @@ async function drawPackage(box) {
     el("div", { class: "facts" }, [["SKU aktif", chk.active], ["Lanjut ke BAK", chk.flagged], ["Lengkap", chk.agreed], ["Tidak ikut BAK", chk.not_flagged], ["Discontinue", chk.discontinued]].map(([l, v]) => el("div", {}, el("span", { text: l }), el("b", { text: num(v) })))),
     chk.problems.length ? el("ul", { class: "errors" }, chk.problems.map((p) => el("li", { text: p }))) : null,
     chk.incomplete && chk.incomplete.length ? el("details", {}, el("summary", { text: `${chk.incomplete.length} SKU belum lengkap` }), el("ul", { class: "errors" }, chk.incomplete.slice(0, 50).map((x) => el("li", { text: `${x.erp_code} ${x.item_name}: ${x.missing.join(", ")}` })))) : null,
+    chk.templates ? el("p", { class: "small" }, el("b", { text: `Template BAK: ${chk.templates.bak.label.replace("BAK template - ", "")}` }), ` · ${chk.templates.bak.using}. Binding ${chk.templates.binding}${chk.templates.from_final_scheme ? `, skema final ${chk.templates.scheme}` : ""} → template ${chk.templates.scheme}. PKS: ${chk.templates.pks.using}. `, isAdmin() ? el("a", { href: "#admin/documents", text: "Ganti template →" }) : null) : null,
     canWork() ? el("div", { class: "actions" },
       act("Tandai semua SKU dengan harga FIN", async () => { try { const r = await send(`/api/admin/nego/cycles/${ng.cid}/bak-flags`, "POST", { mode: "agreed", value: true }); toast(`${r.changed} SKU ditandai`); drawPackage(box); } catch (e) { toast(e.message); } }, "secondary"),
       act("Hapus semua tanda", async () => { try { const r = await send(`/api/admin/nego/cycles/${ng.cid}/bak-flags`, "POST", { value: false }); toast(`${r.changed} tanda dihapus`); drawPackage(box); } catch (e) { toast(e.message); } }, "ghost")) : null,
     canWork() && chk.ready ? el("div", { class: "actions" },
-      dl(`/api/admin/nego/cycles/${ng.cid}/package.xlsx`, "1 · Excel Confirmation"),
-      dl(`/api/admin/nego/cycles/${ng.cid}/bak.docx`, "2 · Draft BAK (Word)", "secondary"),
-      dl(`/api/admin/nego/cycles/${ng.cid}/pks.docx`, "3 · Draft PKS (Word)", "secondary")) : null));
+      dl(`/api/admin/nego/cycles/${ng.cid}/package.zip`, "Unduh semua (ZIP: BAK + lampiran Excel + PKS)"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/package.xlsx`, "Excel Confirmation", "secondary"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/bak.docx`, "Draft BAK (Word)", "secondary"),
+      dl(`/api/admin/nego/cycles/${ng.cid}/pks.docx`, "Draft PKS (Word)", "secondary")) : null));
   if (!canWork()) return;
   let docs;
   try { docs = await api(`/api/admin/nego/cycles/${ng.cid}/documents`); } catch (_) { return; }
