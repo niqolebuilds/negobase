@@ -404,7 +404,7 @@ function importPrincipals() {
   const file = el("input", { type: "file", accept: ".csv,.xlsx", class: "sr-only", name: "file" });
   const out = el("div", { role: "status" });
   const form = el("form", { class: "upload-form" },
-    el("p", { class: "small" }, "Use the template. Same fields as Add principal: principal, distributor (optional), category, negotiation type, binding, items, current MOU period and contact."),
+    el("p", { class: "small" }, "Use the template. Same fields as Add principal: principal, distributor (optional), category, negotiation type, binding, current MOU period and contact. Names are saved in capitals. SKUs are tagged to principals in the period upload, not here."),
     el("div", { class: "actions" },
       el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.xlsx", text: "Download Excel template ⤓" }),
       el("a", { class: "act ghost small-btn", href: "/api/admin/nego/principals-template.csv", text: "Download CSV template ⤓" })),
@@ -419,7 +419,8 @@ function importPrincipals() {
     try {
       const r = await upload("/api/admin/nego/principals/import", fd);
       clear(out).append(el("p", { class: r.errors.length ? "warn-text" : "good-text", text: `${r.added} added, ${r.updated} updated${r.errors.length ? `, ${r.errors.length} skipped` : ""}.` }),
-        r.errors.length ? el("ul", { class: "errors" }, r.errors.map((x) => el("li", { text: x }))) : null);
+        r.errors.length ? el("ul", { class: "errors" }, r.errors.map((x) => el("li", { text: x }))) : null,
+        r.fixed && r.fixed.length ? el("details", { open: "" }, el("summary", { text: `${r.fixed.length} nama diubah otomatis ke huruf besar` }), el("ul", { class: "small" }, r.fixed.map((f) => el("li", { text: `Baris ${f.row}: ${f.from} → ${f.to}` })))) : null);
       afterPrincipalChange();
     } catch (ex) { clear(out).append(el("p", { class: "error", text: ex.message })); }
   });
