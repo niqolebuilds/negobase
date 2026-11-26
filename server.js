@@ -1976,7 +1976,7 @@ function scanCycleAnomalies(cid) {
         );
       }
     }
-    if (en.rfq_unit_price != null && acuan && acuan > 0) {
+    if (en.rfq_unit_price != null && acuan && acuan > 0 && !(raw.rfq_disc >= 1)) {
       const drop = (acuan - en.rfq_unit_price) / acuan;
       if (drop > downLimit) {
         pushFinding(

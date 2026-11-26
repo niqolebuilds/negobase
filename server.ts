@@ -1368,7 +1368,7 @@ function scanCycleAnomalies(cid: number) {
       }
     }
     // 2. RFQ price down > 0.5%
-    if (en.rfq_unit_price != null && acuan && acuan > 0) {
+    if (en.rfq_unit_price != null && acuan && acuan > 0 && !(raw.rfq_disc >= 1)) {   // a wrong discount format is its own finding
       const drop = (acuan - en.rfq_unit_price) / acuan;
       if (drop > downLimit) {
         pushFinding(raw, "price_decrease_rfq", `Harga RFQ turun >${(downLimit * 100).toString().replace(".", ",")}%`, "high",
