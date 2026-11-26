@@ -5004,18 +5004,19 @@ function analysisColumns(mode: "pre" | "post", years: string[]): AnCol[] {
   const add = (group: string, key: string, label: string, kind: AnCol["kind"] = "text") => c.push({ key, label, group, kind });
   add("Identitas", "erp_code", "ERP Code"); add("Identitas", "item_name", "Item Name"); add("Identitas", "principal", "Principal"); add("Identitas", "brand", "Brand");
   add("Identitas", "item_status", "Status"); add("Identitas", "po_unit_text", "Satuan PO"); add("Identitas", "bucket", "Bucket"); add("Identitas", "binding", "Binding");
+  add("Identitas", "catalog_no", "Catalog No. (REF)"); add("Identitas", "active_ingredient", "Active Ingredient");
   add("Formularium", "form_hna", "HNA", "money"); add("Formularium", "form_conv", "Konversi", "num"); add("Formularium", "form_disc", "Disc", "pct");
   add("Formularium", "form_nett_price", "Price (Nett)", "price"); add("Formularium", "form_base_price", "Base Price", "price"); add("Formularium", "form_margin_unit", "Margin/Unit", "price");
   add("Formularium", "hna_sbp", "HNA for SBP", "money"); add("Formularium", "form_kind", "Jenis");
   add("MOU", "mou_qty", "Qty", "num"); add("MOU", "mou_hna", "HNA", "money"); add("MOU", "mou_disc", "Disc", "pct"); add("MOU", "mou_unit_price", "Price/pc", "price");
   add("RFQ", "rfq_qty", "Qty", "num"); add("RFQ", "rfq_hna", "HNA", "money"); add("RFQ", "rfq_disc", "Disc", "pct"); add("RFQ", "rfq_unit_price", "Price/pc", "price");
   add("RFQ", "rfq_hna_pc", "HNA/PCS", "price"); add("RFQ", "base_margin_price", "Base Price", "price"); add("RFQ", "margin_pc_rfq", "Margin/PCS", "price");
+  add("Acuan", "bench_tag", "Pembanding"); add("Acuan", "primary_bench", "Harga acuan/pc", "price"); add("Acuan", "change_pct", "vs Acuan %", "pct");
   add("Variance", "variance_hna_pc", "Variance HNA/PCS", "price"); add("Variance", "variance_disc", "Variance Disc", "pct");
   add("Counter offer", "co_disc", "Disc", "pct"); add("Counter offer", "co_unit_price", "Price/pc", "price"); add("Counter offer", "margin_pc_co", "Margin/pc", "price");
   add("Feedback I", "fb1_disc", "Disc", "pct"); add("Feedback I", "fb1_unit_price", "Price/pc", "price"); add("Feedback I", "margin_pc_fb1", "Margin/pc", "price");
   if (mode === "post") {
-    add("FIN (Online Nego)", "on_disc", "Disc", "pct"); add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price"); add("FIN (Online Nego)", "margin_pc_on", "Margin/pc", "price");
-    add("FIN (Online Nego)", "proceed_bak", "Lanjut ke BAK");
+    add("FIN (Online Nego)", "on_disc", "Disc", "pct"); add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price");
   }
   for (const y of years) {
     add(`PO ${y}`, `po_${y}_qty`, "Qty (pcs)", "num"); add(`PO ${y}`, `po_${y}_avg`, "Avg Price/pc (+PPN)", "price");
@@ -5025,7 +5026,7 @@ function analysisColumns(mode: "pre" | "post", years: string[]): AnCol[] {
   add(`PO ${cur} setahun`, "annual_pcs", "Qty setahun (pcs)", "num"); add(`PO ${cur} setahun`, "po_annualized_value_ppn", "Nilai PO setahun (+PPN)", "money");
   const g = mode === "pre" ? "Hasil Pre-Nego" : "Hasil Post-Nego";
   add(g, "sel_price", "Unit Price (+PPN)", "price"); add(g, "sel_total_cost", "Total Cost", "money"); add(g, "sel_cost_impact", "Cost Impact", "money"); add(g, "sel_cost_impact_pct", "Cost Impact %", "pct");
-  add(g, "sel_total_margin", "Total Margin", "money"); add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money"); add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money");
+  add(g, "sel_total_margin", "Total Margin", "money"); add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money"); add(g, "sel_margin_impact_po_pct", "Margin Impact vs PO %", "pct"); add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money"); add(g, "sel_margin_impact_form_pct", "Margin Impact vs Formularium %", "pct");
   add("Info", "bench_pp", "Market/pc", "price"); add("Info", "sbp", "SBP?"); add("Info", "need_sbp", "Need SBP after nego?"); add("Info", "notes", "Notes"); add("Info", "findings", "Findings", "num");
   return c;
 }
@@ -5051,6 +5052,8 @@ function analysisFor(cid: number, mode: "pre" | "post", stepKey?: string) {
       sel_price: m?.price ?? null, sel_total_cost: m?.total_cost ?? null, sel_cost_impact: m?.cost_impact ?? null,
       sel_cost_impact_pct: m?.cost_impact != null && en.po_annualized_value_ppn ? m.cost_impact / en.po_annualized_value_ppn : null,
       sel_total_margin: m?.total_margin ?? null, sel_margin_impact_po: m?.margin_impact_po ?? null, sel_margin_impact_form: m?.margin_impact_form ?? null,
+      sel_margin_impact_po_pct: m?.margin_impact_po != null && en.margin_pc_po != null && en.annual_pcs && en.margin_pc_po !== 0 ? m.margin_impact_po / Math.abs(en.margin_pc_po * en.annual_pcs) : null,
+      sel_margin_impact_form_pct: m?.margin_impact_form != null && en.margin_pc_formulary != null && en.annual_pcs && en.margin_pc_formulary !== 0 ? m.margin_impact_form / Math.abs(en.margin_pc_formulary * en.annual_pcs) : null,
       bench_pp: mk?.price_pp ?? null, findings: findingsBy.get(en.id) || 0,
       proceed_bak: en.proceed_bak === true ? "Ya" : "", sbp: en.sbp == null ? "" : en.sbp ? "Ya" : "Tidak", need_sbp: en.need_sbp == null ? "" : en.need_sbp ? "Ya" : "Tidak",
     };

@@ -5609,6 +5609,8 @@ function analysisColumns(mode, years) {
   add("Identitas", "po_unit_text", "Satuan PO");
   add("Identitas", "bucket", "Bucket");
   add("Identitas", "binding", "Binding");
+  add("Identitas", "catalog_no", "Catalog No. (REF)");
+  add("Identitas", "active_ingredient", "Active Ingredient");
   add("Formularium", "form_hna", "HNA", "money");
   add("Formularium", "form_conv", "Konversi", "num");
   add("Formularium", "form_disc", "Disc", "pct");
@@ -5628,6 +5630,9 @@ function analysisColumns(mode, years) {
   add("RFQ", "rfq_hna_pc", "HNA/PCS", "price");
   add("RFQ", "base_margin_price", "Base Price", "price");
   add("RFQ", "margin_pc_rfq", "Margin/PCS", "price");
+  add("Acuan", "bench_tag", "Pembanding");
+  add("Acuan", "primary_bench", "Harga acuan/pc", "price");
+  add("Acuan", "change_pct", "vs Acuan %", "pct");
   add("Variance", "variance_hna_pc", "Variance HNA/PCS", "price");
   add("Variance", "variance_disc", "Variance Disc", "pct");
   add("Counter offer", "co_disc", "Disc", "pct");
@@ -5639,8 +5644,6 @@ function analysisColumns(mode, years) {
   if (mode === "post") {
     add("FIN (Online Nego)", "on_disc", "Disc", "pct");
     add("FIN (Online Nego)", "on_unit_price", "Price/pc", "price");
-    add("FIN (Online Nego)", "margin_pc_on", "Margin/pc", "price");
-    add("FIN (Online Nego)", "proceed_bak", "Lanjut ke BAK");
   }
   for (const y of years) {
     add(`PO ${y}`, `po_${y}_qty`, "Qty (pcs)", "num");
@@ -5658,7 +5661,9 @@ function analysisColumns(mode, years) {
   add(g, "sel_cost_impact_pct", "Cost Impact %", "pct");
   add(g, "sel_total_margin", "Total Margin", "money");
   add(g, "sel_margin_impact_po", "Margin Impact vs PO", "money");
+  add(g, "sel_margin_impact_po_pct", "Margin Impact vs PO %", "pct");
   add(g, "sel_margin_impact_form", "Margin Impact vs Formularium", "money");
+  add(g, "sel_margin_impact_form_pct", "Margin Impact vs Formularium %", "pct");
   add("Info", "bench_pp", "Market/pc", "price");
   add("Info", "sbp", "SBP?");
   add("Info", "need_sbp", "Need SBP after nego?");
@@ -5696,6 +5701,8 @@ function analysisFor(cid, mode, stepKey) {
       sel_total_margin: m?.total_margin ?? null,
       sel_margin_impact_po: m?.margin_impact_po ?? null,
       sel_margin_impact_form: m?.margin_impact_form ?? null,
+      sel_margin_impact_po_pct: m?.margin_impact_po != null && en.margin_pc_po != null && en.annual_pcs && en.margin_pc_po !== 0 ? m.margin_impact_po / Math.abs(en.margin_pc_po * en.annual_pcs) : null,
+      sel_margin_impact_form_pct: m?.margin_impact_form != null && en.margin_pc_formulary != null && en.annual_pcs && en.margin_pc_formulary !== 0 ? m.margin_impact_form / Math.abs(en.margin_pc_formulary * en.annual_pcs) : null,
       bench_pp: mk?.price_pp ?? null,
       findings: findingsBy.get(en.id) || 0,
       proceed_bak: en.proceed_bak === true ? "Ya" : "",

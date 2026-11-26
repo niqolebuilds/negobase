@@ -218,9 +218,9 @@ await t("E2/E3: Confirmation columns, rounding, BAK and PKS Word files", async (
 
 await t("A7: analysis and report", async () => {
   const a = (await call("GET", `/api/nego/cycles/${cid}/analysis?mode=pre`)).j;
-  assert.ok(a.columns.length >= 60, `pre columns ${a.columns.length}`);
+  assert.equal(a.columns.length, 68, `pre columns ${a.columns.length}`);
   const b = (await call("GET", `/api/nego/cycles/${cid}/analysis?mode=post`)).j;
-  assert.ok(b.columns.length > a.columns.length, "post has the FIN columns");
+  assert.equal(b.columns.length, 70, `post columns ${b.columns.length}`);
   const rep = (await call("GET", "/api/admin/report")).j;
   assert.equal(rep.columns.length, 19);
   assert.ok(rep.fb1.length >= 1 && rep.fin.length >= 1);
