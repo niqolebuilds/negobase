@@ -216,6 +216,7 @@ function initZoomController() {
   } catch (_) {}
 
   const apply = (scale, save = true) => {
+    if (window.matchMedia("(max-width: 760px)").matches) scale = 1;   // no custom page zoom on a phone
     scale = Math.min(1.4, Math.max(0.7, Math.round(scale * 100) / 100));
     const pct = Math.round(scale * 100);
     document.documentElement.style.zoom = String(scale);
